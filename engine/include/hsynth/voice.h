@@ -34,14 +34,20 @@ struct VoiceContext {
     float lfo2 = 0.0f;
     float cc[4] = {};              // assignable controllers (ctl.cc1..4)
     const SampleSet* sampleSets[kNumLayers] = {};
+    uint32_t seq[kNumLayers] = {};    // round-robin counters (SFZ seq_position)
+    int keyswitch[kNumLayers] = {-1, -1, -1};  // active SFZ keyswitch per layer (-1 = default)
 };
 
 // Plays one SFZ region / WAV sample.
 class PcmPlayer {
 public:
-    void start(const Region* r, int key, float velocity, float startFrac, float velTrackScale, float sampleRate);
+    // gainDb: extra gain (release-trigger decay)
+    void start(const Region* r, int key, float velocity, float startFrac, float velTrackScale, float sampleRate,
+               float gainDb = 0.0f);
     void release();
     void stop() { region_ = nullptr; }
+    // Exclusive-group cut: fast fade (6 ms) or the region's normal release.
+    void cut();
     bool active() const { return region_ != nullptr; }
     bool oneShot() const { return region_ && region_->loopMode == LoopMode::OneShot; }
     const Region* region() const { return region_; }
@@ -51,16 +57,24 @@ public:
 
 private:
     float at(int c, int64_t idx) const;
+    float sampleAt(int c, int64_t idx, float f) const;
     const Region* region_ = nullptr;
     double pos_ = 0.0;
     double step_ = 1.0;
     double baseRatio_ = 1.0;
     int64_t end_ = 0;
+    int64_t delay_ = 0;       // frames until playback starts
+    int64_t envDelay_ = 0;    // frames until the region envelope starts
+    int64_t xfLen_ = 0;       // loop crossfade length (sample frames)
     bool released_ = false;
     bool looping_ = false;
     float gainL_ = 1.0f, gainR_ = 1.0f;
+    float fade_ = 1.0f, fadeStep_ = 0.0f;
+    float sr_ = 48000.0f;
     Adsr env_;
     bool useEnv_ = false;
+    Svf filt_[2];
+    float lp1_[2] = {}, lp1a_ = 0.0f;
 };
 
 class Voice {
@@ -73,6 +87,10 @@ public:
     void release();
     void steal();            // fast fade-out
     void stopLayer(int l);   // immediately stop PCM playback of a layer (sample set swap)
+    // SFZ exclusive groups: groups started by this voice (returns count), and
+    // cutting this voice's regions with off_by == group.
+    int startedGroups(int* out, int max) const;
+    void choke(int group);
     void hardStop() { active_ = false; }
     void applyExpression(EventType type, float value);
 
@@ -92,6 +110,7 @@ public:
     int matchKey = 60;       // key as received (before part transpose), for key-matched events
 
 private:
+    static constexpr int kMaxReleaseRegions = 4;
     struct Layer {
         LayerType type = LayerType::Off;
         VaOsc osc1, osc2;
@@ -103,6 +122,16 @@ private:
         float gain = 0;              // smoothed layer gain
         bool finished = false;
     };
+    void startReleaseRegions();
+    // SFZ release-trigger regions: played after note-off, outside the amp
+    // envelope / filter (they carry their own region envelope).
+    PcmPlayer relPcm_[kMaxReleaseRegions];
+    int relLayer_[kMaxReleaseRegions] = {};
+    bool relActive_ = false;
+    bool mainDone_ = false;  // layers / amp envelope finished, only release regions left
+    const SampleSet* sets_[kNumLayers] = {};
+    uint32_t seq_[kNumLayers] = {};
+    int keyswitch_[kNumLayers] = {-1, -1, -1};
 
     float modSource(ModSource s, const VoiceContext& ctx) const;
 

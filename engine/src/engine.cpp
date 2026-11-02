@@ -60,6 +60,7 @@ Engine::Engine()
         parts_[k].p = k == 0 ? p_ : partP_.get() + (size_t)(k - 1) * P::kPartParams;
         parts_[k].rng = Rng(0x9E3779B9u * (uint32_t)(k + 1));
         for (auto& ps : pendingSets_[k]) ps.store(nullptr);
+        for (auto& ks : keyswitch_[k]) ks = -1;
     }
     for (int t = 0; t < 2; ++t) {
         pendingIr_[t].store(nullptr);
@@ -334,10 +335,24 @@ void Engine::noteOn(int part, const Event& in) {
             if (v.active() && !v.released() && v.part == part) { partHeld = true; break; }
         inserts_[part].noteOn(e.key, !partHeld);
     }
+    // SFZ keyswitches and round-robin counters (per part and layer)
+    PartState& ps = parts_[part];
+    for (int l = 0; l < kNumLayers; ++l) {
+        const SampleSet* set = currentSets_[part][l];
+        if (!set) continue;
+        if (set->isKeyswitch(e.key)) keyswitch_[part][l] = e.key;
+        ps.ctx.keyswitch[l] = keyswitch_[part][l];
+        ps.ctx.seq[l] = seqCount_[part][l]++;
+    }
     Voice* v = allocateVoice(part);
-    v->start(e, parts_[part].ctx, ++ageCounter_, rng_.unipolar());
+    v->start(e, ps.ctx, ++ageCounter_, rng_.unipolar());
     v->part = part;
     v->matchKey = in.key;
+    int groups[8];
+    const int ng = v->startedGroups(groups, 8);
+    for (int g = 0; g < ng; ++g)
+        for (auto& o : voices_)
+            if (&o != v && o.active() && o.part == part) o.choke(groups[g]);
 }
 
 void Engine::noteOff(const Event& e, int part) {
@@ -475,6 +490,8 @@ void Engine::updatePartTargets() {
 void Engine::swapSampleSet(int part, int layer, SampleSet* s) {
     for (auto& v : voices_)
         if (v.part == part) v.stopLayer(layer);
+    keyswitch_[part][layer] = -1;
+    seqCount_[part][layer] = 0;
     if (currentSets_[part][layer] && !retired_.push(currentSets_[part][layer])) {
         // garbage queue full (collectGarbage not called): put the new set back
         // and retry next block.

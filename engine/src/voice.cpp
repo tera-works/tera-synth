@@ -5,9 +5,10 @@ namespace hsynth {
 // ---------------------------------------------------------------- PcmPlayer
 
 void PcmPlayer::start(const Region* r, int key, float velocity, float startFrac, float velTrackScale,
-                      float sampleRate) {
+                      float sampleRate, float gainDb) {
     region_ = r;
     released_ = false;
+    sr_ = sampleRate;
     const Sample* s = r->sample;
     end_ = r->end > 0 ? std::min<int64_t>(r->end, s->frames) : s->frames;
     int64_t off = std::max<int64_t>(0, r->offset);
@@ -16,19 +17,38 @@ void PcmPlayer::start(const Region* r, int key, float velocity, float startFrac,
     pos_ = (double)off;
     looping_ = (r->loopMode == LoopMode::Continuous || r->loopMode == LoopMode::Sustain) && r->loopEnd > r->loopStart + 1 &&
                r->loopStart >= 0 && r->loopEnd <= s->frames;
+    xfLen_ = 0;
+    if (looping_ && r->loopCrossfade > 0.0f)
+        xfLen_ = std::min<int64_t>({(int64_t)(r->loopCrossfade * s->sampleRate), r->loopStart, r->loopEnd - r->loopStart});
     baseRatio_ = std::exp2(((double)(key - r->keycenter) * r->pitchKeytrack / 100.0 + r->transpose) / 12.0 + r->tune / 1200.0);
     const float t = clampf(r->ampVeltrack / 100.0f * velTrackScale, 0.0f, 1.0f);
     const float vg = (1.0f - t) + t * velocity * velocity;
-    const float g = dbToGain(r->volumeDb) * vg;
+    const float g = dbToGain(r->volumeDb + gainDb + r->ampKeytrack * (float)(key - r->ampKeycenter)) * vg;
     gainL_ = g * std::min(1.0f, 1.0f - r->pan);
     gainR_ = g * std::min(1.0f, 1.0f + r->pan);
+    fade_ = 1.0f;
+    fadeStep_ = 0.0f;
+    delay_ = (int64_t)(std::max(0.0f, r->delay) * sampleRate);
     useEnv_ = r->ampeg.enabled;
+    envDelay_ = 0;
     if (useEnv_) {
         env_.setSampleRate(sampleRate);
         env_.set(std::max(0.0005f, r->ampeg.attack), std::max(0.001f, r->ampeg.decay), r->ampeg.sustain,
                  std::max(0.001f, r->ampeg.release));
+        env_.setHold(std::max(0.0f, r->ampeg.hold));
         env_.reset();
         env_.gate(true);
+        envDelay_ = (int64_t)(std::max(0.0f, r->ampeg.delay) * sampleRate);
+    }
+    if (r->filter != RegionFilter::None) {
+        const float cents = r->filKeytrack * (float)(key - r->filKeycenter) + r->filVeltrack * velocity;
+        const float fc = clampf(r->cutoff * std::exp2(cents / 1200.0f), 10.0f, sampleRate * 0.45f);
+        // resonance dB -> SVF damping (0 dB = Butterworth)
+        const float q = 0.7071f * dbToGain(std::max(0.0f, r->resonance));
+        const float res = clampf((2.0f - 1.0f / q) / 1.98f, 0.0f, 1.0f);
+        for (auto& f : filt_) { f.reset(); f.setCoefs(fc, res, sampleRate); }
+        lp1a_ = 1.0f - std::exp(-kTwoPi * fc / sampleRate);
+        lp1_[0] = lp1_[1] = 0.0f;
     }
 }
 
@@ -37,6 +57,17 @@ void PcmPlayer::release() {
     released_ = true;
     if (region_->loopMode == LoopMode::Sustain) looping_ = false;
     if (useEnv_ && region_->loopMode != LoopMode::OneShot) env_.gate(false);
+}
+
+void PcmPlayer::cut() {
+    if (!region_) return;
+    if (region_->offFast || !useEnv_) {
+        fadeStep_ = 1.0f / (0.006f * sr_);
+        if (fadeStep_ > fade_) fadeStep_ = fade_;
+    } else {
+        env_.gate(false);
+        looping_ = looping_ && region_->loopMode != LoopMode::Sustain;
+    }
 }
 
 void PcmPlayer::setPitch(float pitchSemis, float engineRate) {
@@ -52,23 +83,58 @@ inline float PcmPlayer::at(int c, int64_t idx) const {
     return s->channel(c)[idx];
 }
 
+inline float PcmPlayer::sampleAt(int c, int64_t idx, float f) const {
+    const float xm1 = at(c, idx - 1), x0 = at(c, idx), x1 = at(c, idx + 1), x2 = at(c, idx + 2);
+    const float c1 = 0.5f * (x1 - xm1);
+    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+    return ((c3 * f + c2) * f + c1) * f + x0;
+}
+
 void PcmPlayer::render(float* L, float* R, int n, float gain) {
     if (!region_) return;
     const bool stereo = region_->sample->channels == 2;
     const float gl = gainL_ * gain, gr = gainR_ * gain;
+    const RegionFilter ft = region_->filter;
     for (int i = 0; i < n; ++i) {
+        if (delay_ > 0) { --delay_; continue; }
         const int64_t idx = (int64_t)pos_;
         const float f = (float)(pos_ - (double)idx);
-        auto hermite = [&](int c) {
-            const float xm1 = at(c, idx - 1), x0 = at(c, idx), x1 = at(c, idx + 1), x2 = at(c, idx + 2);
-            const float c1 = 0.5f * (x1 - xm1);
-            const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
-            const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
-            return ((c3 * f + c2) * f + c1) * f + x0;
-        };
-        const float e = useEnv_ ? env_.process() : 1.0f;
-        const float l = hermite(0);
-        const float r = stereo ? hermite(1) : l;
+        float l = sampleAt(0, idx, f);
+        float r = stereo ? sampleAt(1, idx, f) : l;
+        if (xfLen_ > 0 && looping_ && idx >= region_->loopEnd - xfLen_) {
+            // loop crossfade: blend in the material before the loop start
+            const int64_t len = region_->loopEnd - region_->loopStart;
+            const float t = (float)((pos_ - (double)(region_->loopEnd - xfLen_)) / (double)xfLen_);
+            const float bl = sampleAt(0, idx - len, f);
+            l += (bl - l) * t;
+            r = stereo ? r + (sampleAt(1, idx - len, f) - r) * t : l;
+        }
+        if (ft != RegionFilter::None) {
+            for (int c = 0; c < (stereo ? 2 : 1); ++c) {
+                float& v = c == 0 ? l : r;
+                switch (ft) {
+                    case RegionFilter::Lp1: lp1_[c] += lp1a_ * (v - lp1_[c]); v = lp1_[c]; break;
+                    case RegionFilter::Hp1: lp1_[c] += lp1a_ * (v - lp1_[c]); v -= lp1_[c]; break;
+                    case RegionFilter::Lp2: v = filt_[c].tick(v).lp; break;
+                    case RegionFilter::Hp2: v = filt_[c].tick(v).hp; break;
+                    case RegionFilter::Bp2: v = filt_[c].tick(v).bp * filt_[c].k(); break;
+                    case RegionFilter::Br2: { const Svf::Out o = filt_[c].tick(v); v = o.lp + o.hp; break; }
+                    default: break;
+                }
+            }
+            if (!stereo) r = l;
+        }
+        float e = 1.0f;
+        if (useEnv_) {
+            if (envDelay_ > 0) { --envDelay_; e = 0.0f; }
+            else e = env_.process();
+        }
+        if (fadeStep_ > 0.0f) {
+            fade_ -= fadeStep_;
+            if (fade_ <= 0.0f) { region_ = nullptr; return; }
+            e *= fade_;
+        }
         L[i] += l * gl * e;
         R[i] += r * gr * e;
         pos_ += step_;
@@ -78,7 +144,7 @@ void PcmPlayer::render(float* L, float* R, int n, float gain) {
             region_ = nullptr;
             return;
         }
-        if (useEnv_ && !env_.active()) {
+        if (useEnv_ && envDelay_ == 0 && !env_.active()) {
             region_ = nullptr;
             return;
         }
@@ -129,6 +195,14 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     vfx_.reset();
 
     const int vel127 = std::max(1, std::min(127, (int)std::lround(velocity_ * 127.0f)));
+    for (auto& pl : relPcm_) pl.stop();
+    relActive_ = false;
+    mainDone_ = false;
+    for (int l = 0; l < kNumLayers; ++l) {
+        sets_[l] = ctx.sampleSets[l];
+        seq_[l] = ctx.seq[l];
+        keyswitch_[l] = ctx.keyswitch[l];
+    }
     for (int l = 0; l < kNumLayers; ++l) {
         Layer& ly = layers_[l];
         ly.type = (LayerType)(int)p[P::layer(l, P::LType)];
@@ -149,7 +223,13 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
             case LayerType::PCM: {
                 const SampleSet* set = ctx.sampleSets[l];
                 const Region* regs[kMaxRegionsPerLayer];
-                const int n = set ? set->findRegions(key_, vel127, random_, regs, kMaxRegionsPerLayer) : 0;
+                RegionQuery q;
+                q.key = key_;
+                q.vel127 = vel127;
+                q.rand01 = random_;
+                q.seq = ctx.seq[l];
+                q.keyswitch = ctx.keyswitch[l];
+                const int n = set ? set->findRegions(q, regs, kMaxRegionsPerLayer) : 0;
                 for (int i = 0; i < n; ++i)
                     ly.pcm[i].start(regs[i], key_, velocity_, p[P::layer(l, P::PcmStart)], p[P::layer(l, P::PcmVelTrack)],
                                     sampleRate_);
@@ -183,6 +263,56 @@ void Voice::release() {
         if (ly.type == LayerType::PCM)
             for (int i = 0; i < ly.pcmCount; ++i) ly.pcm[i].release();
     }
+    startReleaseRegions();
+}
+
+void Voice::startReleaseRegions() {
+    int used = 0;
+    const int vel127 = std::max(1, std::min(127, (int)std::lround(velocity_ * 127.0f)));
+    for (int l = 0; l < kNumLayers && used < kMaxReleaseRegions; ++l) {
+        const SampleSet* set = sets_[l];
+        if (layers_[l].type != LayerType::PCM || !set || !set->hasReleaseRegions) continue;
+        RegionQuery q;
+        q.key = key_;
+        q.vel127 = vel127;
+        q.rand01 = random_;
+        q.trigger = RegionTrigger::Release;
+        q.seq = seq_[l];
+        q.keyswitch = keyswitch_[l];
+        const Region* regs[kMaxReleaseRegions];
+        const int n = set->findRegions(q, regs, kMaxReleaseRegions - used);
+        for (int i = 0; i < n; ++i) {
+            relPcm_[used].start(regs[i], key_, velocity_, 0.0f, 1.0f, sampleRate_, -regs[i]->rtDecay * timeSinceOn_);
+            relLayer_[used++] = l;
+        }
+    }
+    if (used > 0) relActive_ = true;
+}
+
+int Voice::startedGroups(int* out, int max) const {
+    int n = 0;
+    for (const auto& ly : layers_) {
+        if (ly.type != LayerType::PCM) continue;
+        for (int i = 0; i < ly.pcmCount && n < max; ++i) {
+            const Region* r = ly.pcm[i].region();
+            if (!r || r->group == 0) continue;
+            bool dup = false;
+            for (int k = 0; k < n; ++k) dup = dup || out[k] == r->group;
+            if (!dup) out[n++] = r->group;
+        }
+    }
+    return n;
+}
+
+void Voice::choke(int group) {
+    if (!active_ || group == 0) return;
+    for (auto& ly : layers_) {
+        if (ly.type != LayerType::PCM) continue;
+        for (int i = 0; i < ly.pcmCount; ++i)
+            if (ly.pcm[i].active() && ly.pcm[i].region()->offBy == group) ly.pcm[i].cut();
+    }
+    for (auto& pl : relPcm_)
+        if (pl.active() && pl.region()->offBy == group) pl.cut();
 }
 
 void Voice::steal() {
@@ -190,11 +320,19 @@ void Voice::steal() {
     stolen_ = true;
     released_ = true;
     ampEnv_.kill(0.005f);
+    for (auto& pl : relPcm_) {
+        if (!pl.active()) continue;
+        pl.release();
+        pl.cut();
+    }
 }
 
 void Voice::stopLayer(int l) {
     Layer& ly = layers_[l];
     for (auto& pl : ly.pcm) pl.stop();
+    for (int i = 0; i < kMaxReleaseRegions; ++i)
+        if (relLayer_[i] == l) relPcm_[i].stop();
+    sets_[l] = nullptr;
     if (ly.type == LayerType::PCM) ly.finished = true;
 }
 
@@ -237,6 +375,31 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
 void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     if (!active_) return;
     const float* p = ctx.params;
+    if (relActive_) {
+        // release-trigger regions: own region envelope, layer level / pan / tuning, no amp env / filter
+        bool any = false;
+        for (int i = 0; i < kMaxReleaseRegions; ++i) {
+            PcmPlayer& pl = relPcm_[i];
+            if (!pl.active()) continue;
+            const int l = relLayer_[i];
+            float tl[kControlBlock] = {}, tr[kControlBlock] = {};
+            pl.setPitch(notePitch_ + ctx.pitchBendSemis + p[P::layer(l, P::LCoarse)] + p[P::layer(l, P::LFine)] / 100.0f,
+                        sampleRate_);
+            pl.render(tl, tr, n, p[P::layer(l, P::LLevel)]);
+            const float lpan = p[P::layer(l, P::LPan)];
+            const float lgl = std::min(1.0f, 1.0f - lpan), lgr = std::min(1.0f, 1.0f + lpan);
+            for (int k = 0; k < n; ++k) {
+                L[k] += tl[k] * lgl;
+                R[k] += tr[k] * lgr;
+            }
+            any = any || pl.active();
+        }
+        relActive_ = any;
+        if (mainDone_) {
+            if (!relActive_) active_ = false;
+            return;
+        }
+    }
     const float sr = sampleRate_;
     const float dtSec = (float)n / sr;
     const float invN = 1.0f / (float)n;
@@ -445,7 +608,10 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     firstBlock_ = false;
 
     const bool envDone = !ampEnv_.active() || (ampEnv_.stage() == Adsr::Stage::Sustain && ampEnv_.level() <= 0.0f);
-    if (envDone || !anyLayerRunning) active_ = false;
+    if (envDone || !anyLayerRunning) {
+        mainDone_ = true;
+        if (!relActive_) active_ = false;
+    }
 }
 
 }  // namespace hsynth

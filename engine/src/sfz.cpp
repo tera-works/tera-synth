@@ -27,7 +27,10 @@ const std::set<std::string>& supportedSet() {
         "pitch_keycenter", "pitch_keytrack", "tune", "pitch", "transpose", "volume", "pan",
         "loop_mode", "loopmode", "loop_start", "loopstart", "loop_end", "loopend", "offset", "end",
         "ampeg_attack", "ampeg_decay", "ampeg_sustain", "ampeg_release", "amp_veltrack",
-        "trigger", "default_path", "note_offset", "octave_offset"};
+        "trigger", "default_path", "note_offset", "octave_offset",
+        "delay", "ampeg_delay", "ampeg_hold", "rt_decay", "group", "off_by", "off_mode", "seq_length", "seq_position",
+        "loop_crossfade", "fil_type", "filtype", "cutoff", "resonance", "fil_keytrack", "fil_keycenter", "fil_veltrack",
+        "amp_keytrack", "amp_keycenter", "sw_lokey", "sw_hikey", "sw_last", "sw_default"};
     return s;
 }
 
@@ -283,8 +286,11 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
 
         auto it = op.find("sample");
         if (it == op.end()) { parser.warnings.push_back("region without sample= skipped"); continue; }
-        auto trig = op.find("trigger");
-        if (trig != op.end() && trig->second != "attack") { ++skippedTrigger; continue; }
+        RegionTrigger trigger = RegionTrigger::Attack;
+        if (auto trig = op.find("trigger"); trig != op.end()) {
+            if (trig->second == "release" || trig->second == "release_key") trigger = RegionTrigger::Release;
+            else if (trig->second != "attack") { ++skippedTrigger; continue; }
+        }
 
         std::string rel = parser.defaultPath + it->second;
         std::replace(rel.begin(), rel.end(), '\\', '/');
@@ -313,6 +319,7 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
 
         Region r;
         r.sample = sample;
+        r.trigger = trigger;
         auto get = [&](const char* k) -> const std::string* {
             auto f = op.find(k);
             return f == op.end() ? nullptr : &f->second;
@@ -392,6 +399,55 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
             num("ampeg_release", r.ampeg.release);
             r.ampeg.sustain = std::max(0.0f, std::min(1.0f, r.ampeg.sustain / 100.0f));
         }
+        if (get("ampeg_delay") || get("ampeg_hold")) r.ampeg.enabled = true;
+        num("ampeg_delay", r.ampeg.delay);
+        num("ampeg_hold", r.ampeg.hold);
+        num("delay", r.delay);
+        num("rt_decay", r.rtDecay);
+        if (auto v = get("group")) r.group = std::atoi(v->c_str());
+        if (auto v = get("off_by")) r.offBy = std::atoi(v->c_str());
+        if (auto v = get("off_mode")) r.offFast = *v != "normal";
+        if (auto v = get("seq_length")) r.seqLength = std::max(1, std::atoi(v->c_str()));
+        if (auto v = get("seq_position")) r.seqPosition = std::max(1, std::atoi(v->c_str()));
+        num("loop_crossfade", r.loopCrossfade);
+        const std::string* ft = get("fil_type");
+        if (!ft) ft = get("filtype");
+        if (get("cutoff")) {
+            num("cutoff", r.cutoff);
+            r.filter = RegionFilter::Lp2;
+            if (ft) {
+                static const std::pair<const char*, RegionFilter> kTypes[] = {
+                    {"lpf_1p", RegionFilter::Lp1}, {"hpf_1p", RegionFilter::Hp1}, {"lpf_2p", RegionFilter::Lp2},
+                    {"hpf_2p", RegionFilter::Hp2}, {"bpf_2p", RegionFilter::Bp2}, {"brf_2p", RegionFilter::Br2},
+                    {"lpf_4p", RegionFilter::Lp2}, {"hpf_4p", RegionFilter::Hp2}};
+                bool ok = false;
+                for (auto& t : kTypes)
+                    if (*ft == t.first) { r.filter = t.second; ok = true; }
+                if (!ok) parser.warnings.push_back("fil_type " + *ft + " not supported, using lpf_2p");
+                else if (ft->find("_4p") != std::string::npos) parser.warnings.push_back("fil_type " + *ft + " played as 2-pole");
+            }
+            num("resonance", r.resonance);
+            num("fil_keytrack", r.filKeytrack);
+            note("fil_keycenter", r.filKeycenter);
+            num("fil_veltrack", r.filVeltrack);
+            if (r.cutoff <= 0.0f) r.filter = RegionFilter::None;
+        }
+        num("amp_keytrack", r.ampKeytrack);
+        note("amp_keycenter", r.ampKeycenter);
+        if (get("sw_last")) note("sw_last", r.swLast);
+        {
+            int lo = -1, hi = -1;
+            if (get("sw_lokey")) note("sw_lokey", lo);
+            if (get("sw_hikey")) note("sw_hikey", hi);
+            if (lo >= 0 && hi >= lo) {
+                set->swLo = set->swLo < 0 ? lo : std::min(set->swLo, lo);
+                set->swHi = std::max(set->swHi, hi);
+            }
+            int def = -1;
+            if (get("sw_default")) note("sw_default", def);
+            if (def >= 0) set->swDefault = def;
+        }
+        if (trigger == RegionTrigger::Release) set->hasReleaseRegions = true;
         r.lokey = std::max(0, std::min(127, r.lokey));
         r.hikey = std::max(0, std::min(127, r.hikey));
         set->regions.push_back(r);
@@ -399,7 +455,11 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
 
     for (auto& kv : parser.unsupported)
         parser.warnings.push_back("unsupported opcode '" + kv.first + "' ignored (" + std::to_string(kv.second) + "x)");
-    if (skippedTrigger) parser.warnings.push_back(std::to_string(skippedTrigger) + " release/legato trigger regions skipped (unsupported)");
+    if (skippedTrigger) parser.warnings.push_back(std::to_string(skippedTrigger) + " first/legato trigger regions skipped (unsupported)");
+    if (set->swDefault < 0) {  // no sw_default: start on the lowest switch used by any region
+        for (const Region& r : set->regions)
+            if (r.swLast >= 0 && (set->swDefault < 0 || r.swLast < set->swDefault)) set->swDefault = r.swLast;
+    }
     if (skippedSamples) parser.warnings.push_back(std::to_string(skippedSamples) + " regions skipped because their sample failed to load");
     set->warnings = std::move(parser.warnings);
     if (set->regions.empty()) {

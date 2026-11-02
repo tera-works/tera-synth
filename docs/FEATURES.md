@@ -33,11 +33,22 @@
 - プリプロセッサ: `#define $VAR`, `#include "file"`
 - オペコード: `sample, lokey, hikey, key, lovel, hivel, lorand, hirand, pitch_keycenter, pitch_keytrack, tune, pitch,
   transpose, volume, pan, loop_mode/loopmode (no_loop, one_shot, loop_continuous, loop_sustain), loop_start/loopstart,
-  loop_end/loopend, offset, end, ampeg_attack, ampeg_decay, ampeg_sustain, ampeg_release, amp_veltrack,
-  trigger (attack のみ), default_path, note_offset, octave_offset`
+  loop_end/loopend, loop_crossfade, offset, end, delay, ampeg_delay, ampeg_attack, ampeg_hold, ampeg_decay, ampeg_sustain,
+  ampeg_release, amp_veltrack, amp_keytrack, amp_keycenter, trigger (attack / release / release_key), rt_decay,
+  group, off_by, off_mode (fast / normal), seq_length, seq_position, sw_lokey, sw_hikey, sw_last, sw_default,
+  fil_type (lpf_1p, hpf_1p, lpf_2p, hpf_2p, bpf_2p, brf_2p; *_4p は 2 ポールで代用し警告), cutoff, resonance,
+  fil_keytrack, fil_keycenter, fil_veltrack, default_path, note_offset, octave_offset`
 - 音名（`c4` = 60, `c#4`, `db4`）、サンプル名の空白、`\` 区切りパス
-- 未対応（警告）: フィルター系 `cutoff/fil_*`、`fileg_*`、`pitcheg_*`、LFO 系、`trigger=release`、`seq_*`、CC 系 `on_locc`、
-  `group/off_by`（排他グループ）、`ampeg_hold/delay`、`*` ジェネレーターサンプル、FLAC/OGG
+- 動作の補足:
+  - リリーストリガー（`trigger=release`）はノートオフでノートオンのベロシティを使って発音。ボイスのアンプ EG / フィルターを
+    通らず、リージョン自身の EG・レイヤーのレベル / パン / チューニングで鳴ります。`rt_decay` は押鍵時間 1 秒あたりの減衰 dB。
+  - `group` / `off_by`: 新しいリージョン（グループ G）が、同じパートで鳴っている `off_by=G` のリージョンを止めます
+    （`off_mode=fast` は 6 ms フェード、`normal` はリージョンのリリース）。
+  - ラウンドロビン（`seq_*`）のカウンターはパート × レイヤーごとにノートオンで 1 進みます（キーごとではない）。
+  - キースイッチの状態はパート × レイヤーごと。`sw_default` が無い場合は最小の `sw_last` から開始。サンプルセット差し替えでリセット。
+  - リージョンフィルターはノートオン時に固定（キー / ベロシティ追従あり、フィルター EG・LFO は未対応）。ボイスのフィルターとは別に掛かります。
+- 未対応（警告）: `fileg_*`、`pitcheg_*`、LFO 系、`trigger=first/legato`、CC 系 `on_locc` / `locc` 等、`ampeg_vel2*`、
+  `*` ジェネレーターサンプル、`<curve> <effect> <midi>` ヘッダ、FLAC/OGG
 
 ## Phase 2 以降
 
@@ -54,7 +65,7 @@
 | パート単位エフェクト | ✅ | パートごとにインサート 3 スロット（12 種の軽量ブロック）。ボイス / パート / マスターの 3 階層（ARCHITECTURE.md） |
 | ボイス単位エフェクト | ✅ | フィルタードライブ + Voice FX（saturate / fold / crush / ring、`vfx.amount` は per-note 変調可） |
 | オーバーサンプリング | ✅（v0.2） | Drive / Amp の非線形部。DSP品質 Low=1x / Normal=2x / High=4x |
-| ベロシティレイヤー・ループ改善 | 🟡 | 基本は実装済み。ループクロスフェード、リリーストリガーは未 |
+| ベロシティレイヤー・ループ改善 | ✅ | ループクロスフェード、リリーストリガー、ラウンドロビン、キースイッチ、排他グループ、リージョンフィルター |
 | FLAC | ⬜ | `loadSampleSet` で明示エラー |
 | ディスクストリーミング | ⬜ | 現在は全サンプルをメモリにプリロード |
 | マルチパート / マルチティンバー | 🟡（エンジンのみ） | 16 パート（MIDI チャンネル単位、レイヤー/スプリット可）。パートごとに音色パラメータ・サンプルセット 3 個、ミックス（volume / pan / mute / channel / キーレンジ / transpose / FX send、CC7・CC10）。エフェクトラック・ルーパー・マスターは共通、ボイスプール共有でパート間公平にスチール。マルチ JSON（`hsynth-multi`）。既定はシングルパート（従来と出力一致）。Windows / Android の UI・JNI は未対応（[ARCHITECTURE.md](ARCHITECTURE.md#マルチティンバー16-パート)） |

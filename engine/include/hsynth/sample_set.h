@@ -32,8 +32,12 @@ enum class LoopMode : uint8_t { NoLoop, OneShot, Continuous, Sustain };
 
 struct RegionEnv {
     bool enabled = false;
-    float attack = 0.0f, decay = 0.0f, sustain = 1.0f, release = 0.0f;
+    float delay = 0.0f, attack = 0.0f, hold = 0.0f, decay = 0.0f, sustain = 1.0f, release = 0.0f;
 };
+
+enum class RegionTrigger : uint8_t { Attack, Release };
+// Per-region static filter (SFZ fil_type / cutoff / resonance).
+enum class RegionFilter : uint8_t { None, Lp1, Hp1, Lp2, Hp2, Bp2, Br2 };
 
 struct Region {
     const Sample* sample = nullptr;
@@ -51,6 +55,32 @@ struct Region {
     int64_t loopStart = -1, loopEnd = -1;  // exclusive end
     int64_t offset = 0, end = -1;          // end exclusive, -1 = sample end
     RegionEnv ampeg;
+    float delay = 0.0f;              // seconds before the region starts (sfz delay)
+    RegionTrigger trigger = RegionTrigger::Attack;
+    float rtDecay = 0.0f;            // release trigger: dB attenuation per second the note was held
+    int group = 0, offBy = 0;        // exclusive groups: a new region of group G cuts regions with off_by = G
+    bool offFast = true;             // off_mode: fast (6 ms) or normal (region release)
+    int seqLength = 1, seqPosition = 1;  // round robin: plays when (counter % length) == position - 1
+    float loopCrossfade = 0.0f;      // seconds
+    RegionFilter filter = RegionFilter::None;
+    float cutoff = 0.0f;             // Hz
+    float resonance = 0.0f;          // dB
+    float filKeytrack = 0.0f;        // cents per key
+    int filKeycenter = 60;
+    float filVeltrack = 0.0f;        // cents at velocity 127
+    float ampKeytrack = 0.0f;        // dB per key
+    int ampKeycenter = 60;
+    int swLast = -1;                 // keyswitch: region plays only while this switch key is active
+};
+
+// Region lookup context (per note).
+struct RegionQuery {
+    int key = 60;
+    int vel127 = 100;
+    float rand01 = 0.0f;
+    RegionTrigger trigger = RegionTrigger::Attack;
+    uint32_t seq = 0;                // round-robin counter of the layer
+    int keyswitch = -1;              // active keyswitch, -1 = the set's default
 };
 
 struct SampleSet {
@@ -60,10 +90,21 @@ struct SampleSet {
     std::vector<Region> regions;
     std::vector<std::string> warnings;
     std::unique_ptr<Wavetable> wavetable;  // set instead of samples for wavetable layers ("user" table)
+    // keyswitch range (sw_lokey / sw_hikey, -1 = none) and default switch
+    int swLo = -1, swHi = -1, swDefault = -1;
+    bool hasReleaseRegions = false;
+    bool isKeyswitch(int key) const { return swLo >= 0 && key >= swLo && key <= swHi; }
     size_t memoryBytes() const;
 
     // Returns number of matching regions written to out (at most max).
-    int findRegions(int key, int vel127, float rand01, const Region** out, int max) const;
+    int findRegions(const RegionQuery& q, const Region** out, int max) const;
+    int findRegions(int key, int vel127, float rand01, const Region** out, int max) const {
+        RegionQuery q;
+        q.key = key;
+        q.vel127 = vel127;
+        q.rand01 = rand01;
+        return findRegions(q, out, max);
+    }
 };
 
 // Load a single WAV as a set with one region spanning all keys.

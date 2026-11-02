@@ -75,7 +75,7 @@ TEST(sfz_parse_and_mapping) {
               "#define $VOL -3\n"
               "<control> default_path=samples/\n"
               "<global> ampeg_release=0.3 volume=$VOL\n"
-              "<group> lokey=0 hikey=b4 cutoff=1000 /* unsupported */\n"
+              "<group> lokey=0 hikey=b4 cutoff=1000 fileg_attack=0.1 /* unsupported */\n"
               "<region> sample=low.wav pitch_keycenter=c4\n"
               "<group> lokey=c5 hikey=127 pitch_keycenter=72\n"
               "<region> sample=high soft.wav hivel=80\n"
@@ -89,7 +89,7 @@ TEST(sfz_parse_and_mapping) {
     CHECK(set->samples.size() == 3);
     bool warnedCutoff = false, warnedMissing = false, warnedCurve = false;
     for (auto& w : set->warnings) {
-        if (w.find("cutoff") != std::string::npos) warnedCutoff = true;
+        if (w.find("fileg_attack") != std::string::npos) warnedCutoff = true;
         if (w.find("missing.wav") != std::string::npos) warnedMissing = true;
         if (w.find("curve") != std::string::npos) warnedCurve = true;
     }
@@ -97,6 +97,7 @@ TEST(sfz_parse_and_mapping) {
     const Region* out[4];
     CHECK(set->findRegions(60, 100, 0.5f, out, 4) == 1 && out[0]->keycenter == 60);
     CHECK_NEAR(out[0]->volumeDb, -3.0, 1e-6);
+    CHECK(out[0]->filter == RegionFilter::Lp2 && out[0]->cutoff == 1000.0f);
     CHECK(out[0]->ampeg.enabled && std::fabs(out[0]->ampeg.release - 0.3f) < 1e-6f);
     CHECK(set->findRegions(71, 100, 0.5f, out, 4) == 1);  // b4 = 71
     CHECK(set->findRegions(72, 60, 0.5f, out, 4) == 1 && out[0]->sample->path.find("soft") != std::string::npos);

@@ -201,6 +201,8 @@ private:
     std::atomic<int> selectedPart_{0};
     bool multiActive_ = false;  // audio thread
     PartState parts_[kNumParts];
+    uint32_t seqCount_[kNumParts][kNumLayers] = {};  // SFZ round robin counters
+    int keyswitch_[kNumParts][kNumLayers];            // active SFZ keyswitch (-1 = set default)
     std::unique_ptr<float[]> partBus_;  // kNumParts x 2 x kMaxBlockSize (multi mode)
     float* bus(int part, int ch) { return partBus_.get() + ((size_t)part * 2 + (size_t)ch) * kMaxBlockSize; }
     std::unique_ptr<fx::InsertChain[]> inserts_;  // per part

@@ -14,12 +14,16 @@ size_t SampleSet::memoryBytes() const {
     return n;
 }
 
-int SampleSet::findRegions(int key, int vel127, float rand01, const Region** out, int max) const {
+int SampleSet::findRegions(const RegionQuery& q, const Region** out, int max) const {
     int n = 0;
+    const int sw = q.keyswitch >= 0 ? q.keyswitch : swDefault;
     for (const Region& r : regions) {
-        if (key < r.lokey || key > r.hikey) continue;
-        if (vel127 < r.lovel || vel127 > r.hivel) continue;
-        if (rand01 < r.lorand || rand01 >= r.hirand) continue;
+        if (r.trigger != q.trigger) continue;
+        if (q.key < r.lokey || q.key > r.hikey) continue;
+        if (q.vel127 < r.lovel || q.vel127 > r.hivel) continue;
+        if (q.rand01 < r.lorand || q.rand01 >= r.hirand) continue;
+        if (r.seqLength > 1 && (int)(q.seq % (uint32_t)r.seqLength) != r.seqPosition - 1) continue;
+        if (r.swLast >= 0 && r.swLast != sw) continue;
         if (!r.sample) continue;
         out[n++] = &r;
         if (n >= max) break;
