@@ -85,6 +85,8 @@ public:
     float level() const { return ampEnv_.level(); }
     bool sustained = false;  // note-off arrived while sustain pedal / hold active
     bool hold = false;       // per-note hard-press hold (NoteHold event)
+    int part = 0;            // owning part (multi-timbral), set by the engine
+    int matchKey = 60;       // key as received (before part transpose), for key-matched events
 
 private:
     struct Layer {

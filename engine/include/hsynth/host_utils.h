@@ -10,7 +10,7 @@
 
 namespace hsynth {
 
-// Apply parameters and load the preset's sample sets (paths are relative to
+// Part 0 + global: apply parameters and load the preset's sample sets (paths are relative to
 // libraryRoot unless absolute). Returns false only if nothing could be applied;
 // non-fatal problems are appended to warnings.
 bool applyPreset(Engine& engine, const Preset& preset, const std::string& libraryRoot,
@@ -19,6 +19,22 @@ bool applyPreset(Engine& engine, const Preset& preset, const std::string& librar
 // Snapshot the engine state into a preset. Sample paths are made relative to
 // libraryRoot when they are inside it.
 Preset capturePreset(const Engine& engine, const std::string& name, const std::string& libraryRoot);
+
+// ---- multi-timbral (see engine.h) ----
+// Part parameters + sample sets of `preset` into part N (0..15). The effect
+// rack, impulses, master volume and limiter of the preset are ignored.
+bool applyPartPreset(Engine& engine, int part, const Preset& preset, const std::string& libraryRoot,
+                     std::vector<std::string>& warnings);
+// Part N as a regular preset (global params / impulses are the current global ones).
+Preset capturePartPreset(const Engine& engine, int part, const std::string& name, const std::string& libraryRoot);
+// Switches the engine to multi-timbral mode and loads all 16 parts, their mix
+// settings, the rack / master parameters and the impulses.
+bool applyMulti(Engine& engine, const MultiPreset& multi, const std::string& libraryRoot,
+                std::vector<std::string>& warnings);
+MultiPreset captureMulti(const Engine& engine, const std::string& name, const std::string& libraryRoot);
+bool loadPartSamples(Engine& engine, int part, int layer, const std::string& path, std::string& error,
+                     std::vector<std::string>& warnings);
+bool loadPartWavetable(Engine& engine, int part, int layer, const std::string& path, std::string& error);
 
 // Load a WAV/SFZ file into a layer. Returns false on failure (error set);
 // warnings receives non-fatal SFZ messages.

@@ -30,6 +30,37 @@ static double bench(const char* name, int voices, double seconds, const std::fun
     return sec;
 }
 
+// Multi-timbral: `parts` parts with `perPart` voices each, one MIDI channel per
+// part, every part with its own copy of the VA saw x2 / LP24 patch.
+static double benchMulti(const char* name, int parts, int perPart, double seconds) {
+    Engine e;
+    e.prepare(48000);
+    e.setMaxVoices(64);
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    e.setMultiTimbral(true);
+    for (int k = 0; k < parts; ++k) {
+        e.setPartParam(k, P::AmpSustain, 1.0f);
+        e.setPartParam(k, P::FilterCutoff, 800.0f + 200.0f * (float)k);
+        e.setPartMix(k, Mix::Pan, -1.0f + 2.0f * (float)k / (float)std::max(1, parts - 1));
+        e.setPartMix(k, Mix::FxSend, k % 2 ? 1.0f : 0.5f);
+        for (int i = 0; i < perPart; ++i) {
+            Event ev = Event::noteOn((uint32_t)(k * 16 + i + 1), 40 + 3 * i + k, 0.7f);
+            ev.channel = (uint8_t)k;
+            e.sendEvent(ev);
+        }
+    }
+    std::vector<float> L(128), R(128);
+    e.process(L.data(), R.data(), 128);
+    const int blocks = (int)(48000 * seconds / 128);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int b = 0; b < blocks; ++b) e.process(L.data(), R.data(), 128);
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const int voices = parts * perPart;
+    std::printf("%-28s load %6.1f%%  %7.1f ns/voice-sample  (active %d)\n", name, sec / seconds * 100.0,
+                sec * 1e9 / ((double)blocks * 128 * voices), e.stats().activeVoices);
+    return sec;
+}
+
 int main(int argc, char** argv) {
     const int voices = argc > 1 ? std::atoi(argv[1]) : 32;
     const double seconds = argc > 2 ? std::atof(argv[2]) : 3.0;
@@ -70,5 +101,8 @@ int main(int argc, char** argv) {
             }
         });
     }
+    // multi-timbral: 16 parts x 4 voices vs. the same 64 voices in single-part mode
+    bench("single part, 64 voices", 64, seconds, [](Engine&) {});
+    benchMulti("multi 16 parts x 4 voices", 16, 4, seconds);
     return 0;
 }

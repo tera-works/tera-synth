@@ -18,6 +18,16 @@ int dataBytesFor(uint8_t status) {
 }
 float u32Norm(uint32_t v) { return (float)((double)v / 4294967295.0); }
 float u32Bipolar(uint32_t v) { return (float)(((double)v - 2147483648.0) / 2147483648.0); }
+// Stamps every event with the MIDI channel it came from (multi-timbral routing).
+struct ChannelSink {
+    EventSink& sink;
+    int channel;
+    void onEvent(Event e) {
+        e.channel = (uint8_t)channel;
+        sink.onEvent(e);
+    }
+    void onProgramChange(int ch, int program) { sink.onProgramChange(ch, program); }
+};
 }  // namespace
 
 void MidiTranslator::processMidi1(const uint8_t* data, size_t len, EventSink& sink) {
@@ -45,8 +55,9 @@ void MidiTranslator::processMidi1(const uint8_t* data, size_t len, EventSink& si
     }
 }
 
-void MidiTranslator::midi1Message(int group, uint8_t status, uint8_t d1, uint8_t d2, EventSink& sink) {
+void MidiTranslator::midi1Message(int group, uint8_t status, uint8_t d1, uint8_t d2, EventSink& out) {
     const int ch = status & 0x0F;
+    ChannelSink sink{out, ch};
     switch (status & 0xF0) {
         case 0x90:
             if (d2 > 0) {
@@ -140,10 +151,11 @@ void MidiTranslator::processUmpBytes(const uint8_t* data, size_t len, EventSink&
     }
 }
 
-void MidiTranslator::midi2Message(uint32_t w0, uint32_t w1, EventSink& sink) {
+void MidiTranslator::midi2Message(uint32_t w0, uint32_t w1, EventSink& out) {
     const int group = (int)((w0 >> 24) & 0xF);
     const int status = (int)((w0 >> 20) & 0xF);
     const int ch = (int)((w0 >> 16) & 0xF);
+    ChannelSink sink{out, ch};
     const int idx = (int)((w0 >> 8) & 0x7F);  // note number or controller index
     const int sub = (int)(w0 & 0xFF);         // attribute type / per-note ctrl index
     const uint32_t id = noteId(group, ch, idx);

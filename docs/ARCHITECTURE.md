@@ -100,6 +100,92 @@ Effect rack: 12 スロット（31 種、docs/EFFECTS.md）→ Looper → Volume 
 - **ハイブリッド**: 3レイヤーを任意の方式で同時発音。`mix.morph` とモジュレーション先 `Morph` / `a.level` 等で、
   演奏中にPCMとFMの比率などを連続的に変化させられます。
 
+## マルチティンバー（16 パート）
+
+エンジンは 16 パート（`kNumParts`）を持ち、MIDI チャンネルごとに別の音色を鳴らせます（GM / マルチチャンネル MIDI）。
+
+```
+MIDI ch ──► MidiTranslator（Event::channel を付与）──► Engine
+  ch == Mix::Channel のパートへ（複数パート可 = レイヤー） / kOmniChannel は選択パートへ
+Part 1..16: パートパラメータ（ボイス・レイヤー・モッドマトリクス）+ サンプルセット 3 個
+  └─ 共有ボイスプール（64 + フェード 8）
+       └─ パートバス ─ volume² × CC7² ─ pan(+CC10) ─┬─ ×FX send ────► エフェクトラック（共有）─┐
+                                                   └─ ×(1-FX send) ─► ドライバス ──────────────┴► Master → Limiter
+```
+
+- **パート = 1 つの完全なパッチ**: パラメータ id `[0, P::kPartParams)`（= エフェクトラックより前）のうち
+  `master.volume` と `limiter` を除いたもの（`isPartParam(id)`）をパートごとに持ちます。LFO2 もパート単位です。
+  エフェクトラック（12 スロット・FX Mod）、ルーパー、マスター音量、リミッター、ユーザー IR は全パート共通（グローバル）。
+- **パート 0（UI 表示はパート 1）** は従来の配列（`setParam` / `p_`）そのもので、パート 1〜15 は別の atomic 配列＋
+  パートごとのバージョンカウンタを持ちます。音声スレッドはバージョンが変わったパートだけローカル配列にコピーします
+  （従来の仕組みをパート数分に拡張。`process()` 内で確保・ロックなし）。
+- **サンプルセット / ユーザーウェーブテーブル** はパート × レイヤー（16 × 3）ごとに保留ポインタ → 差し替え → 廃棄キュー
+  （容量 128）。差し替え時に PCM を止めるのはそのパートのボイスだけです。
+- **ミックス設定**（`Mix::`、パートごと、メタデータは `partMixTable()`）:
+
+  | 名前 | 範囲 | 既定 | 内容 |
+  |---|---|---|---|
+  | `volume` | 0〜1 | 1 | ゲイン = volume²（マスターと同じカーブ）。MIDI CC7 も二乗で乗算 |
+  | `pan` | -1〜1 | 0 | バランス型（中央で左右とも 1.0）。MIDI CC10 はオフセットとして加算 |
+  | `mute` | bool | off | ミュート中はノートオンを無視し、出力を 10 ms でフェード |
+  | `channel` | 1〜16 | パート番号 | 受信 MIDI チャンネル。同じチャンネルの複数パートはレイヤー |
+  | `key.low` / `key.high` | 0〜127 | 0 / 127 | キーレンジ（トランスポーズ前のキーで判定）。スプリット用 |
+  | `transpose` | -48〜48 | 0 | 半音 |
+  | `fx.send` | 0〜1 | 1 | 1 = 全てラックへ、0 = ラックを通らずドライバスへ（ラック後・マスター前に加算） |
+
+  ゲイン変更は 10 ms の線形ランプ（コントロールブロック単位）でクリックを防ぎます。
+- **モード**: `Engine::setMultiTimbral(false)`（既定）は「シングルパート / オムニ」モードで、全イベントがチャンネルに
+  関係なくパート 0 に届き、ミックス設定は適用されません。描画経路も従来のコードそのままなので **出力は従来とビット単位で
+  一致** します（テスト `multi_single_part_mode_identical` と変更前ビルドとの比較で確認）。マルチモードでパート 0 だけを
+  既定ミックスで使った場合もシングルモードとビット一致します。マルチ → シングルに戻すとパート 1〜15 のボイスは即停止。
+- **イベントの振り分け**（マルチモード）: `Event::channel`（0〜15）が一致する全パートへ。`kOmniChannel`（ホスト UI・
+  タッチ鍵盤など、`Event` ファクトリの既定値）は `selectPart()` で選んだパートへ。`AllNotesOff/AllSoundOff` を
+  オムニで送ると全パート。noteId 付きの NoteOff / per-note イベントはパートに関係なく noteId で探すため、
+  発音中にチャンネル設定を変えてもノートが残りません。キー一致（noteId=0）の照合はトランスポーズ前のキーで行います。
+- **MIDI**: `MidiTranslator` は全イベントにチャンネルを付けます（UMP グループは無視）。`setMultiTimbral(true)` にすると
+  MPE のメンバーチャンネル解釈を無効化し、各チャンネルを独立した GM 的チャンネルとして扱います。MPE はシングルパート
+  モードでのみ有効です。プログラムチェンジは従来どおり `EventSink::onProgramChange(channel, program)` でホストへ通知され、
+  ホストがそのチャンネルのパートに `applyPartPreset()` します。
+- **ボイススチール**: プールは全パート共有、上限は `setMaxVoices()`。スチール対象は
+  ① リリース中のボイスを優先、② その中で「このノートオン後に最も多くのボイスを持つパート」（要求したパートは +1 で数える）、
+  ③ 同数ならリリース中は最小レベル / 発音中は最古。大量に弾くパートは自分のボイスから奪い、少数ボイスのパートは守られます。
+  パートが 1 つなら従来と同じ規則です。
+- **エフェクトラックの FX Mod** のグローバルソース（mod wheel、LFO2、チャンネルプレッシャー、expression、breath、ピッチベンド）はパート 1 の値に追従します。
+  ラックのノートトリガー（リトリガー等）は FX send > 0 のパートのノートオンで発生します。
+
+### ホスト API（追加分）
+
+| API | 内容 |
+|---|---|
+| `Engine::setMultiTimbral(bool)` / `multiTimbral()` | モード切替。`MidiTranslator::setMultiTimbral()` も同じ値に設定すること |
+| `Engine::selectPart(n)` / `selectedPart()` | オムニイベント（タッチ鍵盤等）の送り先パート。UI の「選択パート」 |
+| `setPartParam(n, id, v)` / `getPartParam` / `setPartParams(n, values)` / `getPartParams` | パート N のパラメータ。グローバル id（FX・master・limiter）は `setParam` へ転送 |
+| `setGlobalParams(values)` | 非パートパラメータ（ラック・master・limiter）だけを一括設定 |
+| `setPartMix(n, Mix::X, v)` / `getPartMix` | ミックス設定 |
+| `setPartSampleSet(n, layer, set)` / `partSampleSetName/Path` | パート N のサンプルセット |
+| `partActiveVoices(n)` | パートごとの発音数（メーター用） |
+| `applyPartPreset(engine, n, preset, root, warn)` / `capturePartPreset` | 通常プリセットをパート N へ（ラック・IR・master は無視） |
+| `loadPartSamples` / `loadPartWavetable` | パート N のレイヤーへ WAV/SFZ/ウェーブテーブル |
+| `MultiPreset` + `multiToJson / multiFromJson / loadMultiFile / saveMultiFile` | マルチ JSON（`preset.h` 参照） |
+| `applyMulti(engine, multi, root, warn)` / `captureMulti` | マルチの読込（マルチモードを ON にする）/ 取得 |
+
+従来 API（`setParam`、`setSampleSet`、`applyPreset`、`capturePreset` …）はすべてパート 0 ＋グローバルを対象にし、
+動作は変わりません。
+
+**マルチ JSON**（`"format": "hsynth-multi"`）: `global.params`（非パートパラメータのみ）と `global.impulses`、
+16 要素の `parts[]`（各 `mix` と、パートパラメータだけを持つ通常プリセットオブジェクト `preset`）、`selected`（1〜16）。
+欠けたパート・キーは既定値、未知のキーは警告です。
+
+### Windows / Android ホストでの対応が必要な項目（未実装）
+
+- マルチモード ON/OFF の UI と、`engine.setMultiTimbral()` + `translator.setMultiTimbral()` の同期。
+- パート選択（`selectPart`）と、Edit 画面の対象を選択パートにする（`get/setPartParam`、サンプル読込は `loadPartSamples`）。
+  現在の UI は従来 API を使うためパート 1 を編集します。
+- パートごとのミキサー画面（`partMixTable()` から自動生成可能）と発音数メーター（`partActiveVoices`）。
+- `onProgramChange(channel, program)` → そのチャンネルのパートへ `applyPartPreset`。
+- マルチの保存・読込（`saveMultiFile` / `loadMultiFile` → `applyMulti` / `captureMulti`）。
+- JNI ブリッジに上記関数を追加（Android は最後の S23 移植時）。
+
 ## モジュレーションマトリクス
 
 8スロット、各スロット `source × via × amount → destination`。コントロールレート（16サンプル毎）で評価し、
@@ -135,7 +221,9 @@ v0.1 の固定エフェクト（`chorus.* / delay.* / reverb.* / eq.*`）は `ap
 ## 品質設定・性能
 
 - ポリフォニー 16 / 32 / 64（設定画面）。超過時は「リリース中で最も小さいボイス」→「最も古いボイス」をスチールし、
-  5 msでフェードアウト（予備8ボイスを使用）。
+  5 msでフェードアウト（予備8ボイスを使用）。マルチモードではボイス数の多いパートから優先的に奪います（上記）。
+- マルチティンバーの負荷: `hsynth_bench` の `multi 16 parts x 4 voices` 行（同じ 64 ボイスのシングルパートと比較）。
+  パートごとの追加コストは 16 サンプル単位のパートバス合成と LFO2 程度です。
 - DSP品質: Low / Normal / High。Drive・Amp のオーバーサンプリングが 1x / 2x / 4x に切り替わります。
 - 高速化: `fastFloor` / `fastExp2`（多項式）/ 整数位相FM / 係数共有のステレオフィルター。
   NEON明示最適化は未実装（Phase 4）。現在のコードは汎用C++で、コンパイラの自動ベクトル化に任せています。

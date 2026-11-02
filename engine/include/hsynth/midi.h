@@ -6,6 +6,12 @@
 //   * MIDI 2.0 Universal MIDI Packets (MIDI 1.0 and MIDI 2.0 channel voice
 //     messages, including per-note pitch bend and per-note controllers)
 //
+// Every emitted Event carries its MIDI channel (Event::channel, 0..15; the UMP
+// group is ignored). The engine uses it to route events to parts in
+// multi-timbral mode and ignores it in single-part mode. Multi-timbral mode
+// and MPE exclude each other: with setMultiTimbral(true) the MPE member-channel
+// handling is off and every channel is an independent GM-style channel.
+//
 // Any other controller protocol (e.g. the planned RP2350 shoulder keyboard
 // over a vendor USB interface) should implement its own translator that emits
 // the same Events into an EventSink; the DSP code never sees protocol details.
@@ -29,6 +35,9 @@ class MidiTranslator {
 public:
     void setMpeEnabled(bool on) { mpe_ = on; }
     bool mpeEnabled() const { return mpe_; }
+    // Mirror Engine::setMultiTimbral(); disables MPE interpretation while on.
+    void setMultiTimbral(bool on) { multi_ = on; }
+    bool multiTimbral() const { return multi_; }
     void setMpeBendRange(float semis) { mpeBendRange_ = semis; }
     void setPerNoteBendRange(float semis) { perNoteBendRange_ = semis; }
 
@@ -46,9 +55,10 @@ public:
 private:
     void midi1Message(int group, uint8_t status, uint8_t d1, uint8_t d2, EventSink& sink);
     void midi2Message(uint32_t w0, uint32_t w1, EventSink& sink);
-    bool isMpeMember(int channel) const { return mpe_ && channel >= 1; }
+    bool isMpeMember(int channel) const { return mpe_ && !multi_ && channel >= 1; }
 
     bool mpe_ = false;
+    bool multi_ = false;
     float mpeBendRange_ = 48.0f;
     float perNoteBendRange_ = 48.0f;
     // MIDI 1.0 parser state

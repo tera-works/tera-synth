@@ -32,23 +32,45 @@ void atomicMaxI(std::atomic<int>& a, int v) {
 }
 }  // namespace
 
-Engine::Engine() : sharedParams_(new std::atomic<float>[P::kNumParams]) {
+Engine::Engine()
+    : sharedParams_(new std::atomic<float>[P::kNumParams]),
+      partShared_(new std::atomic<float>[(size_t)(kNumParts - 1) * P::kPartParams]),
+      partP_(new float[(size_t)(kNumParts - 1) * P::kPartParams]) {
     float defs[P::kNumParams];
     defaultParams(defs);
     for (int i = 0; i < P::kNumParams; ++i) sharedParams_[i].store(defs[i]);
     std::memcpy(p_, defs, sizeof p_);
-    for (auto& s : pendingSets_) s.store(nullptr);
+    for (int k = 1; k < kNumParts; ++k)
+        for (int i = 0; i < P::kPartParams; ++i) {
+            const size_t idx = (size_t)(k - 1) * P::kPartParams + (size_t)i;
+            partShared_[idx].store(defs[i]);
+            partP_[idx] = defs[i];
+        }
+    for (int k = 0; k < kNumParts; ++k) {
+        partVersion_[k].store(1);
+        statPartVoices_[k].store(0);
+        float mix[Mix::Count];
+        defaultPartMix(k, mix);
+        for (int i = 0; i < Mix::Count; ++i) {
+            mixShared_[k][i].store(mix[i]);
+            mix_[k][i] = mix[i];
+        }
+        parts_[k].p = k == 0 ? p_ : partP_.get() + (size_t)(k - 1) * P::kPartParams;
+        parts_[k].rng = Rng(0x9E3779B9u * (uint32_t)(k + 1));
+        for (auto& ps : pendingSets_[k]) ps.store(nullptr);
+    }
     for (int t = 0; t < 2; ++t) {
         pendingIr_[t].store(nullptr);
     }
 }
 
 Engine::~Engine() {
-    for (int l = 0; l < kNumLayers; ++l) {
-        delete pendingSets_[l].exchange(nullptr);
-        delete currentSets_[l];
-        currentSets_[l] = nullptr;
-    }
+    for (int k = 0; k < kNumParts; ++k)
+        for (int l = 0; l < kNumLayers; ++l) {
+            delete pendingSets_[k][l].exchange(nullptr);
+            delete currentSets_[k][l];
+            currentSets_[k][l] = nullptr;
+        }
     for (int t = 0; t < 2; ++t) {
         fx::ConvIr* p = pendingIr_[t].exchange(nullptr);
         if (p != &unloadIr_) delete p;
@@ -69,8 +91,11 @@ void Engine::prepare(float sampleRate, int maxBlockSize) {
     limiter_.prepare(sampleRate, kMaxBlockSize);
     masterGain_.setTime(0.02f, sampleRate);
     masterGain_.reset(p_[P::MasterVolume]);
-    ctx_.sampleRate = sampleRate;
+    for (auto& ps : parts_) ps.ctx.sampleRate = sampleRate;
+    gainStep_ = 1.0f / (0.01f * sampleRate);  // mix gain ramps: full scale in 10 ms
     seenParamVersion_ = 0;
+    for (auto& v : seenPartVersion_) v = 0;
+    seenMixVersion_ = 0;
     prepared_ = true;
 }
 
@@ -105,33 +130,82 @@ void Engine::getAllParams(float* out) const {
     for (int i = 0; i < P::kNumParams; ++i) out[i] = sharedParams_[i].load(std::memory_order_relaxed);
 }
 
-void Engine::setSampleSet(int layer, std::unique_ptr<SampleSet> set) {
-    if (layer < 0 || layer >= kNumLayers) return;
+void Engine::setPartSampleSet(int part, int layer, std::unique_ptr<SampleSet> set) {
+    if (part < 0 || part >= kNumParts || layer < 0 || layer >= kNumLayers) return;
     if (!set) set = std::make_unique<SampleSet>();
     {
         std::lock_guard<std::mutex> lock(nameMutex_);
-        setNames_[layer] = set->name;
-        setPaths_[layer] = set->sourcePath;
+        setNames_[part][layer] = set->name;
+        setPaths_[part][layer] = set->sourcePath;
     }
     std::lock_guard<std::mutex> lock(loaderMutex_);
-    SampleSet* old = pendingSets_[layer].exchange(set.release(), std::memory_order_acq_rel);
+    SampleSet* old = pendingSets_[part][layer].exchange(set.release(), std::memory_order_acq_rel);
     delete old;  // never reached the audio thread
     if (!prepared_) {
         // No audio thread yet: publish immediately.
-        SampleSet* s = pendingSets_[layer].exchange(nullptr);
-        delete currentSets_[layer];
-        currentSets_[layer] = s;
+        SampleSet* s = pendingSets_[part][layer].exchange(nullptr);
+        delete currentSets_[part][layer];
+        currentSets_[part][layer] = s;
     }
 }
 
-std::string Engine::sampleSetName(int layer) const {
+std::string Engine::partSampleSetName(int part, int layer) const {
     std::lock_guard<std::mutex> lock(nameMutex_);
-    return layer >= 0 && layer < kNumLayers ? setNames_[layer] : std::string();
+    return part >= 0 && part < kNumParts && layer >= 0 && layer < kNumLayers ? setNames_[part][layer] : std::string();
 }
 
-std::string Engine::sampleSetPath(int layer) const {
+std::string Engine::partSampleSetPath(int part, int layer) const {
     std::lock_guard<std::mutex> lock(nameMutex_);
-    return layer >= 0 && layer < kNumLayers ? setPaths_[layer] : std::string();
+    return part >= 0 && part < kNumParts && layer >= 0 && layer < kNumLayers ? setPaths_[part][layer] : std::string();
+}
+
+void Engine::setPartParam(int part, int id, float value) {
+    if (part < 0 || part >= kNumParts || id < 0 || id >= P::kNumParams) return;
+    if (part == 0 || !isPartParam(id)) { setParam(id, value); return; }
+    partShared_[(size_t)(part - 1) * P::kPartParams + (size_t)id].store(sanitizeParam(id, value), std::memory_order_relaxed);
+    partVersion_[part].fetch_add(1, std::memory_order_release);
+}
+
+float Engine::getPartParam(int part, int id) const {
+    if (part < 0 || part >= kNumParts || id < 0 || id >= P::kNumParams) return 0.0f;
+    if (part == 0 || !isPartParam(id)) return getParam(id);
+    return partShared_[(size_t)(part - 1) * P::kPartParams + (size_t)id].load(std::memory_order_relaxed);
+}
+
+void Engine::setPartParams(int part, const float* values) {
+    if (part < 0 || part >= kNumParts) return;
+    for (int i = 0; i < P::kPartParams; ++i) {
+        if (!isPartParam(i)) continue;
+        const float v = sanitizeParam(i, values[i]);
+        if (part == 0) sharedParams_[i].store(v, std::memory_order_relaxed);
+        else partShared_[(size_t)(part - 1) * P::kPartParams + (size_t)i].store(v, std::memory_order_relaxed);
+    }
+    if (part == 0) paramVersion_.fetch_add(1, std::memory_order_release);
+    else partVersion_[part].fetch_add(1, std::memory_order_release);
+}
+
+void Engine::getPartParams(int part, float* out) const {
+    getAllParams(out);
+    if (part <= 0 || part >= kNumParts) return;
+    for (int i = 0; i < P::kPartParams; ++i)
+        if (isPartParam(i)) out[i] = partShared_[(size_t)(part - 1) * P::kPartParams + (size_t)i].load(std::memory_order_relaxed);
+}
+
+void Engine::setGlobalParams(const float* values) {
+    for (int i = 0; i < P::kNumParams; ++i)
+        if (!isPartParam(i)) sharedParams_[i].store(sanitizeParam(i, values[i]), std::memory_order_relaxed);
+    paramVersion_.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setPartMix(int part, int id, float value) {
+    if (part < 0 || part >= kNumParts || id < 0 || id >= Mix::Count) return;
+    mixShared_[part][id].store(sanitizePartMix(id, value), std::memory_order_relaxed);
+    mixVersion_.fetch_add(1, std::memory_order_release);
+}
+
+float Engine::getPartMix(int part, int id) const {
+    if (part < 0 || part >= kNumParts || id < 0 || id >= Mix::Count) return 0.0f;
+    return mixShared_[part][id].load(std::memory_order_relaxed);
 }
 
 void Engine::collectGarbage() {
@@ -195,19 +269,26 @@ void Engine::resetPeakStats() {
 
 // ------------------------------------------------------------ audio thread
 
-Voice* Engine::allocateVoice() {
+Voice* Engine::allocateVoice(int part) {
     const int limit = maxVoices_.load(std::memory_order_relaxed);
     int playing = 0;
+    int count[kNumParts] = {};
     for (auto& v : voices_)
-        if (v.active() && !v.stolen()) ++playing;
+        if (v.active() && !v.stolen()) { ++playing; ++count[v.part]; }
     if (playing >= limit) {
-        // steal: released voice with lowest level first, otherwise the oldest
+        // steal: a released voice first (lowest level), otherwise the oldest
+        // held voice. Across parts the part that would hold the most voices
+        // after this note-on loses one, so a busy part cannot starve the
+        // others. With a single part this is the plain single-timbral rule.
+        ++count[part];
         Voice* victim = nullptr;
         for (auto& v : voices_) {
             if (!v.active() || v.stolen()) continue;
             if (!victim) { victim = &v; continue; }
             const bool vr = v.released(), cr = victim->released();
             if (vr != cr) { if (vr) victim = &v; continue; }
+            const int vc = count[v.part], cc = count[victim->part];
+            if (vc != cc) { if (vc > cc) victim = &v; continue; }
             if (vr ? v.level() < victim->level() : v.age() < victim->age()) victim = &v;
         }
         if (victim) victim->steal();
@@ -223,90 +304,126 @@ Voice* Engine::allocateVoice() {
     return q;
 }
 
-void Engine::noteOn(const Event& e) {
-    if (e.value <= 0.0f) {  // velocity 0 => note off
-        noteOff(Event::noteOff(e.noteId, e.key));
+void Engine::noteOn(int part, const Event& in) {
+    if (in.value <= 0.0f) {  // velocity 0 => note off
+        noteOff(Event::noteOff(in.noteId, in.key), part);
         return;
+    }
+    Event e = in;
+    float send = 1.0f;
+    if (multiActive_) {
+        const float* m = mix_[part];
+        if (m[Mix::Mute] > 0.5f || in.key < (int)m[Mix::KeyLow] || in.key > (int)m[Mix::KeyHigh]) return;
+        e.key = (uint8_t)std::max(0, std::min(127, (int)in.key + (int)m[Mix::Transpose]));
+        send = m[Mix::FxSend];
     }
     if (e.noteId != 0) {
         for (auto& v : voices_)
-            if (v.active() && !v.released() && v.noteId() == e.noteId) v.release();
+            if (v.active() && !v.released() && v.noteId() == e.noteId && v.part == part) v.release();
     }
     bool held = false;
     for (auto& v : voices_)
         if (v.active() && !v.released()) { held = true; break; }
-    rack_.noteOn(e.key, e.value, !held);
-    Voice* v = allocateVoice();
-    v->start(e, ctx_, ++ageCounter_, rng_.unipolar());
+    if (send > 0.0f) rack_.noteOn(e.key, e.value, !held);
+    Voice* v = allocateVoice(part);
+    v->start(e, parts_[part].ctx, ++ageCounter_, rng_.unipolar());
+    v->part = part;
+    v->matchKey = in.key;
 }
 
-void Engine::noteOff(const Event& e) {
+void Engine::noteOff(const Event& e, int part) {
     for (auto& v : voices_) {
         if (!v.active() || v.released() || v.sustained) continue;
-        const bool match = e.noteId != 0 ? v.noteId() == e.noteId : v.key() == e.key;
+        if (part >= 0 && v.part != part) continue;
+        const bool match = e.noteId != 0 ? v.noteId() == e.noteId : v.matchKey == e.key;
         if (!match) continue;
-        if (sustain_ || v.hold) v.sustained = true;
+        if (parts_[v.part].sustain || v.hold) v.sustained = true;
         else v.release();
     }
 }
 
-void Engine::releaseSustained() {
-    for (auto& v : voices_)
-        if (v.active() && v.sustained && !v.hold) v.release();
+void Engine::perNote(const Event& e, int part) {
+    for (auto& v : voices_) {
+        if (!v.active() || v.stolen()) continue;
+        if (part >= 0 && v.part != part) continue;
+        if (e.noteId != 0 ? v.noteId() != e.noteId : v.matchKey != e.key) continue;
+        if (e.type == EventType::NoteHold) {
+            v.hold = e.value > 0.5f;
+            if (!v.hold && v.sustained && !parts_[v.part].sustain) v.release();
+        } else {
+            v.applyExpression(e.type, e.value);
+        }
+    }
 }
 
-void Engine::handleEvent(const Event& e) {
+void Engine::releaseSustained(int part) {
+    for (auto& v : voices_)
+        if (v.active() && v.part == part && v.sustained && !v.hold) v.release();
+}
+
+void Engine::partEvent(int part, const Event& e) {
+    PartState& ps = parts_[part];
     switch (e.type) {
-        case EventType::NoteOn: noteOn(e); break;
-        case EventType::NoteOff: noteOff(e); break;
+        case EventType::NoteOn: noteOn(part, e); break;
+        case EventType::NoteOff: noteOff(e, part); break;
         case EventType::NotePitch:
         case EventType::NotePressure:
         case EventType::NoteTimbre:
         case EventType::NoteX:
-            for (auto& v : voices_) {
-                if (!v.active() || v.stolen()) continue;
-                if (e.noteId != 0 ? v.noteId() == e.noteId : v.key() == e.key) v.applyExpression(e.type, e.value);
-            }
-            break;
-        case EventType::NoteHold:
-            for (auto& v : voices_) {
-                if (!v.active() || v.stolen()) continue;
-                if (e.noteId != 0 ? v.noteId() != e.noteId : v.key() != e.key) continue;
-                v.hold = e.value > 0.5f;
-                if (!v.hold && v.sustained && !sustain_) v.release();
-            }
-            break;
-        case EventType::PitchBend: pitchBend_ = clampf(e.value, -1.0f, 1.0f); break;
-        case EventType::ModWheel: ctx_.modWheel = clampf(e.value, 0.0f, 1.0f); break;
-        case EventType::ChannelPressure: ctx_.chanPressure = clampf(e.value, 0.0f, 1.0f); break;
+        case EventType::NoteHold: perNote(e, part); break;
+        case EventType::PitchBend: ps.pitchBend = clampf(e.value, -1.0f, 1.0f); break;
+        case EventType::ModWheel: ps.ctx.modWheel = clampf(e.value, 0.0f, 1.0f); break;
+        case EventType::ChannelPressure: ps.ctx.chanPressure = clampf(e.value, 0.0f, 1.0f); break;
         case EventType::Sustain: {
             const bool on = e.value >= 0.5f;
-            if (sustain_ && !on) { sustain_ = false; releaseSustained(); }
-            sustain_ = on;
+            if (ps.sustain && !on) { ps.sustain = false; releaseSustained(part); }
+            ps.sustain = on;
             break;
         }
         case EventType::Controller:
             switch (e.controller) {
-                case 1: ctx_.modWheel = clampf(e.value, 0.0f, 1.0f); break;
-                case 2: ctx_.breath = clampf(e.value, 0.0f, 1.0f); break;
-                case 11: ctx_.expression = clampf(e.value, 0.0f, 1.0f); break;
-                case 64: handleEvent(Event::control(EventType::Sustain, e.value)); break;
-                case 120: for (auto& v : voices_) v.hardStop(); break;
-                case 123: for (auto& v : voices_) if (v.active()) v.release(); break;
+                case 1: ps.ctx.modWheel = clampf(e.value, 0.0f, 1.0f); break;
+                case 2: ps.ctx.breath = clampf(e.value, 0.0f, 1.0f); break;
+                case 7: if (multiActive_) ps.ccVolume = clampf(e.value, 0.0f, 1.0f); break;
+                case 10: if (multiActive_) ps.ccPan = clampf(e.value * 2.0f - 1.0f, -1.0f, 1.0f); break;
+                case 11: ps.ctx.expression = clampf(e.value, 0.0f, 1.0f); break;
+                case 64: partEvent(part, Event::control(EventType::Sustain, e.value)); break;
+                case 120: for (auto& v : voices_) if (v.part == part) v.hardStop(); break;
+                case 123: for (auto& v : voices_) if (v.active() && v.part == part) v.release(); break;
                 default: break;
             }
             break;
         case EventType::AllNotesOff:
-            sustain_ = false;
-            for (auto& v : voices_) if (v.active()) v.release();
+            ps.sustain = false;
+            for (auto& v : voices_) if (v.active() && v.part == part) v.release();
             break;
         case EventType::AllSoundOff:
-            for (auto& v : voices_) v.hardStop();
+            for (auto& v : voices_) if (v.part == part) v.hardStop();
             break;
-        case EventType::Looper: rack_.looperCommand((fx::LooperCmd)e.controller); break;
         case EventType::ProgramChange:  // handled by the host
         default: break;
     }
+}
+
+void Engine::handleEvent(const Event& e) {
+    if (e.type == EventType::Looper) { rack_.looperCommand((fx::LooperCmd)e.controller); return; }
+    if (!multiActive_) { partEvent(0, e); return; }
+    const bool panic = e.type == EventType::AllNotesOff || e.type == EventType::AllSoundOff;
+    if (e.channel == kOmniChannel) {
+        if (panic) for (int k = 0; k < kNumParts; ++k) partEvent(k, e);
+        else partEvent(selectedPart_.load(std::memory_order_relaxed), e);
+        return;
+    }
+    // Note-id matched note-offs / expression find their voices in any part,
+    // so notes end correctly even if the part's channel changed meanwhile.
+    const bool byId = e.noteId != 0 && e.type != EventType::NoteOn && e.type <= EventType::NoteHold;
+    if (byId) {
+        if (e.type == EventType::NoteOff) noteOff(e, -1);
+        else perNote(e, -1);
+        return;
+    }
+    for (int k = 0; k < kNumParts; ++k)
+        if ((int)mix_[k][Mix::Channel] - 1 == (e.channel & 15)) partEvent(k, e);
 }
 
 void Engine::updateEffects() {
@@ -317,11 +434,97 @@ void Engine::updateEffects() {
     limiter_.enabled = p_[P::Limiter] > 0.5f;
 }
 
+void Engine::updatePartTargets() {
+    for (int k = 0; k < kNumParts; ++k) {
+        PartState& ps = parts_[k];
+        const float* m = mix_[k];
+        const float vol = m[Mix::Mute] > 0.5f ? 0.0f : m[Mix::Volume] * m[Mix::Volume] * ps.ccVolume * ps.ccVolume;
+        const float pan = clampf(m[Mix::Pan] + ps.ccPan, -1.0f, 1.0f);
+        const float gl = vol * (pan > 0.0f ? 1.0f - pan : 1.0f);
+        const float gr = vol * (pan < 0.0f ? 1.0f + pan : 1.0f);
+        const float send = m[Mix::FxSend];
+        ps.target[0] = gl * send;
+        ps.target[1] = gr * send;
+        ps.target[2] = gl * (1.0f - send);
+        ps.target[3] = gr * (1.0f - send);
+    }
+}
+
+void Engine::swapSampleSet(int part, int layer, SampleSet* s) {
+    for (auto& v : voices_)
+        if (v.part == part) v.stopLayer(layer);
+    if (currentSets_[part][layer] && !retired_.push(currentSets_[part][layer])) {
+        // garbage queue full (collectGarbage not called): put the new set back
+        // and retry next block.
+        SampleSet* expected = nullptr;
+        if (!pendingSets_[part][layer].compare_exchange_strong(expected, s)) retired_.push(s);
+        return;
+    }
+    currentSets_[part][layer] = s;
+}
+
+// Multi-timbral render: voices go into per-part control-block buffers that are
+// mixed (volume / pan / FX send) into the rack bus (L/R) and the dry bus.
+void Engine::processMulti(float* L, float* R, int n) {
+    std::memset(dryL_, 0, sizeof(float) * n);
+    std::memset(dryR_, 0, sizeof(float) * n);
+    for (int off = 0; off < n; off += kControlBlock) {
+        const int m = std::min(kControlBlock, n - off);
+        bool used[kNumParts] = {};
+        for (int k = 0; k < kNumParts; ++k) {
+            PartState& ps = parts_[k];
+            ps.ctx.lfo2 = ps.lfo2.advance((LfoWave)(int)ps.p[P::Lfo2Wave], ps.p[P::Lfo2Rate], (float)m / sampleRate_,
+                                          k == 0 ? rng_ : ps.rng);
+        }
+        for (auto& v : voices_) {
+            if (!v.active()) continue;
+            const int k = v.part;
+            if (!used[k]) {
+                used[k] = true;
+                std::memset(partBuf_[k][0], 0, sizeof(float) * m);
+                std::memset(partBuf_[k][1], 0, sizeof(float) * m);
+            }
+            v.render(partBuf_[k][0], partBuf_[k][1], m, parts_[k].ctx);
+        }
+        const float inv = 1.0f / (float)m;
+        const float step = gainStep_ * (float)m;
+        for (int k = 0; k < kNumParts; ++k) {
+            PartState& ps = parts_[k];
+            float g0[4], dg[4];
+            for (int c = 0; c < 4; ++c) {
+                g0[c] = ps.gain[c];
+                const float g1 = g0[c] + clampf(ps.target[c] - g0[c], -step, step);  // linear ramp
+                ps.gain[c] = g1;
+                dg[c] = (g1 - g0[c]) * inv;
+            }
+            if (!used[k]) continue;
+            const float* bl = partBuf_[k][0];
+            const float* br = partBuf_[k][1];
+            float* sl = L + off;
+            float* sr = R + off;
+            float* dl = dryL_ + off;
+            float* dr = dryR_ + off;
+            for (int i = 0; i < m; ++i) {
+                const float t = (float)(i + 1);
+                sl[i] += bl[i] * (g0[0] + dg[0] * t);
+                sr[i] += br[i] * (g0[1] + dg[1] * t);
+                dl[i] += bl[i] * (g0[2] + dg[2] * t);
+                dr[i] += br[i] * (g0[3] + dg[3] * t);
+            }
+        }
+    }
+}
+
 void Engine::process(float* L, float* R, int n) {
     const auto t0 = std::chrono::steady_clock::now();
     enableFlushToZero();
     if (!prepared_ || n <= 0) {
         if (n > 0) { std::memset(L, 0, sizeof(float) * n); std::memset(R, 0, sizeof(float) * n); }
+        return;
+    }
+    if (n > kMaxBlockSize && (multiActive_ || multi_.load(std::memory_order_relaxed))) {
+        // the dry bus holds kMaxBlockSize frames
+        for (int off = 0; off < n; off += kMaxBlockSize) process(L + off, R + off, std::min(kMaxBlockSize, n - off));
         return;
     }
 
@@ -334,6 +537,34 @@ void Engine::process(float* L, float* R, int n) {
     } else if (effectsQuality_ != quality_.load(std::memory_order_relaxed)) {
         updateEffects();
     }
+    for (int k = 1; k < kNumParts; ++k) {
+        const uint32_t pv = partVersion_[k].load(std::memory_order_acquire);
+        if (pv == seenPartVersion_[k]) continue;
+        seenPartVersion_[k] = pv;
+        float* dst = partP_.get() + (size_t)(k - 1) * P::kPartParams;
+        const std::atomic<float>* src = partShared_.get() + (size_t)(k - 1) * P::kPartParams;
+        for (int i = 0; i < P::kPartParams; ++i) dst[i] = src[i].load(std::memory_order_relaxed);
+    }
+    const uint32_t mv = mixVersion_.load(std::memory_order_acquire);
+    if (mv != seenMixVersion_) {
+        seenMixVersion_ = mv;
+        for (int k = 0; k < kNumParts; ++k)
+            for (int i = 0; i < Mix::Count; ++i) mix_[k][i] = mixShared_[k][i].load(std::memory_order_relaxed);
+    }
+    const bool multi = multi_.load(std::memory_order_relaxed);
+    if (multi != multiActive_) {
+        multiActive_ = multi;
+        if (!multi) {
+            // back to single-part mode: only part 0 may sound
+            for (auto& v : voices_) if (v.part != 0) v.hardStop();
+        }
+        for (auto& ps : parts_) {
+            ps.ccVolume = 1.0f;
+            ps.ccPan = 0.0f;
+        }
+        updatePartTargets();
+        for (auto& ps : parts_) std::memcpy(ps.gain, ps.target, sizeof ps.gain);
+    }
     for (int t = 0; t < 2; ++t) {
         if (!pendingIr_[t].load(std::memory_order_acquire)) continue;
         if (currentIr_[t] && !retiredIr_.push(currentIr_[t])) continue;  // garbage queue full: retry next block
@@ -343,54 +574,64 @@ void Engine::process(float* L, float* R, int n) {
     }
 
     // 2. sample set swaps
-    for (int l = 0; l < kNumLayers; ++l) {
-        SampleSet* s = pendingSets_[l].exchange(nullptr, std::memory_order_acq_rel);
-        if (!s) continue;
-        for (auto& v : voices_) v.stopLayer(l);
-        if (currentSets_[l] && !retired_.push(currentSets_[l])) {
-            // garbage queue full (collectGarbage not called): keep the new set
-            // pending-free path by leaking is unacceptable, so swap back.
-            SampleSet* expected = nullptr;
-            if (!pendingSets_[l].compare_exchange_strong(expected, s)) retired_.push(s);
-            continue;
+    for (int k = 0; k < kNumParts; ++k)
+        for (int l = 0; l < kNumLayers; ++l) {
+            if (!pendingSets_[k][l].load(std::memory_order_relaxed)) continue;
+            SampleSet* s = pendingSets_[k][l].exchange(nullptr, std::memory_order_acq_rel);
+            if (s) swapSampleSet(k, l, s);
         }
-        currentSets_[l] = s;
-    }
 
-    // 3. events (voices started here read ctx_)
-    ctx_.params = p_;
-    for (int l = 0; l < kNumLayers; ++l) ctx_.sampleSets[l] = currentSets_[l];
+    // 3. events (voices started here read the part contexts)
+    for (int k = 0; k < kNumParts; ++k) {
+        parts_[k].ctx.params = parts_[k].p;
+        for (int l = 0; l < kNumLayers; ++l) parts_[k].ctx.sampleSets[l] = currentSets_[k][l];
+    }
     Event e;
     int budget = 512;
     while (budget-- > 0 && events_.pop(e)) handleEvent(e);
 
     // 4. render
-    ctx_.pitchBendNorm = pitchBend_;
-    ctx_.pitchBendSemis = pitchBend_ * p_[P::BendRange];
+    for (auto& ps : parts_) {
+        ps.ctx.pitchBendNorm = ps.pitchBend;
+        ps.ctx.pitchBendSemis = ps.pitchBend * ps.p[P::BendRange];
+    }
+    VoiceContext& ctx0 = parts_[0].ctx;
 
     std::memset(L, 0, sizeof(float) * n);
     std::memset(R, 0, sizeof(float) * n);
-    for (int off = 0; off < n; off += kControlBlock) {
-        const int m = std::min(kControlBlock, n - off);
-        ctx_.lfo2 = lfo2_.advance((LfoWave)(int)p_[P::Lfo2Wave], p_[P::Lfo2Rate], (float)m / sampleRate_, rng_);
-        for (auto& v : voices_)
-            if (v.active()) v.render(L + off, R + off, m, ctx_);
+    if (multiActive_) {
+        updatePartTargets();
+        processMulti(L, R, n);
+    } else {
+        for (int off = 0; off < n; off += kControlBlock) {
+            const int m = std::min(kControlBlock, n - off);
+            ctx0.lfo2 = parts_[0].lfo2.advance((LfoWave)(int)p_[P::Lfo2Wave], p_[P::Lfo2Rate], (float)m / sampleRate_, rng_);
+            for (auto& v : voices_)
+                if (v.active()) v.render(L + off, R + off, m, ctx0);
+        }
     }
 
-    // 5. effect rack, then master
+    // 5. effect rack, then master. The rack's FX modulation follows part 0's
+    // controllers (mod wheel, LFO2, ...).
     bool held = false;
     for (auto& v : voices_)
         if (v.active() && !v.released()) { held = true; break; }
     fx::FxGlobals g;
-    g.modWheel = ctx_.modWheel;
-    g.lfo2 = ctx_.lfo2;
-    g.chanPressure = ctx_.chanPressure;
-    g.expression = ctx_.expression;
-    g.breath = ctx_.breath;
-    g.pitchBend = pitchBend_;
+    g.modWheel = ctx0.modWheel;
+    g.lfo2 = ctx0.lfo2;
+    g.chanPressure = ctx0.chanPressure;
+    g.expression = ctx0.expression;
+    g.breath = ctx0.breath;
+    g.pitchBend = parts_[0].pitchBend;
     g.notesHeld = held;
     rack_.process(L, R, n, g, inL_, inR_);
     inL_ = inR_ = nullptr;
+    if (multiActive_) {
+        for (int i = 0; i < n; ++i) {
+            L[i] += dryL_[i];
+            R[i] += dryR_[i];
+        }
+    }
     const float target = p_[P::MasterVolume] * p_[P::MasterVolume];  // perceptual taper
     float peak = 0.0f;
     for (int i = 0; i < n; ++i) {
@@ -403,8 +644,10 @@ void Engine::process(float* L, float* R, int n) {
 
     // 6. stats
     int active = 0;
+    int perPart[kNumParts] = {};
     for (auto& v : voices_)
-        if (v.active()) ++active;
+        if (v.active()) { ++active; ++perPart[v.part]; }
+    for (int k = 0; k < kNumParts; ++k) statPartVoices_[k].store(perPart[k], std::memory_order_relaxed);
     statActive_.store(active, std::memory_order_relaxed);
     atomicMaxI(statPeakVoices_, active);
     atomicMax(statOutPeak_, peak);

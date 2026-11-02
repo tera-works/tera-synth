@@ -60,7 +60,13 @@ bool applyLegacyParam(Preset& p, const std::string& name, float v) {
     return true;
 }
 
-std::string presetToJson(const Preset& p) {
+namespace {
+enum class ParamFilter { All, Part, Global };
+bool keepParam(ParamFilter f, int id) {
+    return f == ParamFilter::All || (f == ParamFilter::Part) == isPartParam(id);
+}
+
+Json presetToValue(const Preset& p, ParamFilter filter) {
     Json root = Json::object();
     root.set("format", "hsynth-preset");
     root.set("version", 1);
@@ -80,6 +86,7 @@ std::string presetToJson(const Preset& p) {
     Json params = Json::object();
     const auto& table = paramTable();
     for (int i = 0; i < P::kNumParams; ++i) {
+        if (!keepParam(filter, i)) continue;
         const ParamInfo& info = table[(size_t)i];
         const float v = i < (int)p.params.size() ? p.params[(size_t)i] : info.def;
         if (info.kind == ParamKind::Enum) {
@@ -90,12 +97,10 @@ std::string presetToJson(const Preset& p) {
         params.set(info.name, (double)v);
     }
     root.set("params", params);
-    return root.dump(2) + "\n";
+    return root;
 }
 
-bool presetFromJson(const std::string& text, Preset& out, std::string& error) {
-    Json root;
-    if (!Json::parse(text, root, error)) { error = "JSON parse error: " + error; return false; }
+bool presetFromValue(const Json& root, Preset& out, std::string& error) {
     if (!root.isObject()) { error = "preset root must be an object"; return false; }
     Preset p;
     if (auto f = root.find("format"); f && f->isString() && f->string() != "hsynth-preset")
@@ -145,6 +150,144 @@ bool presetFromJson(const std::string& text, Preset& out, std::string& error) {
     }
     out = std::move(p);
     return true;
+}
+}  // namespace
+
+std::string presetToJson(const Preset& p) { return presetToValue(p, ParamFilter::All).dump(2) + "\n"; }
+
+bool presetFromJson(const std::string& text, Preset& out, std::string& error) {
+    Json root;
+    if (!Json::parse(text, root, error)) { error = "JSON parse error: " + error; return false; }
+    return presetFromValue(root, out, error);
+}
+
+// ------------------------------------------------------------------ multi
+
+MultiPreset::MultiPreset() {
+    global.name = "";
+    for (int k = 0; k < kNumParts; ++k) defaultPartMix(k, mix[k]);
+}
+
+std::string multiToJson(const MultiPreset& m) {
+    Json root = Json::object();
+    root.set("format", "hsynth-multi");
+    root.set("version", 1);
+    root.set("name", m.name);
+    if (!m.comment.empty()) root.set("comment", m.comment);
+    root.set("selected", m.selectedPart + 1);
+    Json global = Json::object();
+    if (!m.global.impulses[0].empty() || !m.global.impulses[1].empty()) {
+        Json irs = Json::object();
+        irs.set("cab", m.global.impulses[0]);
+        irs.set("reverb", m.global.impulses[1]);
+        global.set("impulses", irs);
+    }
+    Json gp = presetToValue(m.global, ParamFilter::Global);
+    global.set("params", *gp.find("params"));
+    root.set("global", global);
+    Json parts = Json::array();
+    const auto& mixTable = partMixTable();
+    for (int k = 0; k < kNumParts; ++k) {
+        Json part = Json::object();
+        Json mix = Json::object();
+        for (int i = 0; i < Mix::Count; ++i) {
+            const ParamInfo& info = mixTable[(size_t)i];
+            if (info.kind == ParamKind::Bool) mix.set(info.name, m.mix[k][i] > 0.5f);
+            else mix.set(info.name, (double)m.mix[k][i]);
+        }
+        part.set("mix", mix);
+        Preset pp = m.parts[k];
+        pp.impulses[0].clear();  // impulses are global
+        pp.impulses[1].clear();
+        part.set("preset", presetToValue(pp, ParamFilter::Part));
+        parts.push(part);
+    }
+    root.set("parts", parts);
+    return root.dump(2) + "\n";
+}
+
+bool multiFromJson(const std::string& text, MultiPreset& out, std::string& error) {
+    Json root;
+    if (!Json::parse(text, root, error)) { error = "JSON parse error: " + error; return false; }
+    if (!root.isObject()) { error = "multi root must be an object"; return false; }
+    MultiPreset m;
+    if (auto f = root.find("format"); !f || !f->isString() || f->string() != "hsynth-multi") {
+        error = "not an hsynth-multi file";
+        return false;
+    }
+    if (auto v = root.find("version"); v && v->number() > 1)
+        m.warnings.push_back("multi version " + std::to_string((int)v->number()) + " is newer than this engine");
+    if (auto n = root.find("name"); n && n->isString()) m.name = n->string();
+    if (auto n = root.find("comment"); n && n->isString()) m.comment = n->string();
+    if (auto n = root.find("selected"); n && n->isNumber())
+        m.selectedPart = std::max(0, std::min(kNumParts - 1, (int)n->number() - 1));
+    if (auto g = root.find("global"); g && g->isObject()) {
+        Json gp = Json::object();
+        if (auto params = g->find("params")) gp.set("params", *params);
+        else gp.set("params", Json::object());
+        if (auto irs = g->find("impulses")) gp.set("impulses", *irs);
+        if (!presetFromValue(gp, m.global, error)) { error = "global: " + error; return false; }
+        for (auto& w : m.global.warnings) m.warnings.push_back("global: " + w);
+        m.global.warnings.clear();
+    }
+    const Json* parts = root.find("parts");
+    if (!parts || !parts->isArray()) { error = "multi has no 'parts' array"; return false; }
+    if ((int)parts->size() > kNumParts) m.warnings.push_back("more than 16 parts, extra parts ignored");
+    const auto& mixTable = partMixTable();
+    for (int k = 0; k < kNumParts && k < (int)parts->size(); ++k) {
+        const Json& part = parts->at((size_t)k);
+        const std::string tag = "part " + std::to_string(k + 1) + ": ";
+        if (!part.isObject()) { m.warnings.push_back(tag + "not an object"); continue; }
+        if (auto mix = part.find("mix"); mix && mix->isObject()) {
+            for (const auto& kv : mix->members()) {
+                int id = -1;
+                for (int i = 0; i < Mix::Count; ++i)
+                    if (mixTable[(size_t)i].name == kv.first) id = i;
+                if (id < 0 || !(kv.second.isNumber() || kv.second.isBool())) {
+                    m.warnings.push_back(tag + "invalid mix setting '" + kv.first + "'");
+                    continue;
+                }
+                m.mix[k][id] = sanitizePartMix(id, (float)kv.second.number());
+            }
+        }
+        if (auto pr = part.find("preset"); pr && pr->isObject()) {
+            std::string err;
+            if (!presetFromValue(*pr, m.parts[k], err)) { m.warnings.push_back(tag + err); continue; }
+            for (auto& w : m.parts[k].warnings) m.warnings.push_back(tag + w);
+            m.parts[k].warnings.clear();
+        }
+    }
+    out = std::move(m);
+    return true;
+}
+
+namespace {
+bool readFile(const std::string& path, std::string& text, std::string& error) {
+    std::ifstream f(utf8Path(path), std::ios::binary);
+    if (!f) { error = "cannot open " + path; return false; }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    text = ss.str();
+    return true;
+}
+bool writeFile(const std::string& path, const std::string& text, std::string& error) {
+    std::ofstream f(utf8Path(path), std::ios::binary | std::ios::trunc);
+    if (!f) { error = "cannot write " + path; return false; }
+    f << text;
+    if (!f) { error = "write failed " + path; return false; }
+    return true;
+}
+}  // namespace
+
+bool loadMultiFile(const std::string& path, MultiPreset& out, std::string& error) {
+    std::string text;
+    if (!readFile(path, text, error)) return false;
+    if (!multiFromJson(text, out, error)) { error = path + ": " + error; return false; }
+    return true;
+}
+
+bool saveMultiFile(const std::string& path, const MultiPreset& m, std::string& error) {
+    return writeFile(path, multiToJson(m), error);
 }
 
 bool loadPresetFile(const std::string& path, Preset& out, std::string& error) {

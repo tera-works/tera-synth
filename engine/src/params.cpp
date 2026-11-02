@@ -1,5 +1,6 @@
 #include "hsynth/params.h"
 
+#include <algorithm>
 #include <cmath>
 #include <unordered_map>
 
@@ -239,6 +240,44 @@ float sanitizeParam(int id, float value) {
     if (value < p.min) value = p.min;
     if (value > p.max) value = p.max;
     if (p.kind != ParamKind::Float) value = std::round(value);
+    return value;
+}
+
+const std::vector<ParamInfo>& partMixTable() {
+    static const std::vector<ParamInfo> table = [] {
+        std::vector<ParamInfo> t((size_t)Mix::Count);
+        auto set = [&](int id, const char* name, const char* label, ParamKind kind, float mn, float mx, float def,
+                       const char* unit = "") {
+            ParamInfo& p = t[(size_t)id];
+            p.name = name; p.group = "Part"; p.label = label; p.kind = kind;
+            p.min = mn; p.max = mx; p.def = def; p.unit = unit;
+        };
+        set(Mix::Volume, "volume", "Volume", ParamKind::Float, 0, 1, 1);
+        set(Mix::Pan, "pan", "Pan", ParamKind::Float, -1, 1, 0);
+        set(Mix::Mute, "mute", "Mute", ParamKind::Bool, 0, 1, 0);
+        set(Mix::Channel, "channel", "MIDI Ch", ParamKind::Int, 1, 16, 1);
+        set(Mix::KeyLow, "key.low", "Key Lo", ParamKind::Int, 0, 127, 0);
+        set(Mix::KeyHigh, "key.high", "Key Hi", ParamKind::Int, 0, 127, 127);
+        set(Mix::Transpose, "transpose", "Transpose", ParamKind::Int, -48, 48, 0, "st");
+        set(Mix::FxSend, "fx.send", "FX Send", ParamKind::Float, 0, 1, 1);
+        return t;
+    }();
+    return table;
+}
+
+void defaultPartMix(int part, float* values) {
+    const auto& t = partMixTable();
+    for (int i = 0; i < Mix::Count; ++i) values[i] = t[(size_t)i].def;
+    values[Mix::Channel] = (float)(1 + std::max(0, std::min(kNumParts - 1, part)) % 16);
+}
+
+float sanitizePartMix(int id, float value) {
+    if (id < 0 || id >= Mix::Count) return 0.0f;
+    const ParamInfo& p = partMixTable()[(size_t)id];
+    if (!std::isfinite(value)) value = p.def;
+    value = std::min(p.max, std::max(p.min, value));
+    if (p.kind == ParamKind::Bool) return value > 0.5f ? 1.0f : 0.0f;
+    if (p.kind == ParamKind::Int) return std::round(value);
     return value;
 }
 

@@ -170,7 +170,42 @@ constexpr int fxSlot(int slot) { return kFxChainBase + FxSlot1 + slot; }
 constexpr int fxMod(int slot, int p) { return kFxModBase + slot * FxModCount + p; }
 constexpr int fxp(int block, int local) { return kFxBlockBase + fx::blockOffset(block) + local; }
 
+// Multi-timbral parts: ids [0, kPartParams) form one part's patch (voice,
+// layers, mod matrix). MasterVolume and Limiter fall in that range but belong
+// to the master section: they are only read from the global array.
+constexpr int kPartParams = kFxChainBase;
+
 }  // namespace P
+
+constexpr int kNumParts = 16;
+
+// True for ids stored per part (everything below the effect rack except the
+// master volume and limiter switch).
+constexpr bool isPartParam(int id) {
+    return id >= 0 && id < P::kPartParams && id != P::MasterVolume && id != P::Limiter;
+}
+
+// Per-part mix settings (multi-timbral mode only; see engine.h).
+namespace Mix {
+enum : int {
+    Volume = 0,  // 0..1, gain = volume^2 (same taper as master volume)
+    Pan,         // -1..1, balance (centre = unity on both sides)
+    Mute,        // bool: muted parts ignore note-ons and fade out
+    Channel,     // MIDI channel 1..16 the part listens to (several parts may share one = layer)
+    KeyLow,      // key range 0..127 (inclusive, before transpose)
+    KeyHigh,
+    Transpose,   // semitones -48..48
+    FxSend,      // 0 = dry (bypasses the rack), 1 = all into the shared effect rack
+    Count
+};
+}
+
+// Metadata of the mix settings (names: "volume", "pan", "mute", "channel",
+// "key.low", "key.high", "transpose", "fx.send"). def of "channel" is 1; use
+// defaultPartMix() for the per-part default (part N -> channel N+1).
+const std::vector<ParamInfo>& partMixTable();
+void defaultPartMix(int part, float* values);  // Mix::Count values
+float sanitizePartMix(int id, float value);
 
 // Metadata for all parameters, indexed by id. Built once (thread-safe static).
 const std::vector<ParamInfo>& paramTable();
