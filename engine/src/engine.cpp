@@ -677,7 +677,7 @@ void Engine::processMulti(float* L, float* R, int n) {
         const int m = std::min(kControlBlock, n - off);
         for (int k = 0; k < kNumParts; ++k) {
             PartState& ps = parts_[k];
-            ps.ctx.lfo2 = ps.lfo2.advance((LfoWave)(int)ps.p[P::Lfo2Wave], ps.p[P::Lfo2Rate], (float)m / sampleRate_,
+            ps.ctx.lfo2 = ps.lfo2.advance((LfoWave)(int)ps.p[P::Lfo2Wave], lfo2Rate(ps.p), (float)m / sampleRate_,
                                           k == 0 ? rng_ : ps.rng);
         }
         for (auto& v : voices_) {
@@ -814,6 +814,7 @@ void Engine::process(float* L, float* R, int n) {
 
     // 4. render
     for (auto& ps : parts_) {
+        ps.ctx.tempo = rack_.tempo();
         ps.ctx.pitchBendNorm = ps.pitchBend;
         ps.ctx.pitchBendSemis = ps.pitchBend * ps.p[P::BendRange];
     }
@@ -827,7 +828,7 @@ void Engine::process(float* L, float* R, int n) {
     } else {
         for (int off = 0; off < n; off += kControlBlock) {
             const int m = std::min(kControlBlock, n - off);
-            ctx0.lfo2 = parts_[0].lfo2.advance((LfoWave)(int)p_[P::Lfo2Wave], p_[P::Lfo2Rate], (float)m / sampleRate_, rng_);
+            ctx0.lfo2 = parts_[0].lfo2.advance((LfoWave)(int)p_[P::Lfo2Wave], lfo2Rate(p_), (float)m / sampleRate_, rng_);
             for (auto& v : voices_)
                 if (v.active()) v.render(L + off, R + off, m, ctx0);
         }

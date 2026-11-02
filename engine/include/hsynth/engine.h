@@ -182,6 +182,10 @@ private:
     void releaseSustained(int part);
     Voice* allocateVoice(int part);
     void updateEffects();
+    float lfo2Rate(const float* p) const {
+        const float b = fx::syncBeats((int)p[P::Lfo2Sync]);
+        return b > 0.0f ? rack_.tempo() / 60.0f / b : p[P::Lfo2Rate];
+    }
     void updateInserts(int part);
     void updatePartTargets();
     void processMulti(float* L, float* R, int n);

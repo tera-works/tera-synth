@@ -421,3 +421,107 @@ TEST(voice_modes_no_stuck_notes_stress) {
     INFO("voices left after all notes off: %d\n", e.stats().activeVoices);
     CHECK(e.stats().activeVoices == 0);
 }
+
+// ------------------------------------------------------- modulation matrix
+
+namespace {
+void route(Engine& e, int slot, ModSource src, ModDest dst, float amt, ModSource via = ModSource::None) {
+    e.setParam(P::mod(slot, P::ModSrc), (float)src);
+    e.setParam(P::mod(slot, P::ModDst), (float)dst);
+    e.setParam(P::mod(slot, P::ModAmt), amt);
+    e.setParam(P::mod(slot, P::ModVia), (float)via);
+}
+}  // namespace
+
+TEST(mod_constant_source_and_slot16) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    route(e, 15, ModSource::Constant, ModDest::Pitch, 0.5f);  // last slot: +12 st
+    CHECK_NEAR(zeroCrossFreq(renderNote(e, 57, 0.5), kSr, 4800, 20000), 440.0, 1.5);
+    route(e, 15, ModSource::Constant, ModDest::Pitch, 0.5f, ModSource::ModWheel);  // scaled by the wheel (0)
+    e.sendEvent(Event::control(EventType::AllSoundOff, 0));
+    CHECK_NEAR(zeroCrossFreq(renderNote(e, 57, 0.5), kSr, 4800, 20000), 220.0, 1.0);
+}
+
+TEST(mod_lfo3_and_env3) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    // env3 -> pitch: +12 st at the start, decaying to 0 (sustain 0)
+    e.setParam(P::Env3Attack, 0.001f);
+    e.setParam(P::Env3Decay, 0.2f);
+    e.setParam(P::Env3Sustain, 0.0f);
+    route(e, 9, ModSource::Env3, ModDest::Pitch, 0.5f);
+    auto L = renderNote(e, 57, 1.5);
+    const double early = zeroCrossFreq(L, kSr, 200, 1400), late = zeroCrossFreq(L, kSr, 48000, 70000);
+    INFO("env3 pitch: early %.1f Hz, late %.1f Hz\n", early, late);
+    CHECK(early > 300.0);  // averaged over the first 25 ms of the decay
+    CHECK_NEAR(late, 220.0, 1.0);
+    // lfo3 tempo-synced to 1/4 at fx.tempo 90 bpm -> 1.5 Hz square: +-1 semitone steps
+    route(e, 9, ModSource::None, ModDest::None, 0.0f);
+    e.setParam(P::fxChain(P::FxTempo), 90.0f);
+    e.setParam(P::Lfo3Wave, (float)LfoWave::Square);
+    e.setParam(P::Lfo3Sync, (float)fx::SyncDiv::D1_4);
+    route(e, 10, ModSource::Lfo3, ModDest::Pitch, 1.0f / 24.0f);
+    e.sendEvent(Event::control(EventType::AllSoundOff, 0));
+    L = renderNote(e, 69, 1.5);
+    // square starts high: +1 st for 1/3 s, then -1 st
+    const double hi = zeroCrossFreq(L, kSr, 1000, 15000), lo = zeroCrossFreq(L, kSr, 17000, 31000);
+    INFO("lfo3: %.1f / %.1f Hz\n", hi, lo);
+    CHECK_NEAR(hi, 440.0 * std::pow(2.0, 1.0 / 12.0), 2.0);
+    CHECK_NEAR(lo, 440.0 * std::pow(2.0, -1.0 / 12.0), 2.0);
+}
+
+TEST(mod_new_destinations) {
+    // layer pan: mod wheel -> a.pan +1 moves layer A hard right
+    {
+        Engine e;
+        e.prepare(48000);
+        sinePatch(e);
+        route(e, 9, ModSource::ModWheel, ModDest::LayerAPan, 1.0f);
+        RenderJob job;
+        job.seconds = 0.5;
+        job.events.push_back({0.0, Event::control(EventType::ModWheel, 1.0f)});
+        job.events.push_back({0.0, Event::noteOn(1, 69, 1.0f)});
+        std::vector<float> L, R;
+        renderOffline(e, job, L, R);
+        CHECK(rms(L, 4800, 20000) < 1e-4 && rms(R, 4800, 20000) > 0.05);
+    }
+    // FM operator level: algorithm 1 (4>3>2>1); op2 level -> 0 leaves op1 as a pure sine
+    {
+        auto h2 = [](float amt) {
+            Engine e;
+            e.prepare(48000);
+            sinePatch(e);
+            e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
+            e.setParam(P::fmOp(0, 1, P::OpLevel), 1.0f);
+            e.setParam(P::fmOp(0, 1, P::OpSustain), 1.0f);
+            e.setParam(P::fmOp(0, 0, P::OpSustain), 1.0f);
+            route(e, 9, ModSource::Constant, ModDest::FmOp2Level, amt);
+            const auto L = renderNote(e, 57, 0.5);
+            return goertzel(L, kSr, 440, 4800, 16000) / goertzel(L, kSr, 220, 4800, 16000);
+        };
+        const double full = h2(0.0f), off = h2(-1.0f);
+        INFO("FM 2nd harmonic ratio: op2 full %g, op2 modulated to 0 %g\n", full, off);
+        CHECK(full > 0.05);
+        CHECK(off < 1e-3);
+    }
+    // velocity shortens the amp attack (amp.attack, negative amount)
+    {
+        auto levelAt20ms = [](float vel) {
+            Engine e;
+            e.prepare(48000);
+            sinePatch(e);
+            e.setParam(P::AmpAttack, 0.5f);
+            route(e, 9, ModSource::Velocity, ModDest::AmpAttack, -1.0f);  // vel 1: attack / 8
+            RenderJob job;
+            job.seconds = 0.1;
+            job.events.push_back({0.0, Event::noteOn(1, 69, vel)});
+            std::vector<float> L, R;
+            renderOffline(e, job, L, R);
+            return rms(L, 800, 1100);
+        };
+        CHECK(levelAt20ms(1.0f) > 3.0 * levelAt20ms(0.1f));
+    }
+}

@@ -17,11 +17,13 @@ const std::vector<std::string> kVfxNames = {"off", "saturate", "fold", "crush", 
 const std::vector<std::string> kLfoWaveNames = {"sine", "triangle", "saw", "square", "s&h"};
 const std::vector<std::string> kModSourceNames = {
     "none", "velocity", "key", "ampenv", "env2", "lfo1", "lfo2", "modwheel", "pitchbend",
-    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4"};
+    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4", "lfo3", "env3", "constant"};
 const std::vector<std::string> kModDestNames = {
     "none", "pitch", "a.level", "b.level", "c.level", "morph", "a.pitch", "b.pitch", "c.pitch",
     "va.pw", "va.mix", "va.noise", "fm.index", "fm.feedback", "cutoff", "resonance", "drive",
-    "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp", "filter.morph", "vfx.amount"};
+    "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp", "filter.morph", "vfx.amount",
+    "a.pan", "b.pan", "c.pan", "fm.op1.level", "fm.op2.level", "fm.op3.level", "fm.op4.level",
+    "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate"};
 const std::vector<std::string> kFmAlgoNames = {
     "1: 4>3>2>1", "2: (4+3)>2>1", "3: 4>3>1 + 2>1", "4: 4>3 + 2>1", "5: 4>(3,2,1)",
     "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4"};
@@ -108,6 +110,17 @@ std::vector<ParamInfo> build() {
     b.in(P::Unison, "voice.unison", "Voice", "Unison", 1, 8, 1);
     b.fl(P::UnisonDetune, "voice.unidetune", "Voice", "Unison Detune", 0, 100, 15, "ct");
     b.fl(P::UnisonSpread, "voice.unispread", "Voice", "Unison Spread", 0, 1, 0.5f);
+    const std::vector<std::string>& syncNames = kSyncNames;
+    b.en(P::Lfo1Sync, "lfo1.sync", "LFO", "LFO1 Sync", syncNames, 0);
+    b.en(P::Lfo2Sync, "lfo2.sync", "LFO", "LFO2 Sync", syncNames, 0);
+    b.en(P::Lfo3Wave, "lfo3.wave", "LFO", "LFO3 Wave", kLfoWaveNames, 0);
+    b.ex(P::Lfo3Rate, "lfo3.rate", "LFO", "LFO3 Rate", 0.01f, 40, 2.0f, "Hz");
+    b.en(P::Lfo3Sync, "lfo3.sync", "LFO", "LFO3 Sync", syncNames, 0);
+    b.bo(P::Lfo3KeySync, "lfo3.keysync", "LFO", "LFO3 Key Sync", true);
+    b.ex(P::Env3Attack, "env3.attack", "Env 3", "Attack", 0.0005f, 10, 0.003f, "s");
+    b.ex(P::Env3Decay, "env3.decay", "Env 3", "Decay", 0.001f, 20, 0.5f, "s");
+    b.fl(P::Env3Sustain, "env3.sustain", "Env 3", "Sustain", 0, 1, 0.0f);
+    b.ex(P::Env3Release, "env3.release", "Env 3", "Release", 0.001f, 20, 0.3f, "s");
     for (int i = 0; i < 4; ++i)
         b.in(P::CtlCc1 + i, "ctl.cc" + std::to_string(i + 1), "Controllers", "CC" + std::to_string(i + 1) + " #", 0, 127,
              (float)(16 + i));

@@ -14,6 +14,7 @@
 #include "hsynth/dsp/oscillators.h"
 #include "hsynth/dsp/svf.h"
 #include "hsynth/dsp/voice_fx.h"
+#include "hsynth/fx/fx_params.h"
 #include "hsynth/dsp/wavetable.h"
 #include "hsynth/event.h"
 #include "hsynth/params.h"
@@ -33,6 +34,7 @@ struct VoiceContext {
     float expression = 1.0f;
     float lfo2 = 0.0f;
     float cc[4] = {};              // assignable controllers (ctl.cc1..4)
+    float tempo = 120.0f;          // bpm (effect rack tempo / MIDI clock) for synced LFOs
     const SampleSet* sampleSets[kNumLayers] = {};
     uint32_t seq[kNumLayers] = {};    // round-robin counters (SFZ seq_position)
     int keyswitch[kNumLayers] = {-1, -1, -1};  // active SFZ keyswitch per layer (-1 = default)
@@ -158,10 +160,11 @@ private:
     bool firstBlock_ = true;
     bool stereo_ = false;
 
-    Adsr ampEnv_, env2_;
-    Lfo lfo1_;
-    float lfo1Value_ = 0.0f;
+    Adsr ampEnv_, env2_, env3_;
+    Lfo lfo1_, lfo3_;
+    float lfo1Value_ = 0.0f, lfo3Value_ = 0.0f;
     Rng rng_;
+    Rng rng3_{0x5EEDu};  // LFO3 sample & hold (separate stream: the main one feeds noise / phases)
     VoiceFilter filterL_, filterR_;
     std::unique_ptr<float[]> combMem_;  // comb filter delay lines (L, R), allocated in prepare()
     VoiceFx vfx_;

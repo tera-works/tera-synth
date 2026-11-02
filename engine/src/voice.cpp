@@ -157,6 +157,7 @@ void Voice::prepare(float sampleRate) {
     sampleRate_ = sampleRate;
     ampEnv_.setSampleRate(sampleRate);
     env2_.setSampleRate(sampleRate);
+    env3_.setSampleRate(sampleRate);
     for (auto& l : layers_) l.fm.setSampleRate(sampleRate);
     if (!combMem_) {
         combMem_.reset(new float[2 * Comb::kSize]());
@@ -183,6 +184,7 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     firstBlock_ = true;
     stereo_ = false;
     rng_ = Rng((uint32_t)(random * 4294967000.0f) + 1u);
+    rng3_ = Rng(((uint32_t)(random * 4294967000.0f) ^ 0x9E3779B9u) | 1u);
 
     ampEnv_.reset();
     ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
@@ -192,6 +194,11 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     env2_.gate(true);
     lfo1_.reset(p[P::Lfo1KeySync] > 0.5f ? 0.0f : random);
     lfo1Value_ = 0.0f;
+    env3_.reset();
+    env3_.set(p[P::Env3Attack], p[P::Env3Decay], p[P::Env3Sustain], p[P::Env3Release]);
+    env3_.gate(true);
+    lfo3_.reset(p[P::Lfo3KeySync] > 0.5f ? 0.0f : std::fmod(random * 7.31f, 1.0f));
+    lfo3Value_ = 0.0f;
     filterL_.reset();
     filterR_.reset();
     vfx_.reset();
@@ -260,6 +267,7 @@ void Voice::release() {
     }
     if (!(anyLayer && allOneShot)) ampEnv_.gate(false);
     env2_.gate(false);
+    env3_.gate(false);
     for (auto& ly : layers_) {
         if (ly.type == LayerType::FM) ly.fm.noteOff();
         if (ly.type == LayerType::PCM)
@@ -380,6 +388,9 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
         case ModSource::Cc2:
         case ModSource::Cc3:
         case ModSource::Cc4: return ctx.cc[(int)s - (int)ModSource::Cc1];
+        case ModSource::Lfo3: return lfo3Value_;
+        case ModSource::Env3: return env3_.level();
+        case ModSource::Constant: return 1.0f;
         default: return 0.0f;
     }
 }
@@ -429,6 +440,8 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     if (!stolen_) ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
     env2_.set(p[P::Env2Attack], p[P::Env2Decay], p[P::Env2Sustain], p[P::Env2Release]);
     const float e2 = env2_.processBlock(n);
+    env3_.set(p[P::Env3Attack], p[P::Env3Decay], p[P::Env3Sustain], p[P::Env3Release]);
+    env3_.processBlock(n);
 
     // Modulation matrix
     float d[(int)ModDest::Count] = {};
@@ -444,18 +457,31 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     }
     auto D = [&](ModDest x) { return d[(int)x]; };
 
+    // amp envelope time modulation (x8 per unit), only when modulated
+    if (!stolen_ && (D(ModDest::AmpAttack) != 0.0f || D(ModDest::AmpDecay) != 0.0f || D(ModDest::AmpRelease) != 0.0f)) {
+        auto sc = [&](ModDest x) { return fastExp2(clampf(D(x), -2.0f, 2.0f) * 3.0f); };
+        ampEnv_.set(p[P::AmpAttack] * sc(ModDest::AmpAttack), p[P::AmpDecay] * sc(ModDest::AmpDecay), p[P::AmpSustain],
+                    p[P::AmpRelease] * sc(ModDest::AmpRelease));
+    }
+
     // LFO1 (per voice) with delayed fade-in
     {
-        const float rate = p[P::Lfo1Rate] * fastExp2(clampf(D(ModDest::Lfo1Rate), -1.0f, 1.0f) * 4.0f);
+        const float syncB = fx::syncBeats((int)p[P::Lfo1Sync]);
+        const float rate = (syncB > 0.0f ? ctx.tempo / 60.0f / syncB : p[P::Lfo1Rate]) *
+                           fastExp2(clampf(D(ModDest::Lfo1Rate), -1.0f, 1.0f) * 4.0f);
         const float delay = p[P::Lfo1Delay];
         const float fade = delay <= 0.002f ? 1.0f : clampf(timeSinceOn_ / delay, 0.0f, 1.0f);
         lfo1Value_ = lfo1_.advance((LfoWave)(int)p[P::Lfo1Wave], rate, dtSec, rng_) * fade;
         timeSinceOn_ += dtSec;
+        const float sync3 = fx::syncBeats((int)p[P::Lfo3Sync]);
+        const float rate3 = (sync3 > 0.0f ? ctx.tempo / 60.0f / sync3 : p[P::Lfo3Rate]) *
+                            fastExp2(clampf(D(ModDest::Lfo3Rate), -1.0f, 1.0f) * 4.0f);
+        lfo3Value_ = lfo3_.advance((LfoWave)(int)p[P::Lfo3Wave], rate3, dtSec, rng3_);
     }
 
     float basePitch = (float)key_ + notePitch_ + ctx.pitchBendSemis + D(ModDest::Pitch) * 24.0f;
     if (glide_ != 0.0f || unisonDetune != 0.0f) {
-        basePitch += glide_ + unisonDetune;
+        basePitch += glide_ + unisonDetune * clampf(1.0f + D(ModDest::UnisonDetune), 0.0f, 4.0f);
         // exponential glide: ~99 % of the interval within voice.glide seconds
         const float t = p[P::Glide];
         glide_ = t <= 0.0005f ? 0.0f : glide_ * std::exp(-4.6f * dtSec / t);
@@ -474,7 +500,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     if (stereo_) filterR_.copyCoefsFrom(filterL_);
     const auto vfxType = (VfxType)(int)p[P::VfxType];
     if (vfxType != VfxType::Off)
-        vfx_.set(vfxType, p[P::VfxAmount] + D(ModDest::VfxAmount), p[P::VfxMix],
+        vfx_.set(vfxType, p[P::VfxAmount] + D(ModDest::VfxAmount), p[P::VfxMix] + D(ModDest::VfxMix),
                  midiToHz(basePitch) * p[P::VfxRatio] / sr);
     else
         vfx_.set(VfxType::Off, 0.0f, 0.0f, 0.0f);
@@ -503,7 +529,8 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         if (l == 1) lvl *= clampf(1.0f + morph, 0.0f, 1.0f);
         const float lpitch = basePitch + p[P::layer(l, P::LCoarse)] + p[P::layer(l, P::LFine)] / 100.0f +
                              d[(int)ModDest::LayerAPitch + l] * 24.0f;
-        const float lpan = p[P::layer(l, P::LPan)];
+        const float lpanMod = d[(int)ModDest::LayerAPan + l];
+        const float lpan = lpanMod != 0.0f ? clampf(p[P::layer(l, P::LPan)] + lpanMod, -1.0f, 1.0f) : p[P::layer(l, P::LPan)];
         const float lgl = std::min(1.0f, 1.0f - lpan), lgr = std::min(1.0f, 1.0f + lpan);
         if (lpan != 0.0f) stereo = true;
         const float g0 = firstBlock_ ? lvl : ly.gain;
@@ -533,7 +560,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 break;
             }
             case LayerType::FM: {
-                ly.fm.control(p, l);
+                ly.fm.control(p, l, &d[(int)ModDest::FmOp1Level]);
                 const float dtT = midiToHz(lpitch) / sr;
                 if (firstBlock_) ly.dt1 = dtT;
                 const float index = clampf(p[P::layer(l, P::FmIndex)] + D(ModDest::FmIndex), 0.0f, 1.0f) * 2.5f;

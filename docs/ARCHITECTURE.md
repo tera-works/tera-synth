@@ -215,18 +215,24 @@ Part 1..16: パートパラメータ（ボイス・レイヤー・モッドマ�
 
 ## モジュレーションマトリクス
 
-8スロット、各スロット `source × via × amount → destination`。コントロールレート（16サンプル毎）で評価し、
+16 スロット、各スロット `source × via × amount → destination`。コントロールレート（16 サンプル毎）で評価し、
 音声パラメータはブロック内で線形補間します。
 
-- ソース（20）: velocity, key, ampenv, env2, lfo1, lfo2, modwheel, pitchbend, chanpressure,
-  **notepressure, notetimbre, notex, notepitch**（鍵盤ごと）, random, breath(CC2), expression(CC11),
+- ソース（23）: velocity, key, ampenv, env2, **env3**, lfo1, **lfo3**（ボイス単位）, lfo2（パート単位）, modwheel, pitchbend,
+  chanpressure, **notepressure, notetimbre, notex, notepitch**（鍵盤ごと）, random, breath(CC2), expression(CC11),
   **cc1〜cc4**（割り当て可能な MIDI CC。`ctl.cc1..4` で CC 番号を指定、既定 16〜19。ネックセンサーやペダル等を
-  CC として送れば任意の行き先へ割り当て可能。CC1 も指定可）
-- 行き先（23）: pitch, a/b/c.level, morph, a/b/c.pitch, va.pw, va.mix, va.noise, fm.index, fm.feedback,
-  cutoff, resonance, drive, amp, pan, lfo1.rate, wt.pos, wt.warp, filter.morph, vfx.amount
+  CC として送れば任意の行き先へ割り当て可能。CC1 も指定可）, **constant**（常に 1。via と組み合わせると任意ソースの
+  単純スケール、単独ならオフセット）
+- 行き先（36）: pitch, a/b/c.level, morph, a/b/c.pitch, **a/b/c.pan**, va.pw, va.mix, va.noise, fm.index, fm.feedback,
+  **fm.op1〜op4.level**（全 FM レイヤーのオペレーター出力、×(1+amt)）, cutoff, resonance, drive, filter.morph, amp, pan,
+  **amp.attack / amp.decay / amp.release**（時間 ×8^amt、ベロシティで立ち上がりを速くする等）, lfo1.rate, **lfo3.rate**,
+  wt.pos, wt.warp, vfx.amount, **vfx.mix**, **unison.detune**（×(1+amt)）
+- LFO: LFO1・LFO3 はボイス単位（キーシンク可）、LFO2 はパート単位。各 LFO に `lfoN.sync`（1/1〜1/32、付点・3 連）があり、
+  ラックのテンポ（MIDI クロック同期時はクロック）に追従します（LFO2 は周期のみ同期、拍頭への位相合わせはなし）。
+- Env3: ボイス単位の 3 本目の ADSR（`env3.*`）。
 
-全てボイス単位で評価されるため、per-noteソースは鍵盤ごとに独立して作用します。
-ソース・行き先は enum に追加するだけで拡張可能です。エフェクトは全ボイス共通のため、別系統の **FX Mod**
+全てボイス単位で評価されるため、per-note ソースは鍵盤ごとに独立して作用します。
+ソース・行き先は enum に追加するだけで拡張可能です。エフェクトラックは全ボイス共通のため、別系統の **FX Mod**
 （6スロット、グローバルなソース → 任意の FX パラメータ）で変調します（[EFFECTS.md](EFFECTS.md)）。
 
 ## エフェクトラック

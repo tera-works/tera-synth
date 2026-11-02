@@ -43,6 +43,9 @@ enum class ModSource : int {
     Cc2,
     Cc3,
     Cc4,
+    Lfo3,           // second per-voice LFO
+    Env3,           // third envelope (per voice)
+    Constant,       // 1.0 (offsets, or scaled by "via")
     Count
 };
 
@@ -71,6 +74,19 @@ enum class ModDest : int {
     WtWarp,         // wavetable warp amount
     FilterMorph,    // formant vowel position, +-1
     VfxAmount,      // voice FX amount, +-1
+    LayerAPan,      // +-1
+    LayerBPan,
+    LayerCPan,
+    FmOp1Level,     // FM operator level (all FM layers), x(1 + amount), 0..2
+    FmOp2Level,
+    FmOp3Level,
+    FmOp4Level,
+    AmpAttack,      // amp envelope times, x8^amount
+    AmpDecay,
+    AmpRelease,
+    UnisonDetune,   // x(1 + amount)
+    VfxMix,         // +-1
+    Lfo3Rate,       // +-4 octaves
     Count
 };
 
@@ -132,10 +148,20 @@ enum Global : int {
     Unison,         // voices per note 1..8
     UnisonDetune,   // cents, total spread
     UnisonSpread,   // stereo spread 0..1
+    Lfo1Sync,       // tempo sync division (fx::SyncDiv, 0 = off: rate in Hz)
+    Lfo2Sync,
+    Lfo3Wave,
+    Lfo3Rate,
+    Lfo3Sync,
+    Lfo3KeySync,
+    Env3Attack,
+    Env3Decay,
+    Env3Sustain,
+    Env3Release,
     GlobalCount
 };
 
-constexpr int kModSlots = 8;
+constexpr int kModSlots = 16;
 enum ModSlotParam : int { ModSrc = 0, ModVia, ModDst, ModAmt, ModSlotCount };
 constexpr int kModBase = GlobalCount;
 

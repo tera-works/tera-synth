@@ -64,7 +64,8 @@ public:
     }
 
     // Update per-control-block settings from the parameter array.
-    void control(const float* p, int layerIdx) {
+    // levelMod: optional per-operator level modulation (x(1 + m), clamped 0..2).
+    void control(const float* p, int layerIdx, const float* levelMod = nullptr) {
         algo_ = &fmAlgorithm((int)p[P::layer(layerIdx, P::FmAlgo)]);
         for (int i = 0; i < P::kFmOps; ++i) {
             const float coarse = p[P::fmOp(layerIdx, i, P::OpRatio)];
@@ -76,6 +77,7 @@ public:
             }
             const float vs = p[P::fmOp(layerIdx, i, P::OpVelSens)];
             level_[i] = p[P::fmOp(layerIdx, i, P::OpLevel)] * (1.0f - vs + vs * velocity_);
+            if (levelMod && levelMod[i] != 0.0f) level_[i] *= clampf(1.0f + levelMod[i], 0.0f, 2.0f);
             env_[i].set(p[P::fmOp(layerIdx, i, P::OpAttack)], p[P::fmOp(layerIdx, i, P::OpDecay)],
                         p[P::fmOp(layerIdx, i, P::OpSustain)], p[P::fmOp(layerIdx, i, P::OpRelease)]);
         }
