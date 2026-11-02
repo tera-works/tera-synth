@@ -526,3 +526,53 @@ TEST(part_insert_all_blocks_finite) {
         CHECK(rms(L, L.size() - 4800, L.size()) < 1e-4);  // tails end
     }
 }
+
+// Random parameters of random parts (inserts, arps, voice modes, FM 6-op,
+// filters, mix) while notes arrive on random channels: output stays finite
+// and limited, nothing hangs.
+TEST(multi_random_part_parameter_stress) {
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    const auto& table = paramTable();
+    Rng r(1234);
+    std::vector<float> L(128), R(128);
+    bool finite = true;
+    float maxPeak = 0;
+    uint32_t id = 1;
+    for (int b = 0; b < 48000 * 12 / 128; ++b) {  // 12 s
+        for (int k = 0; k < 6; ++k) {
+            const int part = (int)(r.next() % kNumParts);
+            const int pid = (int)(r.next() % (uint32_t)P::kPartParams);
+            if (!isPartParam(pid)) continue;
+            const ParamInfo& pi = table[(size_t)pid];
+            e.setPartParam(part, pid, pi.min + r.unipolar() * (pi.max - pi.min));
+        }
+        if (b % 13 == 0) {
+            const int part = (int)(r.next() % kNumParts), mid = (int)(r.next() % Mix::Count);
+            const ParamInfo& mi = partMixTable()[(size_t)mid];
+            e.setPartMix(part, mid, mi.min + r.unipolar() * (mi.max - mi.min));
+        }
+        if (b % 400 == 399) e.setMultiTimbral(r.unipolar() < 0.8f);
+        if (b % 5 == 0) {
+            Event on = Event::noteOn(id++, 24 + (int)(r.next() % 80), r.unipolar());
+            on.channel = (uint8_t)(r.next() % 16);
+            e.sendEvent(on);
+        }
+        if (b % 4 == 0) {
+            Event off = Event::noteOff(id - 1 - (r.next() % 6), 0);
+            off.channel = (uint8_t)(r.next() % 16);
+            e.sendEvent(off);
+        }
+        e.process(L.data(), R.data(), 128);
+        for (int i = 0; i < 128; ++i) {
+            if (!std::isfinite(L[i]) || !std::isfinite(R[i])) finite = false;
+            maxPeak = std::max(maxPeak, std::max(std::fabs(L[i]), std::fabs(R[i])));
+        }
+    }
+    CHECK(finite);
+    CHECK(maxPeak <= 1.0f);
+    e.sendEvent(Event::control(EventType::AllSoundOff, 0));
+    for (int b = 0; b < 10; ++b) e.process(L.data(), R.data(), 128);
+    CHECK(e.stats().activeVoices == 0);
+}
