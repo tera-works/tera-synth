@@ -1,0 +1,429 @@
+#include "hsynth/voice.h"
+
+namespace hsynth {
+
+// ---------------------------------------------------------------- PcmPlayer
+
+void PcmPlayer::start(const Region* r, int key, float velocity, float startFrac, float velTrackScale,
+                      float sampleRate) {
+    region_ = r;
+    released_ = false;
+    const Sample* s = r->sample;
+    end_ = r->end > 0 ? std::min<int64_t>(r->end, s->frames) : s->frames;
+    int64_t off = std::max<int64_t>(0, r->offset);
+    off += (int64_t)((double)clampf(startFrac, 0.0f, 1.0f) * (double)std::max<int64_t>(0, end_ - off));
+    if (off >= end_) off = std::max<int64_t>(0, end_ - 1);
+    pos_ = (double)off;
+    looping_ = (r->loopMode == LoopMode::Continuous || r->loopMode == LoopMode::Sustain) && r->loopEnd > r->loopStart + 1 &&
+               r->loopStart >= 0 && r->loopEnd <= s->frames;
+    baseRatio_ = std::exp2(((double)(key - r->keycenter) * r->pitchKeytrack / 100.0 + r->transpose) / 12.0 + r->tune / 1200.0);
+    const float t = clampf(r->ampVeltrack / 100.0f * velTrackScale, 0.0f, 1.0f);
+    const float vg = (1.0f - t) + t * velocity * velocity;
+    const float g = dbToGain(r->volumeDb) * vg;
+    gainL_ = g * std::min(1.0f, 1.0f - r->pan);
+    gainR_ = g * std::min(1.0f, 1.0f + r->pan);
+    useEnv_ = r->ampeg.enabled;
+    if (useEnv_) {
+        env_.setSampleRate(sampleRate);
+        env_.set(std::max(0.0005f, r->ampeg.attack), std::max(0.001f, r->ampeg.decay), r->ampeg.sustain,
+                 std::max(0.001f, r->ampeg.release));
+        env_.reset();
+        env_.gate(true);
+    }
+}
+
+void PcmPlayer::release() {
+    if (!region_) return;
+    released_ = true;
+    if (region_->loopMode == LoopMode::Sustain) looping_ = false;
+    if (useEnv_ && region_->loopMode != LoopMode::OneShot) env_.gate(false);
+}
+
+void PcmPlayer::setPitch(float pitchSemis, float engineRate) {
+    if (!region_) return;
+    step_ = baseRatio_ * std::exp2((double)pitchSemis / 12.0) * region_->sample->sampleRate / (double)engineRate;
+}
+
+inline float PcmPlayer::at(int c, int64_t idx) const {
+    if (idx < 0) return 0.0f;
+    if (looping_ && idx >= region_->loopEnd) idx = region_->loopStart + (idx - region_->loopEnd) % (region_->loopEnd - region_->loopStart);
+    const Sample* s = region_->sample;
+    if (idx >= s->frames + Sample::kPadFrames) return 0.0f;
+    return s->channel(c)[idx];
+}
+
+void PcmPlayer::render(float* L, float* R, int n, float gain) {
+    if (!region_) return;
+    const bool stereo = region_->sample->channels == 2;
+    const float gl = gainL_ * gain, gr = gainR_ * gain;
+    for (int i = 0; i < n; ++i) {
+        const int64_t idx = (int64_t)pos_;
+        const float f = (float)(pos_ - (double)idx);
+        auto hermite = [&](int c) {
+            const float xm1 = at(c, idx - 1), x0 = at(c, idx), x1 = at(c, idx + 1), x2 = at(c, idx + 2);
+            const float c1 = 0.5f * (x1 - xm1);
+            const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+            const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+            return ((c3 * f + c2) * f + c1) * f + x0;
+        };
+        const float e = useEnv_ ? env_.process() : 1.0f;
+        const float l = hermite(0);
+        const float r = stereo ? hermite(1) : l;
+        L[i] += l * gl * e;
+        R[i] += r * gr * e;
+        pos_ += step_;
+        if (looping_) {
+            if (pos_ >= (double)region_->loopEnd) pos_ -= (double)(region_->loopEnd - region_->loopStart);
+        } else if (pos_ >= (double)end_) {
+            region_ = nullptr;
+            return;
+        }
+        if (useEnv_ && !env_.active()) {
+            region_ = nullptr;
+            return;
+        }
+    }
+}
+
+// -------------------------------------------------------------------- Voice
+
+void Voice::prepare(float sampleRate) {
+    sampleRate_ = sampleRate;
+    ampEnv_.setSampleRate(sampleRate);
+    env2_.setSampleRate(sampleRate);
+    for (auto& l : layers_) l.fm.setSampleRate(sampleRate);
+    active_ = false;
+}
+
+void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random) {
+    const float* p = ctx.params;
+    noteId_ = e.noteId;
+    key_ = e.key;
+    velocity_ = clampf(e.value, 0.0f, 1.0f);
+    random_ = random;
+    age_ = age;
+    active_ = true;
+    released_ = stolen_ = sustained = hold = false;
+    timeSinceOn_ = 0.0f;
+    notePitchT_ = notePressureT_ = noteTimbreT_ = noteXT_ = 0.0f;
+    notePitch_ = notePressure_ = noteTimbre_ = noteX_ = 0.0f;
+    firstBlock_ = true;
+    stereo_ = false;
+    rng_ = Rng((uint32_t)(random * 4294967000.0f) + 1u);
+
+    ampEnv_.reset();
+    ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
+    ampEnv_.gate(true);
+    env2_.reset();
+    env2_.set(p[P::Env2Attack], p[P::Env2Decay], p[P::Env2Sustain], p[P::Env2Release]);
+    env2_.gate(true);
+    lfo1_.reset(p[P::Lfo1KeySync] > 0.5f ? 0.0f : random);
+    lfo1Value_ = 0.0f;
+    filterL_.reset();
+    filterR_.reset();
+
+    const int vel127 = std::max(1, std::min(127, (int)std::lround(velocity_ * 127.0f)));
+    for (int l = 0; l < kNumLayers; ++l) {
+        Layer& ly = layers_[l];
+        ly.type = (LayerType)(int)p[P::layer(l, P::LType)];
+        ly.finished = ly.type == LayerType::Off;
+        ly.pcmCount = 0;
+        switch (ly.type) {
+            case LayerType::VA:
+                ly.osc1.reset(0.0f);
+                ly.osc2.reset(rng_.unipolar());
+                break;
+            case LayerType::FM:
+                ly.fm.noteOn(velocity_);
+                ly.fm.control(p, l);
+                break;
+            case LayerType::WT:
+                ly.wt.reset(rng_, (int)p[P::layer(l, P::WtUnison)]);
+                break;
+            case LayerType::PCM: {
+                const SampleSet* set = ctx.sampleSets[l];
+                const Region* regs[kMaxRegionsPerLayer];
+                const int n = set ? set->findRegions(key_, vel127, random_, regs, kMaxRegionsPerLayer) : 0;
+                for (int i = 0; i < n; ++i)
+                    ly.pcm[i].start(regs[i], key_, velocity_, p[P::layer(l, P::PcmStart)], p[P::layer(l, P::PcmVelTrack)],
+                                    sampleRate_);
+                for (int i = n; i < kMaxRegionsPerLayer; ++i) ly.pcm[i].stop();
+                ly.pcmCount = n;
+                if (n == 0) ly.finished = true;
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+void Voice::release() {
+    if (!active_ || released_) return;
+    released_ = true;
+    sustained = false;
+    // One-shot samples ignore note-off when they are the only sound source.
+    bool allOneShot = true, anyLayer = false;
+    for (auto& ly : layers_) {
+        if (ly.type == LayerType::Off || ly.finished) continue;
+        anyLayer = true;
+        if (ly.type != LayerType::PCM) { allOneShot = false; continue; }
+        for (int i = 0; i < ly.pcmCount; ++i)
+            if (ly.pcm[i].active() && !ly.pcm[i].oneShot()) allOneShot = false;
+    }
+    if (!(anyLayer && allOneShot)) ampEnv_.gate(false);
+    env2_.gate(false);
+    for (auto& ly : layers_) {
+        if (ly.type == LayerType::FM) ly.fm.noteOff();
+        if (ly.type == LayerType::PCM)
+            for (int i = 0; i < ly.pcmCount; ++i) ly.pcm[i].release();
+    }
+}
+
+void Voice::steal() {
+    if (!active_) return;
+    stolen_ = true;
+    released_ = true;
+    ampEnv_.kill(0.005f);
+}
+
+void Voice::stopLayer(int l) {
+    Layer& ly = layers_[l];
+    for (auto& pl : ly.pcm) pl.stop();
+    if (ly.type == LayerType::PCM) ly.finished = true;
+}
+
+void Voice::applyExpression(EventType type, float value) {
+    switch (type) {
+        case EventType::NotePitch: notePitchT_ = value; break;
+        case EventType::NotePressure: notePressureT_ = clampf(value, 0.0f, 1.0f); break;
+        case EventType::NoteTimbre: noteTimbreT_ = clampf(value, 0.0f, 1.0f); break;
+        case EventType::NoteX: noteXT_ = clampf(value, -1.0f, 1.0f); break;
+        default: break;
+    }
+}
+
+float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
+    switch (s) {
+        case ModSource::Velocity: return velocity_;
+        case ModSource::Key: return (float)(key_ - 60) / 60.0f;
+        case ModSource::AmpEnv: return ampEnv_.level();
+        case ModSource::Env2: return env2_.level();
+        case ModSource::Lfo1: return lfo1Value_;
+        case ModSource::Lfo2: return ctx.lfo2;
+        case ModSource::ModWheel: return ctx.modWheel;
+        case ModSource::PitchBend: return ctx.pitchBendNorm;
+        case ModSource::ChannelPressure: return ctx.chanPressure;
+        case ModSource::NotePressure: return notePressure_;
+        case ModSource::NoteTimbre: return noteTimbre_;
+        case ModSource::NoteX: return noteX_;
+        case ModSource::NotePitch: return notePitch_ / 12.0f;
+        case ModSource::Random: return random_;
+        case ModSource::Breath: return ctx.breath;
+        case ModSource::Expression: return ctx.expression;
+        default: return 0.0f;
+    }
+}
+
+void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
+    if (!active_) return;
+    const float* p = ctx.params;
+    const float sr = sampleRate_;
+    const float dtSec = (float)n / sr;
+    const float invN = 1.0f / (float)n;
+
+    // Smooth per-note expression at control rate (~8 ms).
+    {
+        const float k = dtSec / 0.008f;
+        const float a = firstBlock_ ? 1.0f : k / (1.0f + k);
+        notePitch_ += a * (notePitchT_ - notePitch_);
+        notePressure_ += a * (notePressureT_ - notePressure_);
+        noteTimbre_ += a * (noteTimbreT_ - noteTimbre_);
+        noteX_ += a * (noteXT_ - noteX_);
+    }
+
+    if (!stolen_) ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
+    env2_.set(p[P::Env2Attack], p[P::Env2Decay], p[P::Env2Sustain], p[P::Env2Release]);
+    const float e2 = env2_.processBlock(n);
+
+    // Modulation matrix
+    float d[(int)ModDest::Count] = {};
+    for (int s = 0; s < P::kModSlots; ++s) {
+        const int src = (int)p[P::mod(s, P::ModSrc)];
+        const int dst = (int)p[P::mod(s, P::ModDst)];
+        const float amt = p[P::mod(s, P::ModAmt)];
+        if (src <= 0 || dst <= 0 || dst >= (int)ModDest::Count || amt == 0.0f) continue;
+        float v = modSource((ModSource)src, ctx) * amt;
+        const int via = (int)p[P::mod(s, P::ModVia)];
+        if (via > 0) v *= modSource((ModSource)via, ctx);
+        d[dst] += v;
+    }
+    auto D = [&](ModDest x) { return d[(int)x]; };
+
+    // LFO1 (per voice) with delayed fade-in
+    {
+        const float rate = p[P::Lfo1Rate] * fastExp2(clampf(D(ModDest::Lfo1Rate), -1.0f, 1.0f) * 4.0f);
+        const float delay = p[P::Lfo1Delay];
+        const float fade = delay <= 0.002f ? 1.0f : clampf(timeSinceOn_ / delay, 0.0f, 1.0f);
+        lfo1Value_ = lfo1_.advance((LfoWave)(int)p[P::Lfo1Wave], rate, dtSec, rng_) * fade;
+        timeSinceOn_ += dtSec;
+    }
+
+    const float basePitch = (float)key_ + notePitch_ + ctx.pitchBendSemis + D(ModDest::Pitch) * 24.0f;
+
+    // Filter
+    const auto ftype = (FilterType)(int)p[P::FilterType];
+    const float cutoffOct = p[P::FilterKeytrack] * (float)(key_ - 60) / 12.0f + p[P::FilterEnvAmt] * e2 * 6.0f +
+                            p[P::FilterVelAmt] * 3.0f * (velocity_ - 1.0f) + D(ModDest::Cutoff) * 5.0f;
+    const float cutoff = p[P::FilterCutoff] * fastExp2(clampf(cutoffOct, -12.0f, 12.0f));
+    const float reso = clampf(p[P::FilterReso] + D(ModDest::Resonance), 0.0f, 1.0f);
+    const float drive = clampf(p[P::FilterDrive] + D(ModDest::Drive), 0.0f, 1.0f);
+    filterL_.set(ftype, cutoff, reso, drive, sr);
+    if (stereo_) filterR_.copyCoefsFrom(filterL_);
+
+    // Amp / pan
+    const float vs = p[P::AmpVelSens];
+    const float ampTarget = (1.0f - vs + vs * velocity_ * velocity_) * clampf(1.0f + D(ModDest::Amp), 0.0f, 2.0f);
+    const float pan = clampf(D(ModDest::Pan), -1.0f, 1.0f);
+    const float panL = std::min(1.0f, 1.0f - pan), panR = std::min(1.0f, 1.0f + pan);
+    const float morph = clampf(p[P::Morph] + D(ModDest::Morph), -1.0f, 1.0f);
+
+    float bufL[kControlBlock] = {};
+    float bufR[kControlBlock] = {};
+    float tmp[kControlBlock];
+    float tmpR[kControlBlock];
+    bool stereo = pan != 0.0f;
+    bool anyLayerRunning = false;
+
+    for (int l = 0; l < kNumLayers; ++l) {
+        Layer& ly = layers_[l];
+        if (ly.type == LayerType::Off || ly.finished) continue;
+        const float lvs = p[P::layer(l, P::LVelSens)];
+        float lvl = p[P::layer(l, P::LLevel)] * (1.0f - lvs + lvs * velocity_) *
+                    clampf(1.0f + d[(int)ModDest::LayerALevel + l], 0.0f, 2.0f);
+        if (l == 0) lvl *= clampf(1.0f - morph, 0.0f, 1.0f);
+        if (l == 1) lvl *= clampf(1.0f + morph, 0.0f, 1.0f);
+        const float lpitch = basePitch + p[P::layer(l, P::LCoarse)] + p[P::layer(l, P::LFine)] / 100.0f +
+                             d[(int)ModDest::LayerAPitch + l] * 24.0f;
+        const float lpan = p[P::layer(l, P::LPan)];
+        const float lgl = std::min(1.0f, 1.0f - lpan), lgr = std::min(1.0f, 1.0f + lpan);
+        if (lpan != 0.0f) stereo = true;
+        const float g0 = firstBlock_ ? lvl : ly.gain;
+        const float gStep = (lvl - g0) * invN;
+        bool layerStereo = false;
+
+        switch (ly.type) {
+            case LayerType::VA: {
+                const float dt1T = midiToHz(lpitch) / sr;
+                const float dt2T = midiToHz(lpitch + p[P::layer(l, P::VaOsc2Semi)] + p[P::layer(l, P::VaDetune)] / 100.0f) / sr;
+                if (firstBlock_) { ly.dt1 = dt1T; ly.dt2 = dt2T; }
+                const float s1 = (dt1T - ly.dt1) * invN, s2 = (dt2T - ly.dt2) * invN;
+                const auto w1 = (VaWave)(int)p[P::layer(l, P::VaWave1)];
+                const auto w2 = (VaWave)(int)p[P::layer(l, P::VaWave2)];
+                const float pw = clampf(p[P::layer(l, P::VaPw)] + D(ModDest::VaPulseWidth) * 0.45f, 0.05f, 0.95f);
+                const float mix = clampf(p[P::layer(l, P::VaMix)] + D(ModDest::VaOscMix), 0.0f, 1.0f);
+                const float noise = clampf(p[P::layer(l, P::VaNoise)] + D(ModDest::VaNoise), 0.0f, 1.0f);
+                for (int i = 0; i < n; ++i) {
+                    ly.dt1 += s1;
+                    ly.dt2 += s2;
+                    float v = ly.osc1.tick(w1, ly.dt1, pw) * (1.0f - mix) + ly.osc2.tick(w2, ly.dt2, pw) * mix;
+                    if (noise > 0.0f) v += noise * rng_.bipolar();
+                    tmp[i] = v;
+                }
+                ly.dt1 = dt1T;
+                ly.dt2 = dt2T;
+                break;
+            }
+            case LayerType::FM: {
+                ly.fm.control(p, l);
+                const float dtT = midiToHz(lpitch) / sr;
+                if (firstBlock_) ly.dt1 = dtT;
+                const float index = clampf(p[P::layer(l, P::FmIndex)] + D(ModDest::FmIndex), 0.0f, 1.0f) * 2.5f;
+                const float fb = clampf(p[P::layer(l, P::FmFeedback)] + D(ModDest::FmFeedback), 0.0f, 1.0f);
+                std::fill(tmp, tmp + n, 0.0f);
+                ly.fm.render(tmp, n, ly.dt1, dtT, index, fb);
+                ly.dt1 = dtT;
+                if (!ly.fm.active()) ly.finished = true;
+                break;
+            }
+            case LayerType::WT: {
+                const int ti = (int)p[P::layer(l, P::WtTable)];
+                const Wavetable* t = nullptr;
+                if (ti < builtinWavetableCount()) t = &builtinWavetable(ti);
+                else if (ctx.sampleSets[l] && ctx.sampleSets[l]->wavetable) t = ctx.sampleSets[l]->wavetable.get();
+                else t = &builtinWavetable(0);  // "user" selected but nothing loaded
+                const float pos = p[P::layer(l, P::WtPos)] + p[P::layer(l, P::WtPosEnv)] * e2 + D(ModDest::WtPos);
+                const float warpAmt = clampf(p[P::layer(l, P::WtWarpAmt)] + D(ModDest::WtWarp), 0.0f, 1.0f);
+                layerStereo = ly.wt.render(*t, clampf(pos, 0.0f, 1.0f), midiToHz(lpitch) / sr, (WtWarp)(int)p[P::layer(l, P::WtWarpMode)],
+                                           warpAmt, (int)p[P::layer(l, P::WtUnison)], p[P::layer(l, P::WtDetune)],
+                                           p[P::layer(l, P::WtSpread)], tmp, tmpR, n);
+                break;
+            }
+            case LayerType::PCM: {
+                std::fill(tmp, tmp + n, 0.0f);
+                std::fill(tmpR, tmpR + n, 0.0f);
+                int running = 0;
+                for (int i = 0; i < ly.pcmCount; ++i) {
+                    PcmPlayer& pl = ly.pcm[i];
+                    if (!pl.active()) continue;
+                    if (pl.region()->sample->channels == 2 || pl.region()->pan != 0.0f) layerStereo = true;
+                    pl.setPitch(lpitch - (float)key_, sr);
+                    pl.render(tmp, tmpR, n, 1.0f);
+                    if (pl.active()) ++running;
+                }
+                if (running == 0) ly.finished = true;
+                break;
+            }
+            default: break;
+        }
+
+        float g = g0;
+        if (layerStereo) {
+            stereo = true;
+            for (int i = 0; i < n; ++i) {
+                g += gStep;
+                bufL[i] += tmp[i] * g * lgl;
+                bufR[i] += tmpR[i] * g * lgr;
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                g += gStep;
+                const float v = tmp[i] * g;
+                bufL[i] += v * lgl;
+                bufR[i] += v * lgr;
+            }
+        }
+        ly.gain = lvl;
+        if (!ly.finished) anyLayerRunning = true;
+    }
+
+    if (stereo && !stereo_) {
+        filterR_ = filterL_;  // continue from the mono state without a click
+        stereo_ = true;
+    }
+
+    const float a0 = firstBlock_ ? ampTarget : ampGain_;
+    const float aStep = (ampTarget - a0) * invN;
+    float a = a0;
+    const float pl0 = firstBlock_ ? panL : panL_, pr0 = firstBlock_ ? panR : panR_;
+    const float plStep = (panL - pl0) * invN, prStep = (panR - pr0) * invN;
+    float gl = pl0, gr = pr0;
+    for (int i = 0; i < n; ++i) {
+        a += aStep;
+        gl += plStep;
+        gr += prStep;
+        const float env = ampEnv_.process() * a;
+        const float l = filterL_.process(bufL[i]);
+        const float r = stereo_ ? filterR_.process(bufR[i]) : l;
+        L[i] += l * env * gl;
+        R[i] += r * env * gr;
+    }
+    ampGain_ = ampTarget;
+    panL_ = panL;
+    panR_ = panR;
+    firstBlock_ = false;
+
+    const bool envDone = !ampEnv_.active() || (ampEnv_.stage() == Adsr::Stage::Sustain && ampEnv_.level() <= 0.0f);
+    if (envDone || !anyLayerRunning) active_ = false;
+}
+
+}  // namespace hsynth
