@@ -34,14 +34,21 @@ void Fft::run(float* re, float* im, bool inv) const {
         if (j > i) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
     }
     const float sgn = inv ? 1.0f : -1.0f;
-    for (int len = 2; len <= n; len <<= 1) {
+    // first pass (len 2): twiddle 1
+    for (int i = 0; i + 1 < n; i += 2) {
+        const float tr = re[i + 1], ti = im[i + 1];
+        re[i + 1] = re[i] - tr; im[i + 1] = im[i] - ti;
+        re[i] += tr; im[i] += ti;
+    }
+    for (int len = 4; len <= n; len <<= 1) {
         const int half = len >> 1;
         const int step = n / len;
-        for (int i = 0; i < n; i += len) {
-            for (int k = 0; k < half; ++k) {
-                const float wr = cos_[(size_t)(k * step)];
-                const float wi = sgn * sin_[(size_t)(k * step)];
-                const int a = i + k, b = a + half;
+        // twiddle outer, blocks inner: each twiddle is loaded once per pass
+        for (int k = 0; k < half; ++k) {
+            const float wr = cos_[(size_t)(k * step)];
+            const float wi = sgn * sin_[(size_t)(k * step)];
+            for (int a = k; a < n; a += len) {
+                const int b = a + half;
                 const float tr = re[b] * wr - im[b] * wi;
                 const float ti = re[b] * wi + im[b] * wr;
                 re[b] = re[a] - tr; im[b] = im[a] - ti;

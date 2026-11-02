@@ -107,30 +107,48 @@ float genBasic(float x, float t) {
     return a + (b - a) * f;
 }
 float genPwm(float x, float t) { return sq(x, 0.5f - 0.48f * t); }
-float genHarmonics(float x, float t) {
-    const int count = 1 + (int)(t * 63.0f);
-    float v = 0.0f;
-    for (int k = 1; k <= count; ++k) v += std::sin(kTwoPi * (float)k * x) / (float)k;
-    return v;
+// Additive generators fill a whole frame: amplitudes depend only on the frame,
+// sin(2 pi k i / N) comes from an exact table (k * i mod N).
+const std::vector<float>& sinTableN() {
+    static const std::vector<float> t = [] {
+        std::vector<float> v((size_t)N);
+        for (int i = 0; i < N; ++i) v[(size_t)i] = (float)std::sin(2.0 * 3.14159265358979323846 * i / N);
+        return v;
+    }();
+    return t;
 }
-float genFormant(float x, float t) {
+void additive(const float* amp, int count, float* out) {
+    const auto& st = sinTableN();
+    for (int i = 0; i < N; ++i) {
+        float v = 0.0f;
+        for (int k = 1; k <= count; ++k)
+            if (amp[k] != 0.0f) v += amp[k] * st[(size_t)(((int64_t)k * i) & (N - 1))];
+        out[i] = v;
+    }
+}
+void fillHarmonics(float t, float* out) {
+    const int count = 1 + (int)(t * 63.0f);
+    float amp[65] = {};
+    for (int k = 1; k <= count; ++k) amp[k] = 1.0f / (float)k;
+    additive(amp, count, out);
+}
+void fillFormant(float t, float* out) {
     // vowels a e i o u as formant envelopes over harmonics of a 110 Hz voice
     static const float F[5][3] = {{800, 1150, 2900}, {400, 1600, 2700}, {350, 2300, 3000}, {450, 800, 2830}, {325, 700, 2530}};
     const float seg = t * 4.0f;
     const int i = std::min(3, (int)seg);
     const float fr = seg - (float)i;
-    float v = 0.0f;
+    float amp[61] = {};
     for (int k = 1; k <= 60; ++k) {
         const float hz = 110.0f * (float)k;
-        float amp = 0.0f;
         for (int j = 0; j < 3; ++j) {
             const float c = F[i][j] + (F[i + 1][j] - F[i][j]) * fr;
             const float bw = 80.0f + 40.0f * (float)j;
-            amp += std::exp(-0.5f * (hz - c) * (hz - c) / (bw * bw)) / (float)(j + 1);
+            const float z = 0.5f * (hz - c) * (hz - c) / (bw * bw);
+            if (z < 80.0f) amp[k] += std::exp(-z) / (float)(j + 1);  // skip underflowing terms (slow path in libm)
         }
-        v += amp * std::sin(kTwoPi * (float)k * x);
     }
-    return v;
+    additive(amp, 60, out);
 }
 float genSync(float x, float t) {
     const float r = 1.0f + 7.0f * t;
@@ -159,12 +177,15 @@ float genOrgan(float x, float t) {
     return v;
 }
 
+using Fill = void (*)(float t, float* out);  // whole frame at once (additive generators)
 struct Builtin {
     const char* name;
     Gen gen;
+    Fill fill;
 };
-const Builtin kBuiltins[] = {{"basic", genBasic}, {"pwm", genPwm},   {"harmonics", genHarmonics}, {"formant", genFormant},
-                             {"sync", genSync},   {"fold", genFold}, {"digital", genDigital},     {"organ", genOrgan}};
+const Builtin kBuiltins[] = {{"basic", genBasic, nullptr}, {"pwm", genPwm, nullptr},     {"harmonics", nullptr, fillHarmonics},
+                             {"formant", nullptr, fillFormant}, {"sync", genSync, nullptr}, {"fold", genFold, nullptr},
+                             {"digital", genDigital, nullptr}, {"organ", genOrgan, nullptr}};
 constexpr int kBuiltinCount = (int)(sizeof kBuiltins / sizeof kBuiltins[0]);
 
 std::vector<std::unique_ptr<Wavetable>> buildAll() {
@@ -173,7 +194,9 @@ std::vector<std::unique_ptr<Wavetable>> buildAll() {
         std::vector<float> raw((size_t)kBuiltinFrames * N);
         for (int f = 0; f < kBuiltinFrames; ++f) {
             const float t = (float)f / (float)(kBuiltinFrames - 1);
-            for (int i = 0; i < N; ++i) raw[(size_t)f * N + (size_t)i] = b.gen((float)i / (float)N, t);
+            if (b.fill) b.fill(t, raw.data() + (size_t)f * N);
+            else
+                for (int i = 0; i < N; ++i) raw[(size_t)f * N + (size_t)i] = b.gen((float)i / (float)N, t);
         }
         auto wt = Wavetable::fromFrames(raw, N, kBuiltinFrames, b.name, true);
         v.push_back(std::move(wt));
