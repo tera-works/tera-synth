@@ -66,6 +66,10 @@ public:
     // target 0 = cabinet, 1 = IR reverb
     void setUserIr(int target, const ConvIr* ir);
 
+    // Audio thread, before process(): external (MIDI clock) tempo and beat
+    // position; active = false returns to the fx.tempo parameter.
+    void setExternalClock(bool active, float bpm, double beat);
+    bool clockSyncEnabled() const { return clockSync_; }
     // audio thread: tempo / beat position for blocks outside the rack (part inserts)
     float tempo() const { return tempo_; }
     double beat() const { return beat_; }
@@ -95,6 +99,9 @@ private:
     FxContext ctx_;
     float tempo_ = 120, macro1_ = 0, macro2_ = 0, looperLevel_ = 0.8f;
     bool retrig_ = true;
+    bool clockSync_ = false, extActive_ = false;
+    float paramTempo_ = 120;
+    void tempoChanged();
     double beat_ = 0;
     float velocity_ = 0, lastKey_ = 60, env_ = 0, held_ = 0;
     std::vector<float> tmpL_, tmpR_;

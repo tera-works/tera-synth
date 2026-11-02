@@ -62,6 +62,14 @@ void InsertChain::paramsChanged(const float* p, int oversample, bool highQuality
     first_ = false;
 }
 
+void InsertChain::setTempo(float bpm, double beat) {
+    ctx_.beat = beat;
+    if (bpm == ctx_.tempo) return;
+    ctx_.tempo = bpm;
+    for (int k = 0; k < kNumInsertBlocks; ++k)
+        if (inChain_[k]) blocks_[k]->update(&params_[(size_t)insertOffset(k)], ctx_);
+}
+
 void InsertChain::noteOn(int key, bool firstNote) {
     ctx_.lastNoteHz = midiToHz((float)key);
     quietSamples_ = 0;

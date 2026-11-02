@@ -142,6 +142,10 @@ public:
     // next process() call (n frames, or nullptr). The pointers are not kept.
     void setInputBuffer(const float* left, const float* right) { inL_ = left; inR_ = right; }
 
+    // MIDI clock state (from EventType::Clock): measured tempo, 0 if no clock
+    // was received in the last 0.5 s. Any thread.
+    float midiClockTempo() const { return statClockBpm_.load(std::memory_order_relaxed); }
+
     EngineStats stats() const;
     void resetPeakStats();
 
@@ -244,6 +248,17 @@ private:
     std::atomic<float> statLoad_{0}, statLoadPeak_{0}, statUs_{0}, statUsPeak_{0}, statOutPeak_{0};
     std::atomic<uint64_t> statBlocks_{0};
     std::atomic<int> statPartVoices_[kNumParts];
+    std::atomic<float> statClockBpm_{0.0f};
+
+    // MIDI clock (audio thread)
+    void clockEvent(ClockMsg m);
+    void updateClock(int n);
+    uint64_t samplePos_ = 0;           // samples rendered since prepare()
+    uint64_t tickTimes_[25] = {};      // sample position of the last 25 ticks (ring)
+    int tickHead_ = 0, tickCount_ = 0; // ring head / valid entries
+    uint64_t ticksSinceStart_ = 0;
+    float clockBpm_ = 0.0f;
+    bool clockRunning_ = true;
 };
 
 }  // namespace hsynth

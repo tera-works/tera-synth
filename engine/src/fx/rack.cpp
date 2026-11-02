@@ -202,11 +202,13 @@ int FxRack::chainSnapshot(int* out) const {
 }
 
 void FxRack::paramsChanged(const float* p, int oversample, bool highQuality) {
-    const bool ctxChanged = first_ || ctx_.oversample != oversample || ctx_.highQuality != highQuality ||
-                            tempo_ != p[P::fxChain(P::FxTempo)];
+    paramTempo_ = p[P::fxChain(P::FxTempo)];
+    clockSync_ = p[P::fxChain(P::FxClockSync)] > 0.5f;
+    const float tempo = extActive_ && clockSync_ ? tempo_ : paramTempo_;
+    const bool ctxChanged = first_ || ctx_.oversample != oversample || ctx_.highQuality != highQuality || tempo_ != tempo;
     ctx_.oversample = oversample;
     ctx_.highQuality = highQuality;
-    tempo_ = p[P::fxChain(P::FxTempo)];
+    tempo_ = tempo;
     ctx_.tempo = tempo_;
     retrig_ = p[P::fxChain(P::FxRetrig)] > 0.5f;
     macro1_ = p[P::fxChain(P::FxMacro1)];
@@ -270,12 +272,32 @@ void FxRack::paramsChanged(const float* p, int oversample, bool highQuality) {
     }
 }
 
+void FxRack::tempoChanged() {
+    ctx_.tempo = tempo_;
+    for (int b = 1; b < BlockCount; ++b) dirty_[b] = true;  // re-derive synced times / rates
+}
+
+void FxRack::setExternalClock(bool active, float bpm, double beat) {
+    const bool use = active && clockSync_;
+    extActive_ = active;
+    if (use) {
+        beat_ = beat;
+        if (std::fabs(bpm - tempo_) > 0.05f) {
+            tempo_ = bpm;
+            tempoChanged();
+        }
+    } else if (tempo_ != paramTempo_) {
+        tempo_ = paramTempo_;
+        tempoChanged();
+    }
+}
+
 void FxRack::noteOn(int key, float velocity, bool firstNote) {
     ctx_.lastNoteHz = midiToHz((float)key);
     lastKey_ = (float)key;
     velocity_ = velocity;
     if (firstNote && retrig_) {
-        beat_ = 0.0;
+        if (!(extActive_ && clockSync_)) beat_ = 0.0;  // with MIDI clock the beat follows the clock
         for (int i = 0; i < chainLen_; ++i) blocks_[chain_[i]]->retrigger();
     }
 }

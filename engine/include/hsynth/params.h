@@ -172,7 +172,7 @@ constexpr int kLayerBase = kModBase + kModSlots * ModSlotCount;
 
 // Effect rack (see fx/fx_params.h): chain settings, FX modulation slots, then
 // the parameters of every effect block.
-enum FxChainParam : int { FxTempo = 0, FxRetrig, FxMacro1, FxMacro2, LooperLevel, FxSlot1, FxChainCount = FxSlot1 + fx::kFxSlots };
+enum FxChainParam : int { FxTempo = 0, FxRetrig, FxMacro1, FxMacro2, LooperLevel, FxClockSync, FxSlot1, FxChainCount = FxSlot1 + fx::kFxSlots };
 enum FxModParam : int { FxModSrc = 0, FxModDst, FxModAmt, FxModCount };
 // Part insert effects: slot params (enum: 0 = none, k = kInsertBlockList[k-1])
 // followed by the parameters of every insert block.

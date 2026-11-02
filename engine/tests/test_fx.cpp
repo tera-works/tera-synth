@@ -521,3 +521,62 @@ TEST(fx_block_cpu_cost) {
     }
     INFO("all %d blocks in series: %.1f ms per second (%.1f%%)\n", fx::BlockCount - 1, total, total / 10.0);
 }
+
+// MIDI clock: the rack follows the clock tempo when fx.clocksync is on.
+TEST(fx_midi_clock_sync) {
+    auto echoDelay = [](bool sync, double clockBpm, double* measured) {
+        Engine e;
+        e.prepare(48000);
+        e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Sine);
+        e.setParam(P::FilterType, 0);
+        e.setParam(P::AmpRelease, 0.005f);
+        e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+        e.setParam(P::fxp(fx::Delay, fx::delay::On), 1.0f);
+        e.setParam(P::fxp(fx::Delay, fx::delay::Sync), (float)fx::SyncDiv::D1_4);
+        e.setParam(P::fxp(fx::Delay, fx::delay::Feedback), 0.0f);
+        e.setParam(P::fxp(fx::Delay, fx::delay::Mix), 1.0f);
+        e.setParam(P::fxChain(P::FxClockSync), sync ? 1.0f : 0.0f);
+        const int block = 128;
+        const double tickSec = 60.0 / (clockBpm * 24.0);
+        double nextTick = 0.0;
+        std::vector<float> L, R, l(block), r(block);
+        const double noteAt = 2.0;
+        for (int b = 0; b < (int)(4.0 * 48000 / block); ++b) {
+            const double t = (double)b * block / 48000.0;
+            while (nextTick < t + (double)block / 48000.0) {
+                e.sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Tick));
+                nextTick += tickSec;
+            }
+            if (b == (int)(noteAt * 48000 / block)) e.sendEvent(Event::noteOn(1, 69, 1.0f));
+            if (b == (int)((noteAt + 0.03) * 48000 / block)) e.sendEvent(Event::noteOff(1, 69));
+            e.process(l.data(), r.data(), block);
+            L.insert(L.end(), l.begin(), l.end());
+        }
+        *measured = e.midiClockTempo();
+        // the dry signal is fully wet (mix 1): the first sound after the note is the echo
+        const size_t from = (size_t)(noteAt * 48000);
+        for (size_t i = from; i < L.size(); ++i)
+            if (std::fabs(L[i]) > 0.02f) return (double)(i - from) / 48000.0;
+        return -1.0;
+    };
+    double bpm = 0;
+    const double synced = echoDelay(true, 100.0, &bpm);
+    INFO("clock 100 bpm: measured %.2f bpm, echo after %.3f s\n", bpm, synced);
+    CHECK_NEAR(bpm, 100.0, 0.5);
+    CHECK_NEAR(synced, 0.6, 0.01);  // quarter note at 100 bpm
+    const double free = echoDelay(false, 100.0, &bpm);
+    CHECK_NEAR(free, 0.5, 0.01);    // fx.tempo 120 when sync is off
+    const double fast = echoDelay(true, 150.0, &bpm);
+    CHECK_NEAR(fast, 0.4, 0.01);
+
+    // clock stops -> tempo reported as 0 after 0.5 s
+    Engine e;
+    e.prepare(48000);
+    std::vector<float> l(128), r(128);
+    for (int b = 0; b < 600; ++b) {  // a tick every 1280 samples (24 ticks = 0.64 s = 93.75 bpm), 30 ticks
+        if (b < 300 && b % 10 == 0) e.sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Tick));
+        e.process(l.data(), r.data(), 128);
+        if (b == 299) CHECK_NEAR(e.midiClockTempo(), 93.75, 0.5);
+    }
+    CHECK(e.midiClockTempo() == 0.0f);
+}

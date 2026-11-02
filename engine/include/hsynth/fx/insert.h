@@ -23,7 +23,7 @@ public:
 
     // p = part parameter array (at least P::kPartParams values).
     void paramsChanged(const float* p, int oversample, bool highQuality);
-    void setTempo(float bpm, double beat) { ctx_.tempo = bpm; ctx_.beat = beat; }
+    void setTempo(float bpm, double beat);
     void noteOn(int key, bool firstNote);
     bool empty() const { return chainLen_ == 0; }
     // true while some block still produces output for silent input (chorus /

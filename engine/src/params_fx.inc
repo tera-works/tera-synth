@@ -69,6 +69,7 @@ void buildFx(Builder& b) {
     b.fl(fxChain(FxMacro1), "fx.macro1", gc, "Macro 1", 0, 1, 0);
     b.fl(fxChain(FxMacro2), "fx.macro2", gc, "Macro 2", 0, 1, 0);
     b.fl(fxChain(LooperLevel), "looper.level", gc, "Looper Level", 0, 1, 0.8f);
+    b.bo(fxChain(FxClockSync), "fx.clocksync", gc, "MIDI Clock Sync", false);
     for (int s = 0; s < F::kFxSlots; ++s) {
         const int def = s == 0 ? F::Chorus : s == 1 ? F::Delay : s == 2 ? F::Reverb : F::None;
         b.en(fxSlot(s), "fx.slot" + std::to_string(s + 1), gc, "Slot " + std::to_string(s + 1), blocks, def);

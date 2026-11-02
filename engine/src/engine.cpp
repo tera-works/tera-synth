@@ -100,6 +100,9 @@ void Engine::prepare(float sampleRate, int maxBlockSize) {
     seenParamVersion_ = 0;
     for (auto& v : seenPartVersion_) v = 0;
     seenMixVersion_ = 0;
+    samplePos_ = 0;
+    tickCount_ = 0;
+    clockBpm_ = 0.0f;
     prepared_ = true;
 }
 
@@ -437,6 +440,7 @@ void Engine::partEvent(int part, const Event& e) {
 
 void Engine::handleEvent(const Event& e) {
     if (e.type == EventType::Looper) { rack_.looperCommand((fx::LooperCmd)e.controller); return; }
+    if (e.type == EventType::Clock) { clockEvent((ClockMsg)e.controller); return; }
     if (!multiActive_) { partEvent(0, e); return; }
     const bool panic = e.type == EventType::AllNotesOff || e.type == EventType::AllSoundOff;
     if (e.channel == kOmniChannel) {
@@ -454,6 +458,45 @@ void Engine::handleEvent(const Event& e) {
     }
     for (int k = 0; k < kNumParts; ++k)
         if ((int)mix_[k][Mix::Channel] - 1 == (e.channel & 15)) partEvent(k, e);
+}
+
+void Engine::clockEvent(ClockMsg m) {
+    switch (m) {
+        case ClockMsg::Tick:
+            tickTimes_[tickHead_] = samplePos_;
+            tickHead_ = (tickHead_ + 1) % 25;
+            tickCount_ = std::min(25, tickCount_ + 1);
+            if (clockRunning_) ++ticksSinceStart_;
+            if (tickCount_ == 25) {
+                // 24 ticks = one quarter note; timestamps are block-quantised, so
+                // measure over a whole beat and smooth
+                const uint64_t newest = tickTimes_[(tickHead_ + 24) % 25], oldest = tickTimes_[tickHead_];
+                if (newest > oldest) {
+                    const float bpm = 60.0f * sampleRate_ / (float)(newest - oldest);
+                    clockBpm_ = clockBpm_ <= 0.0f || std::fabs(bpm - clockBpm_) > 0.1f * clockBpm_ ? bpm
+                                                                                                  : clockBpm_ + 0.2f * (bpm - clockBpm_);
+                }
+            }
+            break;
+        case ClockMsg::Start: ticksSinceStart_ = 0; clockRunning_ = true; break;
+        case ClockMsg::Continue: clockRunning_ = true; break;
+        case ClockMsg::Stop: clockRunning_ = false; break;
+    }
+}
+
+void Engine::updateClock(int n) {
+    const uint64_t last = tickCount_ ? tickTimes_[(tickHead_ + 24) % 25] : 0;
+    const bool active = tickCount_ == 25 && clockBpm_ > 0.0f && samplePos_ - last < (uint64_t)(0.5f * sampleRate_);
+    if (!active && tickCount_ > 0 && samplePos_ - last >= (uint64_t)(0.5f * sampleRate_)) {
+        tickCount_ = 0;  // clock lost: measure afresh when it comes back
+        clockBpm_ = 0.0f;
+    }
+    // beat position: whole ticks since start plus the time since the last tick
+    const double tickLen = active ? 60.0 * sampleRate_ / (clockBpm_ * 24.0) : 1.0;
+    const double frac = active ? std::min(0.999, (double)(samplePos_ - last) / tickLen) : 0.0;
+    rack_.setExternalClock(active, clockBpm_, ((double)ticksSinceStart_ + frac) / 24.0);
+    statClockBpm_.store(active ? clockBpm_ : 0.0f, std::memory_order_relaxed);
+    samplePos_ += (uint64_t)n;
 }
 
 void Engine::updateEffects() {
@@ -645,6 +688,8 @@ void Engine::process(float* L, float* R, int n) {
     Event e;
     int budget = 512;
     while (budget-- > 0 && events_.pop(e)) handleEvent(e);
+
+    updateClock(n);
 
     // 4. render
     for (auto& ps : parts_) {

@@ -33,7 +33,10 @@ struct ChannelSink {
 void MidiTranslator::processMidi1(const uint8_t* data, size_t len, EventSink& sink) {
     for (size_t i = 0; i < len; ++i) {
         const uint8_t b = data[i];
-        if (b >= 0xF8) continue;  // real-time messages may appear anywhere
+        if (b >= 0xF8) {  // real-time messages may appear anywhere
+            realtime(b, sink);
+            continue;
+        }
         if (b & 0x80) {
             if (b == 0xF0) { sysex_ = true; running_ = 0; continue; }
             if (b == 0xF7) { sysex_ = false; continue; }
@@ -110,6 +113,18 @@ void MidiTranslator::midi1Message(int group, uint8_t status, uint8_t d1, uint8_t
     }
 }
 
+void MidiTranslator::realtime(uint8_t status, EventSink& sink) {
+    int msg = -1;
+    switch (status) {
+        case 0xF8: msg = (int)ClockMsg::Tick; break;
+        case 0xFA: msg = (int)ClockMsg::Start; break;
+        case 0xFB: msg = (int)ClockMsg::Continue; break;
+        case 0xFC: msg = (int)ClockMsg::Stop; break;
+        default: return;
+    }
+    sink.onEvent(Event::control(EventType::Clock, 0.0f, msg));
+}
+
 int MidiTranslator::umpWordCount(uint32_t w) {
     switch (w >> 28) {
         case 0x0: case 0x1: case 0x2: case 0x6: case 0x7: return 1;
@@ -127,7 +142,9 @@ void MidiTranslator::processUmp(const uint32_t* words, size_t count, EventSink& 
         if (i + (size_t)n > count) break;  // incomplete packet
         const int mt = (int)(w0 >> 28);
         const int group = (int)((w0 >> 24) & 0xF);
-        if (mt == 0x2) {
+        if (mt == 0x1) {
+            realtime((uint8_t)(w0 >> 16), sink);
+        } else if (mt == 0x2) {
             const uint8_t status = (uint8_t)(w0 >> 16);
             midi1Message(group, status, (uint8_t)((w0 >> 8) & 0x7F), (uint8_t)(w0 & 0x7F), sink);
         } else if (mt == 0x4) {

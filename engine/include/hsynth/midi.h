@@ -6,6 +6,9 @@
 //   * MIDI 2.0 Universal MIDI Packets (MIDI 1.0 and MIDI 2.0 channel voice
 //     messages, including per-note pitch bend and per-note controllers)
 //
+// MIDI clock (F8 / FA / FB / FC, also as UMP system messages) becomes
+// EventType::Clock; the engine derives tempo and beat position from it.
+//
 // Every emitted Event carries its MIDI channel (Event::channel, 0..15; the UMP
 // group is ignored). The engine uses it to route events to parts in
 // multi-timbral mode and ignores it in single-part mode. Multi-timbral mode
@@ -55,6 +58,7 @@ public:
 private:
     void midi1Message(int group, uint8_t status, uint8_t d1, uint8_t d2, EventSink& sink);
     void midi2Message(uint32_t w0, uint32_t w1, EventSink& sink);
+    void realtime(uint8_t status, EventSink& sink);  // clock / start / continue / stop
     bool isMpeMember(int channel) const { return mpe_ && !multi_ && channel >= 1; }
 
     bool mpe_ = false;

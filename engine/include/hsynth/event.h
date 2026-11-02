@@ -27,7 +27,10 @@ enum class EventType : uint8_t {
     AllNotesOff,
     AllSoundOff,
     Looper,          // controller = fx::LooperCmd
+    Clock,           // MIDI clock: controller = ClockMsg (tick 24 ppqn / start / continue / stop)
 };
+
+enum class ClockMsg : uint16_t { Tick = 0, Start, Continue, Stop };
 
 // Event::channel value for events that are not tied to a MIDI channel (touch
 // keyboard, host UI, offline renders). In multi-timbral mode they go to the

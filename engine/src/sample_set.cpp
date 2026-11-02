@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "hsynth/flac.h"
 #include "hsynth/wav.h"
 
 namespace hsynth {
@@ -31,9 +32,19 @@ int SampleSet::findRegions(const RegionQuery& q, const Region** out, int max) co
     return n;
 }
 
+namespace {
+bool endsWithFlac(const std::string& p) {
+    if (p.size() < 5) return false;
+    std::string e = p.substr(p.size() - 5);
+    for (auto& c : e) c = (char)std::tolower((unsigned char)c);
+    return e == ".flac";
+}
+}  // namespace
+
+// WAV or FLAC (by extension).
 std::unique_ptr<Sample> sampleFromWav(const std::string& path, std::string& error) {
     WavData w;
-    if (!readWav(path, w, error)) return nullptr;
+    if (!(endsWithFlac(path) ? readFlac(path, w, error) : readWav(path, w, error))) return nullptr;
     auto s = std::make_unique<Sample>();
     s->path = path;
     s->channels = w.channels;
@@ -93,12 +104,8 @@ std::unique_ptr<SampleSet> loadWavSampleSet(const std::string& path, std::string
 
 std::unique_ptr<SampleSet> loadSampleSet(const std::string& path, std::string& error) {
     const std::string ext = lowerExt(path);
-    if (ext == "wav" || ext == "wave") return loadWavSampleSet(path, error);
+    if (ext == "wav" || ext == "wave" || ext == "flac") return loadWavSampleSet(path, error);
     if (ext == "sfz") return loadSfzSampleSet(path, error);
-    if (ext == "flac") {
-        error = "FLAC is not supported yet (planned); convert to WAV";
-        return nullptr;
-    }
     error = "unsupported file type: " + path;
     return nullptr;
 }

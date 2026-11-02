@@ -66,6 +66,10 @@ Raspberry Pi / Linux / Windows / macOS では、同じ `engine/` を CMake で�
   MPEモード（ch1マスター / ch2-16メンバー：ピッチベンド→NotePitch、CP→NotePressure、CC74→NoteTimbre）
 - `MidiTranslator::processUmp()/processUmpBytes()` — MIDI 2.0 UMP（MT2: MIDI1チャンネルボイス、MT4: MIDI2チャンネルボイス
   16bitベロシティ、Per-Note Pitch Bend、Registered/Assignable Per-Note Controller、Per-Note Management）
+- MIDI クロック（F8 / FA / FB / FC、UMP のシステムメッセージも）は `EventType::Clock`。エンジンは直近 24 ティック（1 拍）の
+  間隔からテンポを求め（タイムスタンプはブロック単位なので 1 拍で平均、急変以外は平滑化）、スタート以降のティック数 + 端数で
+  拍位置を出します。`fx.clocksync` が ON の間、エフェクトラックとパートインサートのテンポ・拍位置がクロックに従います。
+  `Engine::midiClockTempo()` で測定値を取得できます（クロックが 0.5 s 途切れると 0）。
 - タッチ鍵盤（Kotlin `KeyboardView`）はJNI経由で直接 `Event` を生成
 - 将来のRP2350ショルダーキーボードの独自USBプロトコルも、同じく `EventSink` を出力する翻訳器を追加するだけで、
   DSPコードの変更は不要です。MIDI 2.0で送る場合は Assignable Per-Note Controller #1=NoteX、#2=NoteHold、#3=NoteTimbre を
@@ -95,7 +99,7 @@ Effect rack: 12 スロット（31 種、docs/EFFECTS.md）→ Looper → Volume 
 - **FM**: 4オペレーター（`P::kFmOps` 定数 + アルゴリズムのデータテーブルにより6/8オペレーターへ拡張可能）。
   8アルゴリズム、オペレーターごとの比率・デチューン・レベル・ADSR・ベロシティ感度、フィードバック。
   32bit整数位相 + 4096点サイン表。オペレーターEGはコントロールレートで補間。
-- **PCM**: WAV（8/16/24/32bit整数、32/64bit float、モノ/ステレオ、smplチャンクのループ点・ルートキー）、
+- **PCM**: WAV（8/16/24/32bit整数、32/64bit float、モノ/ステレオ、smplチャンクのループ点・ルートキー）/ FLAC（`flac.h`、自前デコーダー）、
   4点Hermite補間、ループ（no_loop / one_shot / loop_continuous / loop_sustain）、キーレンジ/ベロシティレイヤー/ラウンドロビン(lorand/hirand)、
   リージョン単位のADSR（ampeg_*）。SFZ対応範囲は `docs/FEATURES.md` 参照。
 - **ハイブリッド**: 3レイヤーを任意の方式で同時発音。`mix.morph` とモジュレーション先 `Morph` / `a.level` 等で、

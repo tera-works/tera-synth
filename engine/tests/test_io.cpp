@@ -36,8 +36,9 @@ void writeText(const std::string& path, const std::string& text) {
 
 struct Collector : EventSink {
     std::vector<Event> events;
+    std::vector<Event> clocks;  // MIDI clock / transport, kept apart
     std::vector<int> programs;
-    void onEvent(const Event& e) override { events.push_back(e); }
+    void onEvent(const Event& e) override { (e.type == EventType::Clock ? clocks : events).push_back(e); }
     void onProgramChange(int, int p) override { programs.push_back(p); }
 };
 
@@ -214,12 +215,13 @@ TEST(midi1_translation) {
     Collector c;
     const uint8_t data[] = {0x90, 60, 100, 64, 0,           // note on, running status note-off (vel 0)
                             0xF0, 0x7E, 0x01, 0xF7,         // sysex skipped
-                            0xF8,                           // clock ignored
+                            0xF8,                           // clock (separate event)
                             0xE0, 0x00, 0x60,               // pitch bend up
                             0xB0, 64, 127, 0xC0, 5,         // sustain, program
                             0xA0, 61, 64};                  // poly pressure
     t.processMidi1(data, sizeof data, c);
     CHECK(c.events.size() == 5);
+    CHECK(c.clocks.size() == 1 && c.clocks[0].controller == (uint16_t)ClockMsg::Tick);
     CHECK(c.events[0].type == EventType::NoteOn && c.events[0].key == 60);
     CHECK(c.events[1].type == EventType::NoteOff && c.events[1].key == 64);
     CHECK(c.events[2].type == EventType::PitchBend && c.events[2].value > 0.4f);
@@ -256,11 +258,12 @@ TEST(ump_translation) {
         0x40603C00u, 0xC0000000u,  // per-note pitch bend +0.5
         0x40003C4Au, 0xFFFFFFFFu,  // registered per-note ctrl 74 (timbre)
         0x20B00140u,               // MIDI1-in-UMP CC1 = 64
-        0x10F80000u,               // system real-time (ignored)
+        0x10F80000u,               // system real-time: clock tick
         0x40803C00u, 0x00000000u,  // note off
     };
     t.processUmp(words, sizeof words / 4, c);
     CHECK(c.events.size() == 5);
+    CHECK(c.clocks.size() == 1);
     CHECK(c.events[0].type == EventType::NoteOn && c.events[0].key == 60 && std::fabs(c.events[0].value - 0.5f) < 0.01f);
     CHECK(c.events[1].type == EventType::NotePitch && std::fabs(c.events[1].value - 24.0f) < 0.01f);
     CHECK(c.events[2].type == EventType::NoteTimbre && c.events[2].value > 0.99f);

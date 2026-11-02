@@ -107,13 +107,13 @@ struct SampleSet {
     }
 };
 
-// Load a single WAV as a set with one region spanning all keys.
+// Load a single WAV / FLAC as a set with one region spanning all keys.
 std::unique_ptr<SampleSet> loadWavSampleSet(const std::string& path, std::string& error);
 
 // Load an SFZ instrument. Unsupported opcodes are reported in warnings.
 std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string& error);
 
-// Dispatch on file extension (.wav / .sfz).
+// Dispatch on file extension (.wav / .flac / .sfz).
 std::unique_ptr<SampleSet> loadSampleSet(const std::string& path, std::string& error);
 
 // Opcodes understood by the SFZ loader (for documentation / UI).

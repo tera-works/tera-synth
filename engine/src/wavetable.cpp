@@ -9,6 +9,7 @@
 
 #include "hsynth/fileio.h"
 #include "hsynth/fx/convolver.h"
+#include "hsynth/flac.h"
 #include "hsynth/wav.h"
 
 namespace hsynth {
@@ -222,7 +223,8 @@ const Wavetable& builtinWavetable(int index) {
 
 std::unique_ptr<Wavetable> loadWavetableFile(const std::string& path, std::string& error) {
     WavData w;
-    if (!readWav(path, w, error)) return nullptr;
+    const bool flac = path.size() > 5 && (path.compare(path.size() - 5, 5, ".flac") == 0 || path.compare(path.size() - 5, 5, ".FLAC") == 0);
+    if (!(flac ? readFlac(path, w, error) : readWav(path, w, error))) return nullptr;
     std::vector<float> mono(w.left);
     if (!w.right.empty())
         for (size_t i = 0; i < mono.size(); ++i) mono[i] = 0.5f * (mono[i] + w.right[i]);
