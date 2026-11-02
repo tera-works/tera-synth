@@ -513,6 +513,7 @@ void Engine::releaseSustained(int part) {
 
 void Engine::partEvent(int part, const Event& e) {
     PartState& ps = parts_[part];
+    if ((e.type == EventType::NoteOn || e.type == EventType::NoteOff) && arpInput(part, e)) return;
     switch (e.type) {
         case EventType::NoteOn: noteOn(part, e); break;
         case EventType::NoteOff: noteOff(e, part); break;
@@ -577,12 +578,150 @@ void Engine::handleEvent(const Event& e) {
     // so notes end correctly even if the part's channel changed meanwhile.
     const bool byId = e.noteId != 0 && e.type != EventType::NoteOn && e.type <= EventType::NoteHold;
     if (byId) {
-        if (e.type == EventType::NoteOff) noteOff(e, -1);
+        if (e.type == EventType::NoteOff) {
+            for (int k = 0; k < kNumParts; ++k)
+                if ((int)mix_[k][Mix::Channel] - 1 == (e.channel & 15)) arpInput(k, e);
+            noteOff(e, -1);
+        }
         else perNote(e, -1);
         return;
     }
     for (int k = 0; k < kNumParts; ++k)
         if ((int)mix_[k][Mix::Channel] - 1 == (e.channel & 15)) partEvent(k, e);
+}
+
+// ------------------------------------------------------------ arpeggiator
+
+bool Engine::arpInput(int part, const Event& e) {
+    PartState& ps = parts_[part];
+    PartState::Arp& a = ps.arp;
+    if (ps.p[P::ArpOn] <= 0.5f) {
+        if (a.running || a.heldCount) arpStop(part);
+        return false;
+    }
+    const bool latch = ps.p[P::ArpLatch] > 0.5f;
+    if (e.type == EventType::NoteOn && e.value > 0.0f) {
+        if (latch && a.physical == 0) a.heldCount = 0;  // new chord replaces the latched one
+        ++a.physical;
+        int w = 0;
+        for (int i = 0; i < a.heldCount; ++i)
+            if (a.held[i].key != e.key) a.held[w++] = a.held[i];
+        a.heldCount = w;
+        if (a.heldCount < PartState::Arp::kMax) a.held[a.heldCount++] = e;
+        return true;
+    }
+    // note-off (or velocity 0)
+    bool found = false;
+    for (int i = 0; i < a.heldCount; ++i) {
+        const Event& h = a.held[i];
+        if (e.noteId != 0 ? h.noteId == e.noteId : h.key == e.key) { found = true; break; }
+    }
+    if (!found) return false;  // a note from before the arp was switched on
+    a.physical = std::max(0, a.physical - 1);
+    if (!latch) {
+        int w = 0;
+        for (int i = 0; i < a.heldCount; ++i) {
+            const Event& h = a.held[i];
+            if (!(e.noteId != 0 ? h.noteId == e.noteId : h.key == e.key)) a.held[w++] = h;
+        }
+        a.heldCount = w;
+    }
+    return true;
+}
+
+void Engine::arpStop(int part) {
+    PartState::Arp& a = parts_[part].arp;
+    for (int i = 0; i < a.pendCount; ++i) noteOff(Event::noteOff(a.pend[i].id, a.pend[i].key), part);
+    a.pendCount = 0;
+    a.heldCount = a.physical = 0;
+    a.running = false;
+}
+
+void Engine::runArps(int frameOffset, int frames) {
+    const float tempo = rack_.tempo();
+    const double beatsPerFrame = (double)tempo / 60.0 / (double)sampleRate_;
+    const bool clock = rack_.clockSyncEnabled() && statClockBpm_.load(std::memory_order_relaxed) > 0.0f;
+    const double now = clock ? rack_.beat() + beatsPerFrame * frameOffset : arpBeat_;
+    const int parts = multiActive_ ? kNumParts : 1;
+    for (int k = 0; k < parts; ++k) {
+        PartState& ps = parts_[k];
+        PartState::Arp& a = ps.arp;
+        if (ps.p[P::ArpOn] <= 0.5f) {
+            if (a.running || a.heldCount || a.pendCount) arpStop(k);
+            continue;
+        }
+        // gate ends
+        for (int i = 0; i < a.pendCount;) {
+            if (now >= a.pend[i].offBeat) {
+                noteOff(Event::noteOff(a.pend[i].id, a.pend[i].key), k);
+                a.pend[i] = a.pend[--a.pendCount];
+            } else {
+                ++i;
+            }
+        }
+        if (a.heldCount == 0) { a.running = false; continue; }
+        const float stepBeats = std::max(1.0f / 32.0f, fx::syncBeats((int)ps.p[P::ArpRate]));
+        if (!a.running) {
+            a.running = true;
+            a.origin = clock ? std::floor(now / stepBeats) * stepBeats : now;  // MIDI clock: stay on the grid
+            if (clock && now - a.origin > 1e-6) a.origin += stepBeats;          // ... from the next step
+            a.step = 0;
+            a.index = 0;
+            a.dir = 1;
+        }
+        const double swing = ps.p[P::ArpSwing];
+        while (true) {
+            const double t = a.origin + (double)a.step * stepBeats + ((a.step & 1) ? swing * stepBeats : 0.0);
+            if (now + 1e-9 < t) break;
+            // pattern: held notes x octaves
+            int keys[PartState::Arp::kMax * 4];
+            float vels[PartState::Arp::kMax * 4];
+            int n = 0;
+            const auto mode = (ArpMode)(int)ps.p[P::ArpMode];
+            Event sorted[PartState::Arp::kMax];
+            for (int i = 0; i < a.heldCount; ++i) sorted[i] = a.held[i];
+            if (mode != ArpMode::Order)
+                std::sort(sorted, sorted + a.heldCount, [](const Event& x, const Event& y) { return x.key < y.key; });
+            const int oct = std::max(1, std::min(4, (int)ps.p[P::ArpOctaves]));
+            for (int o = 0; o < oct; ++o)
+                for (int i = 0; i < a.heldCount; ++i) {
+                    const int key = sorted[i].key + 12 * o;
+                    if (key > 127) continue;
+                    keys[n] = key;
+                    vels[n++] = sorted[i].value;
+                }
+            int chosen[PartState::Arp::kMax * 4];
+            int nc = 0;
+            if (n > 0) {
+                switch (mode) {
+                    case ArpMode::Down: chosen[nc++] = n - 1 - (a.index % n); ++a.index; break;
+                    case ArpMode::UpDown: {
+                        if (n == 1) { chosen[nc++] = 0; break; }
+                        const int period = 2 * n - 2;
+                        const int ph = a.index % period;
+                        chosen[nc++] = ph < n ? ph : period - ph;
+                        ++a.index;
+                        break;
+                    }
+                    case ArpMode::Random: chosen[nc++] = (int)(a.rng.unipolar() * (float)n) % n; break;
+                    case ArpMode::Chord:
+                        for (int i = 0; i < n && i < PartState::Arp::kMax; ++i) chosen[nc++] = i;
+                        break;
+                    default: chosen[nc++] = a.index % n; ++a.index; break;  // up / order
+                }
+            }
+            const double len = std::max(0.02, (double)ps.p[P::ArpGate]) * stepBeats;
+            for (int c = 0; c < nc && a.pendCount < PartState::Arp::kMax; ++c) {
+                const uint32_t id = 0xA0000000u | ((uint32_t)k << 24) | (a.nextId++ & 0xFFFFFFu);
+                Event on = Event::noteOn(id, keys[chosen[c]], vels[chosen[c]]);
+                on.channel = kOmniChannel;
+                noteOn(k, on);
+                a.pend[a.pendCount++] = {id, (uint8_t)keys[chosen[c]], t + len};
+            }
+            ++a.step;
+        }
+    }
+    if (!clock) arpBeat_ += beatsPerFrame * frames;
 }
 
 void Engine::clockEvent(ClockMsg m) {
@@ -677,8 +816,11 @@ void Engine::processMulti(float* L, float* R, int n) {
     std::memset(dryL_, 0, sizeof(float) * n);
     std::memset(dryR_, 0, sizeof(float) * n);
     bool used[kNumParts] = {};
+    bool arpActive = false;
+    for (const auto& ps : parts_) arpActive = arpActive || ps.p[P::ArpOn] > 0.5f || ps.arp.pendCount > 0;
     for (int off = 0; off < n; off += kControlBlock) {
         const int m = std::min(kControlBlock, n - off);
+        if (arpActive) runArps(off, m);
         for (int k = 0; k < kNumParts; ++k) {
             PartState& ps = parts_[k];
             ps.ctx.lfo2 = ps.lfo2.advance((LfoWave)(int)ps.p[P::Lfo2Wave], lfo2Rate(ps.p), (float)m / sampleRate_,
@@ -831,8 +973,10 @@ void Engine::process(float* L, float* R, int n) {
         updatePartTargets();
         processMulti(L, R, n);
     } else {
+        const bool arpActive = p_[P::ArpOn] > 0.5f || parts_[0].arp.pendCount > 0;
         for (int off = 0; off < n; off += kControlBlock) {
             const int m = std::min(kControlBlock, n - off);
+            if (arpActive) runArps(off, m);
             ctx0.lfo2 = parts_[0].lfo2.advance((LfoWave)(int)p_[P::Lfo2Wave], lfo2Rate(p_), (float)m / sampleRate_, rng_);
             for (auto& v : voices_)
                 if (v.active()) v.render(L + off, R + off, m, ctx0);

@@ -123,6 +123,13 @@ std::vector<ParamInfo> build() {
     b.ex(P::Env3Decay, "env3.decay", "Env 3", "Decay", 0.001f, 20, 0.5f, "s");
     b.fl(P::Env3Sustain, "env3.sustain", "Env 3", "Sustain", 0, 1, 0.0f);
     b.ex(P::Env3Release, "env3.release", "Env 3", "Release", 0.001f, 20, 0.3f, "s");
+    b.bo(P::ArpOn, "arp.on", "Arpeggiator", "Arp On", false);
+    b.en(P::ArpMode, "arp.mode", "Arpeggiator", "Mode", {"up", "down", "updown", "random", "order", "chord"}, 0);
+    b.en(P::ArpRate, "arp.rate", "Arpeggiator", "Rate", kSyncNames, 11);  // 1/16
+    b.in(P::ArpOctaves, "arp.octaves", "Arpeggiator", "Octaves", 1, 4, 1);
+    b.fl(P::ArpGate, "arp.gate", "Arpeggiator", "Gate", 0.05f, 1.0f, 0.5f);
+    b.fl(P::ArpSwing, "arp.swing", "Arpeggiator", "Swing", 0, 0.5f, 0);
+    b.bo(P::ArpLatch, "arp.latch", "Arpeggiator", "Latch", false);
     b.fl(P::MasterTune, "master.tune", "Master", "Master Tune", -100, 100, 0, "ct");
     b.fl(P::VelCurve, "voice.velcurve", "Voice", "Velocity Curve", -1, 1, 0);
     {

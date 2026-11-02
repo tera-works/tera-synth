@@ -382,6 +382,8 @@ TEST(voice_modes_no_stuck_notes_stress) {
         e.setPartParam(k, P::Glide, k % 2 ? 0.05f : 0.0f);
         e.setPartParam(k, P::AmpRelease, 0.01f);
     }
+    e.setPartParam(3, P::ArpOn, 1.0f);  // part 4: arpeggiated (mono + unison 4 + arp)
+    e.setPartParam(3, P::ArpOctaves, 2.0f);
     e.setMaxVoices(24);
     Rng r(9);
     std::vector<float> L(128), R(128);
@@ -671,4 +673,159 @@ TEST(velocity_curve) {
     CHECK(hard < 0.5 * lin);
     CHECK(soft > 1.5 * lin);
     CHECK_NEAR(full, level(0.0f, 1.0f), 1e-6);  // full velocity unaffected
+}
+
+// ---------------------------------------------------------- arpeggiator
+
+namespace {
+Engine* arpEngine(ArpMode mode, int octaves = 1) {
+    auto* e = new Engine;
+    e->prepare(48000);
+    sinePatch(*e);
+    e->setParam(P::AmpAttack, 0.001f);
+    e->setParam(P::AmpRelease, 0.005f);
+    e->setParam(P::ArpOn, 1.0f);
+    e->setParam(P::ArpMode, (float)mode);
+    e->setParam(P::ArpOctaves, (float)octaves);
+    e->setParam(P::fxChain(P::FxTempo), 120.0f);  // 1/16 = 0.125 s
+    return e;
+}
+// frequency of step k (0.125 s steps, gate 0.5)
+double stepFreq(const std::vector<float>& L, int k, double step = 0.125) {
+    return freqAt(L, k * step + 0.008, k * step + 0.055);
+}
+}  // namespace
+
+TEST(arp_up_down_updown_octaves) {
+    const double C = 261.63, E = 329.63, G = 392.0;
+    auto run = [](ArpMode mode, int oct, std::initializer_list<int> keys, double seconds) {
+        std::unique_ptr<Engine> e(arpEngine(mode, oct));
+        RenderJob job;
+        job.seconds = seconds;
+        uint32_t id = 1;
+        for (int k : keys) job.events.push_back({0.0, Event::noteOn(id++, k, 1.0f)});
+        return renderJob(*e, job);
+    };
+    auto L = run(ArpMode::Up, 1, {64, 60, 67}, 1.0);
+    const double up[] = {C, E, G, C, E, G};
+    for (int k = 0; k < 6; ++k) CHECK_NEAR(stepFreq(L, k), up[k], 2.0);
+    // gate 0.5: silence in the second half of each step
+    CHECK(rms(L, (size_t)(0.09 * kSr), (size_t)(0.12 * kSr)) < 1e-3);
+    L = run(ArpMode::Down, 1, {60, 64, 67}, 1.0);
+    const double down[] = {G, E, C, G};
+    for (int k = 0; k < 4; ++k) CHECK_NEAR(stepFreq(L, k), down[k], 2.0);
+    L = run(ArpMode::UpDown, 1, {60, 64, 67}, 1.0);
+    const double ud[] = {C, E, G, E, C, E};
+    for (int k = 0; k < 6; ++k) CHECK_NEAR(stepFreq(L, k), ud[k], 2.0);
+    L = run(ArpMode::Up, 2, {60}, 1.0);
+    for (int k = 0; k < 4; ++k) CHECK_NEAR(stepFreq(L, k), k % 2 ? 2 * C : C, 4.0);
+    L = run(ArpMode::Order, 1, {67, 60}, 0.6);
+    CHECK_NEAR(stepFreq(L, 0), G, 2.0);
+    CHECK_NEAR(stepFreq(L, 1), C, 2.0);
+}
+
+TEST(arp_release_latch_and_chord) {
+    std::unique_ptr<Engine> e(arpEngine(ArpMode::Up));
+    RenderJob job;
+    job.seconds = 1.0;
+    job.events.push_back({0.0, Event::noteOn(1, 60, 1.0f)});
+    job.events.push_back({0.3, Event::noteOff(1, 60)});
+    auto L = renderJob(*e, job);
+    CHECK(rms(L, (size_t)(0.5 * kSr), (size_t)(1.0 * kSr)) < 1e-4);  // stops with the key
+    CHECK(e->stats().activeVoices == 0);
+    // latch: keeps going after release; a new chord replaces the latched one
+    e->setParam(P::ArpLatch, 1.0f);
+    job.events.push_back({0.55, Event::noteOn(2, 67, 1.0f)});
+    job.events.push_back({0.6, Event::noteOff(2, 67)});
+    L = renderJob(*e, job);
+    CHECK_NEAR(stepFreq(L, 3), 261.63, 2.0);  // 0.375 s: still C after the key-up at 0.3
+    CHECK_NEAR(stepFreq(L, 6), 392.0, 2.0);   // 0.75 s: the new latched note G
+    // switching the arp off stops it without hanging notes
+    e->setParam(P::ArpOn, 0.0f);
+    std::vector<float> l(128), r(128);
+    for (int b = 0; b < 40; ++b) e->process(l.data(), r.data(), 128);
+    CHECK(e->stats().activeVoices == 0);
+    // chord mode: every step plays all held notes
+    std::unique_ptr<Engine> c(arpEngine(ArpMode::Chord));
+    RenderJob cj;
+    cj.seconds = 0.15;  // inside the second step's gate
+    for (int k : {60, 64, 67}) cj.events.push_back({0.0, Event::noteOn((uint32_t)k, k, 1.0f)});
+    renderJob(*c, cj);
+    CHECK(c->stats().activeVoices == 3);
+}
+
+TEST(arp_swing_and_clock_sync) {
+    std::unique_ptr<Engine> e(arpEngine(ArpMode::Up));
+    e->setParam(P::ArpSwing, 0.4f);  // odd steps 0.05 s late
+    RenderJob job;
+    job.seconds = 0.6;
+    job.events.push_back({0.0, Event::noteOn(1, 60, 1.0f)});
+    job.events.push_back({0.0, Event::noteOn(2, 72, 1.0f)});
+    auto L = renderJob(*e, job);
+    CHECK(rms(L, (size_t)(0.13 * kSr), (size_t)(0.17 * kSr)) < 1e-3);  // step 1 has not started yet
+    CHECK_NEAR(freqAt(L, 0.18, 0.22), 523.25, 3.0);
+
+    // MIDI clock at 100 bpm: 1/16 = 0.15 s
+    std::unique_ptr<Engine> c(arpEngine(ArpMode::Up));
+    c->setParam(P::fxChain(P::FxClockSync), 1.0f);
+    std::vector<float> out, l(128), r(128);
+    double nextTick = 0.0;
+    const double tick = 60.0 / (100.0 * 24.0);
+    for (int b = 0; b < (int)(3.0 * 48000 / 128); ++b) {
+        const double t = b * 128.0 / 48000.0;
+        while (nextTick < t + 128.0 / 48000.0) {
+            c->sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Tick));
+            nextTick += tick;
+        }
+        if (b == (int)(1.0 * 48000 / 128)) {
+            c->sendEvent(Event::noteOn(1, 60, 1.0f));
+            c->sendEvent(Event::noteOn(2, 72, 1.0f));
+        }
+        c->process(l.data(), r.data(), 128);
+        out.insert(out.end(), l.begin(), l.end());
+    }
+    // find the note onsets after 1 s and check their spacing
+    std::vector<double> onsets;
+    bool on = false;
+    for (size_t i = 48000; i < out.size(); i += 48) {
+        double s = 0;
+        for (size_t j = i; j < i + 48; ++j) s += std::fabs(out[j]);
+        const bool now = s / 48 > 0.01;
+        if (now && !on) onsets.push_back((double)i / 48000.0);
+        on = now;
+    }
+    CHECK(onsets.size() >= 8);
+    for (size_t k = 2; k + 1 < onsets.size() && k < 10; ++k) CHECK_NEAR(onsets[k + 1] - onsets[k], 0.15, 0.004);
+}
+
+TEST(arp_multi_parts_independent) {
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    for (int k = 0; k < 2; ++k) {
+        e.setPartParam(k, P::layer(0, P::VaWave1), (float)VaWave::Sine);
+        e.setPartParam(k, P::layer(0, P::VaMix), 0.0f);
+        e.setPartParam(k, P::FilterType, 0.0f);
+        e.setPartParam(k, P::AmpSustain, 1.0f);
+        e.setPartParam(k, P::AmpRelease, 0.005f);
+        e.setPartParam(k, P::mod(0, P::ModAmt), 0.0f);
+    }
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    e.setPartParam(1, P::ArpOn, 1.0f);  // part 2 arpeggiates, part 1 plays normally
+    Event a = Event::noteOn(1, 48, 1.0f), b = Event::noteOn(2, 72, 1.0f);
+    a.channel = 0;
+    b.channel = 1;
+    e.sendEvent(a);
+    e.sendEvent(b);
+    std::vector<float> l(128), r(128);
+    int maxP1 = 0, minP1 = 9;
+    for (int i = 0; i < 300; ++i) {
+        e.process(l.data(), r.data(), 128);
+        if (i > 10) {
+            maxP1 = std::max(maxP1, e.partActiveVoices(1));
+            minP1 = std::min(minP1, e.partActiveVoices(1));
+        }
+        if (i > 10) CHECK(e.partActiveVoices(0) == 1);
+    }
+    CHECK(maxP1 == 1 && minP1 == 0);  // part 2 gates on and off
 }

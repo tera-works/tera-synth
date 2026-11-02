@@ -19,6 +19,7 @@ enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Ladder, CombPl
 // Voice FX: per-voice insert after the filter, before the amp envelope.
 enum class VfxType : int { Off = 0, Saturate, Fold, Crush, Ring, Count };
 enum class VoiceMode : int { Poly = 0, Mono, Legato, Count };
+enum class ArpMode : int { Up = 0, Down, UpDown, Random, Order, Chord, Count };
 enum class LfoWave : int { Sine = 0, Triangle, Saw, Square, SampleHold, Count };
 
 enum class ModSource : int {
@@ -164,6 +165,13 @@ enum Global : int {
     VelCurve,       // velocity curve -1 (soft) .. 0 (linear) .. 1 (hard)
     TuneC,          // scale tuning: cents offset per pitch class C .. B (12 params)
     TuneLast = TuneC + 11,
+    ArpOn,          // arpeggiator (per part)
+    ArpMode,        // ArpMode
+    ArpRate,        // sync division (fx::SyncDiv, 1/1 .. 1/32)
+    ArpOctaves,     // 1..4
+    ArpGate,        // note length as a fraction of the step
+    ArpSwing,       // delay of every second step, fraction of a step 0..0.5
+    ArpLatch,       // keep playing after the keys are released (until a new chord)
     GlobalCount
 };
 

@@ -169,6 +169,22 @@ private:
         uint32_t monoId = 0;       // note id of the sounding mono note (its unison voices share it)
         int monoKey = -1;
         float lastPitch = -1.0f;   // pitch of the previous note (portamento source)
+        // arpeggiator
+        struct Arp {
+            static constexpr int kMax = 16;
+            Event held[kMax];      // keys currently held (or latched), in played order
+            int heldCount = 0;
+            int physical = 0;      // keys physically down (latch bookkeeping)
+            bool running = false;
+            double origin = 0.0;   // beat of step 0
+            int64_t step = 0;      // next step index
+            int index = 0, dir = 1;
+            struct Pending { uint32_t id; uint8_t key; double offBeat; };
+            Pending pend[kMax];
+            int pendCount = 0;
+            uint32_t nextId = 1;
+            Rng rng{0xA5A5u};
+        } arp;
     };
 
     void handleEvent(const Event& e);
@@ -176,6 +192,11 @@ private:
     void noteOn(int part, const Event& e);
     void startNote(int part, const Event& e, float glideFrom);  // allocate + start (unison) voices
     bool monoNoteOff(int part, const Event& e);                  // true if handled by the mono logic
+    // arpeggiator: true if the event was taken by the part's arpeggiator
+    bool arpInput(int part, const Event& e);
+    void runArps(int frameOffset, int frames);                   // once per control block
+    void arpStop(int part);
+    double arpBeat_ = 0.0;                                       // free-running arp beat (no clock)
     // part < 0: any part (note-id matched events in multi mode)
     void noteOff(const Event& e, int part);
     void perNote(const Event& e, int part);
