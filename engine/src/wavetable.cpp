@@ -27,7 +27,7 @@ std::unique_ptr<Wavetable> Wavetable::fromFrames(const std::vector<float>& raw, 
     wt->frames = frames;
     for (int k = 0; k < kLevels; ++k) {
         const int harm = std::max(1, 1024 >> k);
-        wt->size[k] = std::min(4096, std::max(64, 4 * harm));
+        wt->size[k] = std::min(4096, std::max(64, 8 * harm));
         wt->data[k].assign((size_t)frames * (size_t)(wt->size[k] + 1), 0.0f);
     }
     fx::Fft fwd;
@@ -297,12 +297,20 @@ inline float warpPhase(float p, WtWarp w, float amt) {
         default: return p;
     }
 }
+// 4-point Hermite interpolation (size is a power of two; indices wrap). Linear
+// interpolation left the first images of the top harmonics only ~21 dB down,
+// which folded back as inharmonic spurs (about -45 dB on bright frames).
 inline float readTable(const float* t, int size, float phase) {
     const float idx = phase * (float)size;
     int i = (int)idx;
     const float f = idx - (float)i;
-    if (i >= size) i = size - 1;
-    return t[i] + f * (t[i + 1] - t[i]);
+    const int m = size - 1;
+    i &= m;
+    const float xm1 = t[(i - 1) & m], x0 = t[i], x1 = t[(i + 1) & m], x2 = t[(i + 2) & m];
+    const float c1 = 0.5f * (x1 - xm1);
+    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+    return ((c3 * f + c2) * f + c1) * f + x0;
 }
 }  // namespace
 
@@ -316,8 +324,11 @@ bool WtOsc::render(const Wavetable& wt, float pos, float dt, WtWarp warp, float 
     float w0;
     if (x <= 0.0f) { k0 = 0; w0 = 1.0f; }
     else {
+        // level k0 is alias-free for x <= k0; over the last half octave before
+        // the switch it crossfades into the duller k0 + 1 so that sweeping the
+        // pitch never steps (the rest of the time only one level is read)
         k0 = (int)std::ceil(x);
-        w0 = (float)k0 - x;  // weight of level k0, rest goes to the duller k0 + 1
+        w0 = clampf(2.0f * ((float)k0 - x), 0.0f, 1.0f);
     }
     if (k0 >= Wavetable::kLevels - 1) { k0 = Wavetable::kLevels - 1; w0 = 1.0f; }
     const int k1 = std::min(k0 + 1, Wavetable::kLevels - 1);
@@ -344,11 +355,14 @@ bool WtOsc::render(const Wavetable& wt, float pos, float dt, WtWarp warp, float 
             ph += vdt;
             if (ph >= 1.0f) ph -= 1.0f;
             const float p = warp == WtWarp::None ? ph : warpPhase(ph, warp, warpAmt);
-            const float ra = readTable(a0, sa, p);
-            float s = w0 * (ra + ff * (readTable(a1, sa, p) - ra));
+            float s = 0.0f;
+            if (w0 > 0.0f) {
+                const float ra = readTable(a0, sa, p);
+                s = w0 * (ff > 0.0f ? ra + ff * (readTable(a1, sa, p) - ra) : ra);
+            }
             if (w1 > 0.0f) {
                 const float rb = readTable(b0, sb, p);
-                s += w1 * (rb + ff * (readTable(b1, sb, p) - rb));
+                s += w1 * (ff > 0.0f ? rb + ff * (readTable(b1, sb, p) - rb) : rb);
             }
             L[i] += s * gl;
             R[i] += s * gr;

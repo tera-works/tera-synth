@@ -1,5 +1,7 @@
 #include "hsynth/voice.h"
 
+#include "hsynth/dsp/resample.h"
+
 namespace hsynth {
 
 // ---------------------------------------------------------------- PcmPlayer
@@ -70,9 +72,62 @@ void PcmPlayer::cut() {
     }
 }
 
-void PcmPlayer::setPitch(float pitchSemis, float engineRate) {
+void PcmPlayer::setPitch(float pitchSemis, float engineRate, int quality) {
     if (!region_) return;
     step_ = baseRatio_ * std::exp2((double)pitchSemis / 12.0) * region_->sample->sampleRate / (double)engineRate;
+    if (quality <= 0 || step_ <= 1.0) {
+        cut_ = -1;  // at or below the recorded pitch the cubic interpolator does not alias
+        level_ = 0;
+        return;
+    }
+    // pitched up: read a mip level that brings the step to <= 2, then a sinc
+    // whose cutoff keeps the output below Nyquist
+    double s = step_;
+    int level = 0;
+    while (level < region_->sample->mipLevels && s > 2.0) {
+        s *= 0.5;
+        ++level;
+    }
+    level_ = level;
+    cut_ = resample::cutoffIndex(s);
+}
+
+inline float PcmPlayer::atLevel(int c, int64_t j) const {
+    if (j < 0) return 0.0f;
+    const Sample* s = region_->sample;
+    if (looping_) {
+        // loop points are level-0 frames: wrap in that domain
+        int64_t j0 = j << level_;
+        if (j0 >= region_->loopEnd) {
+            j0 = region_->loopStart + (j0 - region_->loopEnd) % (region_->loopEnd - region_->loopStart);
+            j = j0 >> level_;
+        }
+    }
+    if (j >= s->levelFrames(level_) + Sample::kPadFrames) return 0.0f;
+    return s->levelChannel(level_, c)[j];
+}
+
+float PcmPlayer::sincAt(int c, double pos) const {
+    const double p = level_ ? std::ldexp(pos, -level_) : pos;
+    const int64_t idx = (int64_t)p;
+    const float fp = (float)(p - (double)idx) * (float)resample::kPhases;
+    const int ph = std::min((int)fp, resample::kPhases - 1);
+    const float pf = fp - (float)ph;
+    const float* k0 = resample::kernel(cut_, ph);
+    const float* k1 = k0 + resample::kTaps;
+    const int64_t first = idx - (resample::kTaps / 2 - 1);
+    const Sample* s = region_->sample;
+    const int64_t last = first + resample::kTaps - 1;
+    float acc = 0.0f;
+    const bool inside = first >= 0 && last < s->levelFrames(level_) &&
+                        (!looping_ || (last << level_) < region_->loopEnd);
+    if (inside) {
+        const float* d = s->levelChannel(level_, c) + first;
+        for (int k = 0; k < resample::kTaps; ++k) acc += d[k] * (k0[k] + pf * (k1[k] - k0[k]));
+    } else {
+        for (int k = 0; k < resample::kTaps; ++k) acc += atLevel(c, first + k) * (k0[k] + pf * (k1[k] - k0[k]));
+    }
+    return acc;
 }
 
 inline float PcmPlayer::at(int c, int64_t idx) const {
@@ -84,7 +139,14 @@ inline float PcmPlayer::at(int c, int64_t idx) const {
 }
 
 inline float PcmPlayer::sampleAt(int c, int64_t idx, float f) const {
-    const float xm1 = at(c, idx - 1), x0 = at(c, idx), x1 = at(c, idx + 1), x2 = at(c, idx + 2);
+    float xm1, x0, x1, x2;
+    const int64_t lim = looping_ ? region_->loopEnd : region_->sample->frames + Sample::kPadFrames;
+    if (idx >= 1 && idx + 2 < lim) {  // common case: all four taps inside, no wrap
+        const float* d = region_->sample->channel(c) + idx;
+        xm1 = d[-1]; x0 = d[0]; x1 = d[1]; x2 = d[2];
+    } else {
+        xm1 = at(c, idx - 1); x0 = at(c, idx); x1 = at(c, idx + 1); x2 = at(c, idx + 2);
+    }
     const float c1 = 0.5f * (x1 - xm1);
     const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
     const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
@@ -99,16 +161,15 @@ void PcmPlayer::render(float* L, float* R, int n, float gain) {
     for (int i = 0; i < n; ++i) {
         if (delay_ > 0) { --delay_; continue; }
         const int64_t idx = (int64_t)pos_;
-        const float f = (float)(pos_ - (double)idx);
-        float l = sampleAt(0, idx, f);
-        float r = stereo ? sampleAt(1, idx, f) : l;
+        float l = value(0, pos_);
+        float r = stereo ? value(1, pos_) : l;
         if (xfLen_ > 0 && looping_ && idx >= region_->loopEnd - xfLen_) {
             // loop crossfade: blend in the material before the loop start
             const int64_t len = region_->loopEnd - region_->loopStart;
             const float t = (float)((pos_ - (double)(region_->loopEnd - xfLen_)) / (double)xfLen_);
-            const float bl = sampleAt(0, idx - len, f);
+            const float bl = value(0, pos_ - (double)len);
             l += (bl - l) * t;
-            r = stereo ? r + (sampleAt(1, idx - len, f) - r) * t : l;
+            r = stereo ? r + (value(1, pos_ - (double)len) - r) * t : l;
         }
         if (ft != RegionFilter::None) {
             for (int c = 0; c < (stereo ? 2 : 1); ++c) {
@@ -407,7 +468,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
             const int l = relLayer_[i];
             float tl[kControlBlock] = {}, tr[kControlBlock] = {};
             pl.setPitch(notePitch_ + ctx.pitchBendSemis + p[P::layer(l, P::LCoarse)] + p[P::layer(l, P::LFine)] / 100.0f,
-                        sampleRate_);
+                        sampleRate_, ctx.quality);
             pl.render(tl, tr, n, p[P::layer(l, P::LLevel)]);
             const float lpan = p[P::layer(l, P::LPan)];
             const float lgl = std::min(1.0f, 1.0f - lpan), lgr = std::min(1.0f, 1.0f + lpan);
@@ -598,7 +659,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                     PcmPlayer& pl = ly.pcm[i];
                     if (!pl.active()) continue;
                     if (pl.region()->sample->channels == 2 || pl.region()->pan != 0.0f) layerStereo = true;
-                    pl.setPitch(lpitch - (float)pcmKey_, sr);
+                    pl.setPitch(lpitch - (float)pcmKey_, sr, ctx.quality);
                     pl.render(tmp, tmpR, n, 1.0f);
                     if (pl.active()) ++running;
                 }

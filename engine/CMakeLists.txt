@@ -22,6 +22,7 @@ add_library(hsynth STATIC
     src/wav.cpp
     src/flac.cpp
     src/tuning.cpp
+    src/resample.cpp
     src/sample_set.cpp
     src/sfz.cpp
     src/midi.cpp
@@ -70,7 +71,7 @@ endif()
 
 if(HSYNTH_BUILD_TESTS AND NOT ANDROID)
     enable_testing()
-    add_executable(hsynth_tests tests/test_main.cpp tests/test_dsp.cpp tests/test_engine.cpp tests/test_io.cpp tests/test_fx.cpp tests/test_multi.cpp tests/test_voice.cpp tests/test_sfz.cpp tests/test_flac.cpp)
+    add_executable(hsynth_tests tests/test_main.cpp tests/test_dsp.cpp tests/test_engine.cpp tests/test_io.cpp tests/test_fx.cpp tests/test_multi.cpp tests/test_voice.cpp tests/test_sfz.cpp tests/test_flac.cpp tests/test_quality.cpp)
     target_link_libraries(hsynth_tests PRIVATE hsynth Threads::Threads)
     target_compile_definitions(hsynth_tests PRIVATE HSYNTH_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
                                                     HSYNTH_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden")

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "hsynth/engine.h"
+#include "hsynth/sample_set.h"
 
 using namespace hsynth;
 
@@ -66,6 +67,32 @@ static double benchMulti(const char* name, int parts, int perPart, double second
     return sec;
 }
 
+// One looping 2 s stereo sample (bright saw), recorded pitch = root.
+static void pcmLayer(Engine& e, int root) {
+    auto set = std::make_unique<SampleSet>();
+    auto smp = std::make_unique<Sample>();
+    smp->channels = 2;
+    smp->sampleRate = 48000;
+    smp->frames = 96000;
+    for (int c = 0; c < 2; ++c) {
+        smp->data[c].assign(96000 + Sample::kPadFrames, 0.0f);
+        for (int i = 0; i < 96000; ++i) smp->data[c][(size_t)i] = 0.5f * (float)((i * (c ? 7 : 5)) % 400) / 400.0f - 0.25f;
+    }
+    smp->loopStart = 1000;
+    smp->loopEnd = 95000;
+    Region r;
+    r.sample = smp.get();
+    r.keycenter = root;
+    r.loopMode = LoopMode::Continuous;
+    r.loopStart = smp->loopStart;
+    r.loopEnd = smp->loopEnd;
+    set->regions.push_back(r);
+    set->samples.push_back(std::move(smp));
+    set->prepareMips();
+    e.setSampleSet(0, std::move(set));
+    e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
+}
+
 int main(int argc, char** argv) {
     const int voices = argc > 1 ? std::atoi(argv[1]) : 32;
     const double seconds = argc > 2 ? std::atof(argv[2]) : 3.0;
@@ -101,6 +128,9 @@ int main(int argc, char** argv) {
         e.setParam(P::layer(0, P::WtUnison), 7.0f);
         e.setParam(P::layer(0, P::WtWarpMode), 2.0f);
     });
+    bench("PCM at/below root (cubic)", voices, seconds, [](Engine& e) { pcmLayer(e, 100); });
+    bench("PCM up 0-31 st (sinc + mips)", voices, seconds, [](Engine& e) { pcmLayer(e, 36); });
+    bench("PCM up, Quality Low (cubic)", voices, seconds, [](Engine& e) { pcmLayer(e, 36); e.setQuality(Quality::Low); });
     bench("VA + all FX", voices, seconds, [](Engine& e) {
         e.setParam(P::fxp(fx::Chorus, 0), 1.0f); e.setParam(P::fxp(fx::Chorus, fx::chorus::Mix), 0.5f);
         e.setParam(P::fxp(fx::Delay, 0), 1.0f); e.setParam(P::fxp(fx::Delay, fx::delay::Mix), 0.3f);

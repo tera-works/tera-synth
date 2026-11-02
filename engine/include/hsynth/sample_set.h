@@ -26,6 +26,20 @@ struct Sample {
 
     static constexpr int kPadFrames = 4;
     const float* channel(int c) const { return data[c < channels ? c : 0].data(); }
+
+    // Anti-aliased half / quarter rate copies for playback more than one
+    // octave above the recorded pitch (built by buildMips() on the loader
+    // thread, only for samples whose regions can be pitched that far up).
+    static constexpr int kMaxMips = 2;
+    int mipLevels = 0;
+    std::vector<float> mip[kMaxMips][2];
+    int64_t mipFrames[kMaxMips] = {};
+    // level 0 = the sample itself
+    const float* levelChannel(int level, int c) const {
+        return level == 0 ? channel(c) : mip[level - 1][c < channels ? c : 0].data();
+    }
+    int64_t levelFrames(int level) const { return level == 0 ? frames : mipFrames[level - 1]; }
+    void buildMips(int levels);
 };
 
 enum class LoopMode : uint8_t { NoLoop, OneShot, Continuous, Sustain };
@@ -95,6 +109,10 @@ struct SampleSet {
     bool hasReleaseRegions = false;
     bool isKeyswitch(int key) const { return swLo >= 0 && key >= swLo && key <= swHi; }
     size_t memoryBytes() const;
+
+    // Builds the sample mip levels each sample needs for its regions' key
+    // ranges (plus a bend headroom). Loader thread.
+    void prepareMips();
 
     // Returns number of matching regions written to out (at most max).
     int findRegions(const RegionQuery& q, const Region** out, int max) const;

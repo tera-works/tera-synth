@@ -961,6 +961,7 @@ void Engine::process(float* L, float* R, int n) {
     // 4. render
     for (auto& ps : parts_) {
         ps.ctx.tempo = rack_.tempo();
+        ps.ctx.quality = quality_.load(std::memory_order_relaxed);
         ps.ctx.masterTune = p_[P::MasterTune] * 0.01f;
         ps.ctx.pitchBendNorm = ps.pitchBend;
         ps.ctx.pitchBendSemis = ps.pitchBend * ps.p[P::BendRange];

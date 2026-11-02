@@ -33,6 +33,7 @@ struct VoiceContext {
     float breath = 0.0f;
     float expression = 1.0f;
     float lfo2 = 0.0f;
+    int quality = 1;               // Engine Quality (0 low, 1 normal, 2 high)
     float cc[4] = {};              // assignable controllers (ctl.cc1..4)
     float tempo = 120.0f;          // bpm (effect rack tempo / MIDI clock) for synced LFOs
     float masterTune = 0.0f;       // semitones (master.tune)
@@ -54,13 +55,25 @@ public:
     bool active() const { return region_ != nullptr; }
     bool oneShot() const { return region_ && region_->loopMode == LoopMode::OneShot; }
     const Region* region() const { return region_; }
-    // pitchSemis: extra transposition (bend, modulation, layer coarse/fine)
-    void setPitch(float pitchSemis, float engineRate);
+    // pitchSemis: extra transposition (bend, modulation, layer coarse/fine).
+    // quality 0 = cubic only (cheap), >= 1 = band-limited when pitched up.
+    void setPitch(float pitchSemis, float engineRate, int quality = 1);
     void render(float* L, float* R, int n, float gain);
 
 private:
     float at(int c, int64_t idx) const;
-    float sampleAt(int c, int64_t idx, float f) const;
+    float atLevel(int c, int64_t j) const;           // sample j of the current mip level, loop-aware
+    float sampleAt(int c, int64_t idx, float f) const;  // 4-point Hermite (level 0)
+    float sincAt(int c, double pos) const;           // polyphase windowed sinc (current level / cutoff)
+    float value(int c, double pos) const {
+        if (cut_ < 0) {
+            const int64_t idx = (int64_t)pos;
+            return sampleAt(c, idx, (float)(pos - (double)idx));
+        }
+        return sincAt(c, pos);
+    }
+    int cut_ = -1;     // sinc cutoff row, -1 = Hermite
+    int level_ = 0;    // mip level read by the sinc path
     const Region* region_ = nullptr;
     double pos_ = 0.0;
     double step_ = 1.0;

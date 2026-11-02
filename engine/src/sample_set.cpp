@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "hsynth/dsp/resample.h"
 #include "hsynth/flac.h"
 #include "hsynth/wav.h"
 
@@ -11,8 +12,40 @@ namespace hsynth {
 size_t SampleSet::memoryBytes() const {
     if (wavetable) return wavetable->memoryBytes();
     size_t n = 0;
-    for (const auto& s : samples) n += (s->data[0].size() + s->data[1].size()) * sizeof(float);
+    for (const auto& s : samples) {
+        n += (s->data[0].size() + s->data[1].size()) * sizeof(float);
+        for (int l = 0; l < s->mipLevels; ++l) n += (s->mip[l][0].size() + s->mip[l][1].size()) * sizeof(float);
+    }
     return n;
+}
+
+void Sample::buildMips(int levels) {
+    levels = std::max(0, std::min(kMaxMips, levels));
+    for (int l = mipLevels; l < levels; ++l) {
+        const int64_t inFrames = levelFrames(l);
+        for (int c = 0; c < channels; ++c) {
+            const std::vector<float>& src = l == 0 ? data[c] : mip[l - 1][c];
+            resample::decimate2(src, (size_t)inFrames, mip[l][c]);
+        }
+        mipFrames[l] = (inFrames + 1) / 2;
+    }
+    mipLevels = std::max(mipLevels, levels);
+}
+
+void SampleSet::prepareMips() {
+    for (auto& sp : samples) {
+        Sample* s = sp.get();
+        double maxSemis = -1e9;
+        for (const Region& r : regions) {
+            if (r.sample != s) continue;
+            const double semis = (double)(r.hikey - r.keycenter) * r.pitchKeytrack / 100.0 + r.transpose + r.tune / 100.0;
+            maxSemis = std::max(maxSemis, semis);
+        }
+        if (maxSemis < -1e8) continue;
+        // +2 semitones pitch bend headroom; rate relative to the lowest common engine rate
+        const double step = std::exp2((maxSemis + 2.0) / 12.0) * s->sampleRate / 44100.0;
+        s->buildMips(step > 4.0 ? 2 : step > 2.0 ? 1 : 0);
+    }
 }
 
 int SampleSet::findRegions(const RegionQuery& q, const Region** out, int max) const {
@@ -99,6 +132,7 @@ std::unique_ptr<SampleSet> loadWavSampleSet(const std::string& path, std::string
     }
     set->regions.push_back(r);
     set->samples.push_back(std::move(s));
+    set->prepareMips();
     return set;
 }
 
