@@ -276,3 +276,63 @@ TEST(ump_translation) {
     t.processUmpBytes(bytes + 3, 5, d);
     CHECK(d.events.size() == 1 && d.events[0].value == 1.0f);
 }
+
+// Every shipped factory preset / multi (android/app/src/main/assets, generated
+// by hsynth_assets) loads without warnings and renders a finite, audible chord.
+TEST(factory_presets_render) {
+    const fs::path assets = fs::path(HSYNTH_TEST_DATA) / ".." / ".." / ".." / "android" / "app" / "src" / "main" / "assets";
+    if (!fs::exists(assets / "presets")) { INFO("no assets folder, skipped\n"); return; }
+    const std::string lib = (assets / "library").generic_string();
+    int count = 0;
+    for (const auto& ent : fs::directory_iterator(assets / "presets")) {
+        if (ent.path().extension() != ".json") continue;
+        Preset p;
+        std::string err;
+        CHECK(loadPresetFile(ent.path().generic_string(), p, err));
+        Engine e;
+        e.prepare(48000);
+        std::vector<std::string> warnings;
+        CHECK(applyPreset(e, p, lib, warnings));
+        for (auto& w : warnings) INFO("%s: %s\n", ent.path().filename().string().c_str(), w.c_str());
+        CHECK(warnings.empty());
+        RenderJob job;
+        job.seconds = 1.5;
+        for (int k : {36, 42, 48, 55, 60, 64}) addNote(job, 0.05, 1.0, k, 0.8f);  // 36 / 42: drum kit keys
+        std::vector<float> L, R;
+        renderOffline(e, job, L, R);
+        CHECK(allFinite(L) && allFinite(R));
+        const bool needsInput = p.name.find("Vocoder") != std::string::npos;
+        if (!needsInput && rms(L, 4800, 48000) < 1e-3) INFO("silent preset: %s\n", p.name.c_str());
+        CHECK(needsInput || rms(L, 4800, 48000) > 1e-3);
+        CHECK(peak(L) < 1.5);
+        ++count;
+    }
+    INFO("%d factory presets rendered\n", count);
+    CHECK(count >= 36);
+    for (const auto& ent : fs::directory_iterator(assets / "multis")) {
+        MultiPreset m;
+        std::string err;
+        CHECK(loadMultiFile(ent.path().generic_string(), m, err));
+        CHECK(m.warnings.empty());
+        Engine e;
+        e.prepare(48000);
+        std::vector<std::string> warnings;
+        CHECK(applyMulti(e, m, lib, warnings));
+        CHECK(warnings.empty());
+        RenderJob job;
+        job.seconds = 1.0;
+        const int channels[] = {0, 1, 2, 3, 9};
+        uint32_t id = 1;
+        for (int ch : channels) {
+            Event on = Event::noteOn(id, ch == 9 ? 36 : 60, 0.8f), off = Event::noteOff(id, ch == 9 ? 36 : 60);
+            on.channel = off.channel = (uint8_t)ch;
+            job.events.push_back({0.05, on});
+            job.events.push_back({0.6, off});
+            ++id;
+        }
+        std::vector<float> L, R;
+        renderOffline(e, job, L, R);
+        CHECK(allFinite(L) && rms(L, 4800, 24000) > 1e-3);
+        for (int ch : channels) CHECK(e.partActiveVoices(ch) >= 0);
+    }
+}

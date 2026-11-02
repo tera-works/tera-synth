@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "hsynth/common.h"
+#include "hsynth/fx/fx_params.h"
 #include "hsynth/preset.h"
 #include "hsynth/wav.h"
 
@@ -214,8 +215,8 @@ void drumKit(const std::string& dir) {
               "<region> sample=kick.wav key=36\n"
               "<region> sample=snare.wav key=38\n"
               "<region> sample=snare.wav key=40 tune=150\n"
-              "<region> sample=hat.wav key=42\n"
-              "<region> sample=hat.wav key=46 tune=-200 volume=-3\n");
+              "<region> sample=hat.wav key=42 group=1\n"
+              "<region> sample=hat.wav key=46 tune=-200 volume=-3 group=2 off_by=1\n");  // closed hat chokes the open one
 }
 
 // ---------------------------------------------------------------- presets
@@ -485,6 +486,130 @@ void presets(const std::string& dir) {
                     .set("filter.cutoff", 1800).set("filter.reso", 0.3f).set("filter.envamt", 0.35f).set("amp.release", 0.1f)
                     .chain({"comp", "drive"}).fx("comp.thresh", -20).fxe("drive.type", "soft").fx("drive.amount", 0.3f)
                     .comment("Envelope-swept hard-sync warp on the digital table"));
+
+    // ---- v0.4: filters, voice FX, voice modes, 6-op FM, part inserts
+    writePreset(dir, "26_ladder_bass.json",
+                PB("Ladder Mono Bass", "Bass").e("a.va.wave1", "saw").e("a.va.wave2", "square").set("a.va.osc2semi", -12)
+                    .set("a.va.mix", 0.4f).e("filter.type", "ladder").set("filter.cutoff", 350).set("filter.reso", 0.55f)
+                    .set("filter.drive", 0.35f).set("filter.envamt", 0.45f).set("filter.keytrack", 0.3f).set("env2.decay", 0.25f)
+                    .set("env2.sustain", 0.0f).set("amp.release", 0.08f).e("voice.mode", "legato").set("voice.glide", 0.06f)
+                    .e("voice.glidemode", "legato").mod(1, "none", "none", 0).mod(4, "velocity", "cutoff", 0.25f)
+                    .set("reverb.mix", 0.0f)
+                    .comment("4-pole ladder with drive; legato notes glide, detached notes retrigger nothing but the pitch"));
+    writePreset(dir, "27_supersaw.json",
+                PB("Supersaw Unison", "VA").set("master.volume", 0.5f).e("a.va.wave1", "saw").e("a.va.wave2", "saw")
+                    .set("a.va.detune", 11).set("voice.unison", 5).set("voice.unidetune", 38).set("voice.unispread", 1.0f)
+                    .set("filter.cutoff", 6000).set("filter.envamt", 0.05f).set("amp.attack", 0.01f).set("amp.release", 0.6f)
+                    .set("amp.sustain", 1.0f).mod(4, "modwheel", "unison.detune", 1.0f)
+                    .chain({"chorus", "delay", "reverb"}).fx("chorus.mix", 0.25f).fxe("delay.sync", "1/8.").fx("delay.mix", 0.18f)
+                    .fxe("reverb.type", "hall").fx("reverb.mix", 0.25f)
+                    .comment("5 voices per note x 2 oscillators. Mod wheel widens the unison detune"));
+    writePreset(dir, "28_formant_choir.json",
+                PB("Formant Choir", "VA").e("a.va.wave1", "saw").e("a.va.wave2", "pulse").set("a.va.detune", 8).set("a.va.noise", 0.04f)
+                    .e("filter.type", "formant").set("filter.cutoff", 1000).set("filter.reso", 0.7f).set("filter.keytrack", 0.25f)
+                    .set("filter.envamt", 0.0f).set("filter.velamt", 0.0f).set("filter.morph", 0.1f)
+                    .set("amp.attack", 0.5f).set("amp.release", 1.2f).set("amp.sustain", 1.0f)
+                    .set("lfo3.rate", 0.15f).mod(4, "lfo3", "filter.morph", 0.25f).mod(5, "modwheel", "filter.morph", 0.8f)
+                    .set("voice.unison", 3).set("voice.unidetune", 18).set("voice.unispread", 0.7f)
+                    .chain({"chorus", "reverb"}).fxe("chorus.mode", "ensemble").fx("chorus.mix", 0.4f).fxe("reverb.type", "hall")
+                    .fx("reverb.mix", 0.35f).fx("reverb.decay", 4.0f)
+                    .comment("Vowel filter a-e-i-o-u: a per-voice LFO3 drifts the vowel, the mod wheel sweeps it"));
+    writePreset(dir, "29_comb_pluck.json",
+                PB("Comb Pluck", "VA").e("a.va.wave1", "saw").set("a.va.mix", 0.0f).set("a.va.noise", 0.6f)
+                    .e("filter.type", "comb+").set("filter.cutoff", 261.6f).set("filter.keytrack", 1.0f).set("filter.reso", 0.93f)
+                    .set("filter.envamt", 0.0f).set("filter.velamt", 0.0f).set("amp.attack", 0.001f).set("amp.decay", 1.5f)
+                    .set("amp.sustain", 0.0f).set("amp.release", 0.6f).mod(1, "none", "none", 0)
+                    .mod(4, "env3", "a.level", -1.0f).set("env3.attack", 0.0005f).set("env3.decay", 0.02f).set("env3.sustain", 1.0f)
+                    .mod(5, "velocity", "resonance", 0.06f).chain({"reverb"}).fxe("reverb.type", "room").fx("reverb.mix", 0.2f)
+                    .comment("Key-tracked comb filter excited by a short noise burst (Env3 gates the noise): plucked string"));
+    writePreset(dir, "30_fm6_epiano.json",
+                PB("FM6 Tine E.Piano", "FM").e("a.type", "fm").e("a.fm.algo", "11: 6op 6>5 + 4>3 + 2>1").set("a.fm.index", 0.35f)
+                    .set("a.fm.op1.ratio", 1).set("a.fm.op1.decay", 3.5f).set("a.fm.op1.sustain", 0.0f).set("a.fm.op1.release", 0.4f)
+                    .set("a.fm.op2.ratio", 1).set("a.fm.op2.level", 0.5f).set("a.fm.op2.decay", 1.8f).set("a.fm.op2.sustain", 0.05f)
+                    .set("a.fm.op2.velsens", 0.9f)
+                    .set("a.fm.op3.ratio", 1).set("a.fm.op3.level", 0.7f).set("a.fm.op3.decay", 2.5f).set("a.fm.op3.sustain", 0.0f)
+                    .set("a.fm.op4.ratio", 14).set("a.fm.op4.level", 0.3f).set("a.fm.op4.decay", 0.2f).set("a.fm.op4.sustain", 0.0f)
+                    .set("a.fm.op4.velsens", 1.0f)
+                    .set("a.fm.op5.ratio", 1).set("a.fm.op5.detune", 4).set("a.fm.op5.level", 0.5f).set("a.fm.op5.decay", 3.0f)
+                    .set("a.fm.op5.sustain", 0.0f).set("a.fm.op6.ratio", 1).set("a.fm.op6.level", 0.35f).set("a.fm.op6.decay", 1.0f)
+                    .set("a.fm.op6.sustain", 0.1f).e("filter.type", "off").set("amp.sustain", 1.0f).set("amp.release", 0.4f)
+                    .mod(4, "notepressure", "fm.op4.level", 1.0f).mod(5, "lfo2", "pan", 0.25f).set("lfo2.rate", 3.5f)
+                    .chain({"chorus", "reverb"}).fx("chorus.mix", 0.35f).fx("reverb.mix", 0.2f)
+                    .comment("Three operator pairs (6-op algorithm): body, tine (ratio 14) and a detuned layer. Pressure adds tine"));
+    writePreset(dir, "31_fm6_brass.json",
+                PB("FM6 Brass", "FM").e("a.type", "fm").e("a.fm.algo", "14: 6op 6>(5,4,3) + 2>1").set("a.fm.index", 0.45f)
+                    .set("a.fm.feedback", 0.3f).set("a.fm.op1.sustain", 0.9f).set("a.fm.op2.level", 0.6f).set("a.fm.op2.attack", 0.08f)
+                    .set("a.fm.op2.sustain", 0.6f).set("a.fm.op3.sustain", 0.9f).set("a.fm.op3.detune", -5).set("a.fm.op4.ratio", 1)
+                    .set("a.fm.op4.detune", 5).set("a.fm.op4.sustain", 0.9f).set("a.fm.op5.sustain", 0.9f).set("a.fm.op5.level", 0.5f)
+                    .set("a.fm.op6.level", 0.55f).set("a.fm.op6.attack", 0.1f).set("a.fm.op6.sustain", 0.5f)
+                    .e("filter.type", "lp12").set("filter.cutoff", 5000).set("amp.attack", 0.04f).set("amp.release", 0.25f)
+                    .mod(4, "velocity", "amp.attack", -0.5f).mod(5, "modwheel", "fm.op6.level", 0.8f)
+                    .chain({"comp", "reverb"}).fx("comp.thresh", -18).fx("reverb.mix", 0.2f)
+                    .comment("Op 6 drives three carriers; harder playing = faster attack, mod wheel = brassier"));
+    writePreset(dir, "32_ring_lead.json",
+                PB("Ring Mod Lead", "VA").e("a.va.wave1", "saw").e("a.va.wave2", "sine").set("a.va.mix", 0.3f)
+                    .e("vfx.type", "ring").set("vfx.amount", 0.0f).set("vfx.ratio", 1.5f).set("filter.cutoff", 4500)
+                    .set("amp.release", 0.2f).set("master.bendrange", 12).e("voice.mode", "legato").set("voice.glide", 0.08f)
+                    .mod(4, "notepressure", "vfx.amount", 1.0f).mod(5, "modwheel", "vfx.amount", 0.7f)
+                    .chain({"delay", "reverb"}).fxe("delay.sync", "1/8.").fx("delay.mix", 0.2f).fx("reverb.mix", 0.15f)
+                    .comment("Per-voice ring modulator at 1.5x the note: pressure / mod wheel bring it in"));
+    writePreset(dir, "33_pressure_drive.json",
+                PB("Pressure Drive Keys", "Expressive").e("a.va.wave1", "triangle").e("a.va.wave2", "square").set("a.va.mix", 0.25f)
+                    .e("vfx.type", "saturate").set("vfx.amount", 0.0f).e("filter.type", "lp12").set("filter.cutoff", 2500)
+                    .set("amp.decay", 1.2f).set("amp.sustain", 0.5f).set("amp.release", 0.3f)
+                    .mod(4, "notepressure", "vfx.amount", 1.0f).mod(5, "notepressure", "cutoff", 0.4f)
+                    .mod(6, "notetimbre", "vfx.mix", -0.6f)
+                    .chain({"chorus", "reverb"}).fx("chorus.mix", 0.25f).fx("reverb.mix", 0.18f)
+                    .comment("Each key saturates on its own pressure (voice FX), so chords stay clean except the pressed note"));
+    writePreset(dir, "34_insert_strip.json",
+                PB("Part Insert Strip", "FX").e("a.va.wave1", "pulse").e("a.va.wave2", "saw").set("a.va.detune", 7)
+                    .set("filter.cutoff", 2800).set("amp.sustain", 0.8f).set("amp.release", 0.4f)
+                    .e("ins.slot1", "comp").set("ins.comp.thresh", -20).set("ins.comp.ratio", 4)
+                    .e("ins.slot2", "phaser").set("ins.phaser.mix", 0.4f).set("ins.phaser.rate", 0.25f)
+                    .e("ins.slot3", "stereo").set("ins.stereo.width", 1.5f)
+                    .chain({"reverb"}).fx("reverb.mix", 0.2f)
+                    .comment("Part inserts (comp > phaser > stereo width) travel with the patch, before the shared rack"));
+    writePreset(dir, "35_sync_wobble.json",
+                PB("Tempo Wobble Bass", "Bass").e("a.va.wave1", "saw").e("a.va.wave2", "square").set("a.va.osc2semi", -12)
+                    .e("filter.type", "ladder").set("filter.cutoff", 300).set("filter.reso", 0.5f).set("filter.envamt", 0.0f)
+                    .set("amp.release", 0.1f).set("fx.tempo", 128).e("lfo3.sync", "1/8T").e("lfo3.wave", "triangle")
+                    .mod(4, "lfo3", "cutoff", 0.45f, "modwheel").e("voice.mode", "mono").mod(1, "none", "none", 0)
+                    .set("fx.clocksync", 1)
+                    .chain({"drive", "comp"}).fxe("drive.type", "fuzz").fx("drive.amount", 0.3f).fx("drive.mix", 0.5f)
+                    .comment("LFO3 synced to 1/8T of the tempo (follows MIDI clock); the mod wheel sets the wobble depth"));
+}
+
+// A GM-style multi: piano, bass, strings, lead and drums on their usual channels.
+void multis(const std::string& presetDir, const std::string& dir) {
+    fs::create_directories(dir);
+    MultiPreset m;
+    m.name = "Demo Band (multi)";
+    m.comment = "Ch1 piano, ch2 bass, ch3 strings, ch4 lead, ch10 drums. Load as a multi (multi-timbral mode).";
+    auto load = [&](int part, const char* file) {
+        std::string err;
+        if (!loadPresetFile(presetDir + "/" + file, m.parts[part], err)) { std::fprintf(stderr, "%s\n", err.c_str()); std::exit(1); }
+    };
+    load(0, "07_glass_piano.json");
+    load(1, "06_fm_bass.json");
+    load(2, "14_ensemble_strings.json");
+    load(3, "11_expressive_lead.json");
+    load(9, "10_drum_kit.json");
+    // global rack: plate reverb on the send, master limiter
+    PB rack("rack", "");
+    rack.chain({"reverb"}).fxe("reverb.type", "plate").fx("reverb.mix", 0.18f);
+    m.global = rack.p;
+    m.mix[0][Mix::Volume] = 0.8f;
+    m.mix[1][Mix::Volume] = 0.85f;
+    m.mix[1][Mix::FxSend] = 0.2f;
+    m.mix[2][Mix::Volume] = 0.6f;
+    m.mix[2][Mix::Pan] = -0.3f;
+    m.mix[3][Mix::Volume] = 0.7f;
+    m.mix[3][Mix::Pan] = 0.3f;
+    m.mix[9][Mix::Volume] = 0.85f;
+    m.mix[9][Mix::FxSend] = 0.3f;
+    std::string err;
+    if (!saveMultiFile(dir + "/01_demo_band.json", m, err)) { std::fprintf(stderr, "%s\n", err.c_str()); std::exit(1); }
+    std::printf("  %s/01_demo_band.json\n", dir.c_str());
 }
 
 }  // namespace
@@ -502,6 +627,7 @@ int main(int argc, char** argv) {
     loopPad(lib + "/loop_pad");
     drumKit(lib + "/drum_kit");
     presets(out + "/presets");
+    multis(out + "/presets", out + "/multis");
     writeText(lib + "/README.txt",
               "All audio in this folder was generated by tools/hsynth_assets.cpp.\n"
               "No third-party recordings are included. Released as CC0.\n");
