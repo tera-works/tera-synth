@@ -338,6 +338,61 @@ void Engine::noteOn(int part, const Event& in) {
             if (v.active() && !v.released() && v.part == part) { partHeld = true; break; }
         inserts_[part].noteOn(e.key, !partHeld);
     }
+    PartState& ps = parts_[part];
+    const auto mode = (VoiceMode)(int)ps.p[P::VoiceMode];
+    const bool glideOn = ps.p[P::Glide] > 0.0005f;
+    const bool glideLegatoOnly = ps.p[P::GlideMode] > 0.5f;
+    if (mode != VoiceMode::Poly) {
+        // note stack: last note priority; a repeated key moves to the top
+        int w = 0;
+        for (int i = 0; i < ps.stackSize; ++i)
+            if (ps.stack[i].key != e.key) ps.stack[w++] = ps.stack[i];
+        ps.stackSize = w;
+        if (ps.stackSize == PartState::kStack) {
+            for (int i = 1; i < ps.stackSize; ++i) ps.stack[i - 1] = ps.stack[i];
+            --ps.stackSize;
+        }
+        Event st = e;
+        st.channel = in.key;  // remember the untransposed key for key-matched note-offs
+        ps.stack[ps.stackSize++] = st;
+        bool sounding = false;
+        float from = ps.lastPitch;
+        for (auto& v : voices_)
+            if (v.active() && !v.released() && v.part == part && v.noteId() == ps.monoId && v.matchKey == ps.monoKey) {
+                sounding = true;
+                from = v.currentPitch() - v.unisonDetune;
+                break;
+            }
+        const bool glide = glideOn && from >= 0.0f && (!glideLegatoOnly || sounding);
+        if (mode == VoiceMode::Legato && sounding) {
+            for (auto& v : voices_)
+                if (v.active() && !v.released() && v.part == part && v.noteId() == ps.monoId && v.matchKey == ps.monoKey) {
+                    v.legatoTo(e, glide);
+                    v.matchKey = in.key;
+                }
+        } else {
+            for (auto& v : voices_)
+                if (v.active() && v.part == part && !v.stolen()) v.steal();  // mono: one note at a time
+            startNote(part, e, glide ? from : -1.0f);
+            for (auto& v : voices_)
+                if (v.active() && v.part == part && v.noteId() == e.noteId && !v.stolen()) v.matchKey = in.key;
+        }
+        ps.monoId = e.noteId;
+        ps.monoKey = in.key;
+        ps.lastPitch = (float)e.key;
+        return;
+    }
+    bool partHeld = false;
+    for (auto& v : voices_)
+        if (v.active() && !v.released() && v.part == part) { partHeld = true; break; }
+    const bool glide = glideOn && ps.lastPitch >= 0.0f && (!glideLegatoOnly || partHeld);
+    startNote(part, e, glide ? ps.lastPitch : -1.0f);
+    for (auto& v : voices_)
+        if (v.active() && v.part == part && v.noteId() == e.noteId && v.age() == ageCounter_) v.matchKey = in.key;
+    ps.lastPitch = (float)e.key;
+}
+
+void Engine::startNote(int part, const Event& e, float glideFrom) {
     // SFZ keyswitches and round-robin counters (per part and layer)
     PartState& ps = parts_[part];
     for (int l = 0; l < kNumLayers; ++l) {
@@ -347,21 +402,85 @@ void Engine::noteOn(int part, const Event& in) {
         ps.ctx.keyswitch[l] = keyswitch_[part][l];
         ps.ctx.seq[l] = seqCount_[part][l]++;
     }
-    Voice* v = allocateVoice(part);
-    v->start(e, ps.ctx, ++ageCounter_, rng_.unipolar());
-    v->part = part;
-    v->matchKey = in.key;
-    int groups[8];
-    const int ng = v->startedGroups(groups, 8);
-    for (int g = 0; g < ng; ++g)
-        for (auto& o : voices_)
-            if (&o != v && o.active() && o.part == part) o.choke(groups[g]);
+    const int unison = std::max(1, std::min(8, (int)ps.p[P::Unison]));
+    const uint64_t age = ++ageCounter_;  // unison voices share one age (stolen together, oldest first)
+    for (int u = 0; u < unison; ++u) {
+        const float x = unison > 1 ? (float)u / (float)(unison - 1) * 2.0f - 1.0f : 0.0f;  // -1..1
+        Voice* v = allocateVoice(part);
+        v->unisonDetune = x * 0.5f * ps.p[P::UnisonDetune] / 100.0f;
+        v->unisonPan = x * ps.p[P::UnisonSpread];
+        v->start(e, ps.ctx, age, rng_.unipolar(), glideFrom);
+        v->part = part;
+        v->matchKey = e.key;
+        int groups[8];
+        const int ng = v->startedGroups(groups, 8);
+        for (int g = 0; g < ng; ++g)
+            for (auto& o : voices_)
+                if (&o != v && o.active() && o.part == part && o.age() != age) o.choke(groups[g]);
+    }
+}
+
+bool Engine::monoNoteOff(int part, const Event& e) {
+    PartState& ps = parts_[part];
+    if ((VoiceMode)(int)ps.p[P::VoiceMode] == VoiceMode::Poly || ps.stackSize == 0) return false;
+    int found = -1;
+    for (int i = 0; i < ps.stackSize; ++i) {
+        const Event& s = ps.stack[i];
+        if (e.noteId != 0 ? s.noteId == e.noteId : s.channel == e.key) { found = i; break; }
+    }
+    if (found < 0) return false;
+    const bool wasTop = found == ps.stackSize - 1;
+    for (int i = found + 1; i < ps.stackSize; ++i) ps.stack[i - 1] = ps.stack[i];
+    --ps.stackSize;
+    if (!wasTop) return true;  // a note under the sounding one: just forget it
+    if (ps.stackSize > 0) {
+        // return to the previous held note
+        Event back = ps.stack[ps.stackSize - 1];
+        const int rawKey = back.channel;
+        back.channel = kOmniChannel;
+        --ps.stackSize;  // noteOn pushes it again
+        ps.stack[ps.stackSize] = back;
+        Event again = back;
+        // legato return in both modes (no retrigger), gliding if enabled
+        const bool glideOn = ps.p[P::Glide] > 0.0005f;
+        bool any = false;
+        for (auto& v : voices_)
+            if (v.active() && !v.released() && v.part == part && v.noteId() == ps.monoId) {
+                v.legatoTo(again, glideOn);
+                v.matchKey = rawKey;
+                any = true;
+            }
+        back.channel = (uint8_t)rawKey;
+        ps.stack[ps.stackSize++] = back;
+        ps.monoId = again.noteId;
+        ps.monoKey = rawKey;
+        ps.lastPitch = (float)again.key;
+        if (any) return true;
+        // the voice was stolen meanwhile: start the returning note afresh
+        startNote(part, again, -1.0f);
+        return true;
+    }
+    // last key released: normal note-off for the sounding voices
+    for (auto& v : voices_) {
+        if (!v.active() || v.released() || v.sustained || v.part != part || v.noteId() != ps.monoId) continue;
+        if (ps.sustain || v.hold) v.sustained = true;
+        else v.release();
+    }
+    return true;
 }
 
 void Engine::noteOff(const Event& e, int part) {
+    bool mono[kNumParts] = {};
+    for (int k = 0; k < kNumParts; ++k) {
+        if (part >= 0 && k != part) continue;
+        if ((VoiceMode)(int)parts_[k].p[P::VoiceMode] == VoiceMode::Poly) continue;
+        mono[k] = true;
+        monoNoteOff(k, e);
+    }
     for (auto& v : voices_) {
         if (!v.active() || v.released() || v.sustained) continue;
         if (part >= 0 && v.part != part) continue;
+        if (mono[v.part]) continue;  // handled by the note stack
         const bool match = e.noteId != 0 ? v.noteId() == e.noteId : v.matchKey == e.key;
         if (!match) continue;
         if (parts_[v.part].sustain || v.hold) v.sustained = true;
@@ -428,9 +547,11 @@ void Engine::partEvent(int part, const Event& e) {
             break;
         case EventType::AllNotesOff:
             ps.sustain = false;
+            ps.stackSize = 0;
             for (auto& v : voices_) if (v.active() && v.part == part) v.release();
             break;
         case EventType::AllSoundOff:
+            ps.stackSize = 0;
             for (auto& v : voices_) if (v.part == part) v.hardStop();
             break;
         case EventType::ProgramChange:  // handled by the host

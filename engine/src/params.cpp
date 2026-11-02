@@ -102,6 +102,12 @@ std::vector<ParamInfo> build() {
     b.fl(P::VfxAmount, "vfx.amount", "Voice FX", "Amount", 0, 1, 0.5f);
     b.ex(P::VfxRatio, "vfx.ratio", "Voice FX", "Ring Ratio", 0.25f, 16, 2, "x");
     b.fl(P::VfxMix, "vfx.mix", "Voice FX", "Mix", 0, 1, 1);
+    b.en(P::VoiceMode, "voice.mode", "Voice", "Mode", {"poly", "mono", "legato"}, 0);
+    b.fl(P::Glide, "voice.glide", "Voice", "Glide", 0, 2, 0, "s");
+    b.en(P::GlideMode, "voice.glidemode", "Voice", "Glide Mode", {"always", "legato"}, 0);
+    b.in(P::Unison, "voice.unison", "Voice", "Unison", 1, 8, 1);
+    b.fl(P::UnisonDetune, "voice.unidetune", "Voice", "Unison Detune", 0, 100, 15, "ct");
+    b.fl(P::UnisonSpread, "voice.unispread", "Voice", "Unison Spread", 0, 1, 0.5f);
     for (int i = 0; i < 4; ++i)
         b.in(P::CtlCc1 + i, "ctl.cc" + std::to_string(i + 1), "Controllers", "CC" + std::to_string(i + 1) + " #", 0, 127,
              (float)(16 + i));

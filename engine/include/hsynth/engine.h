@@ -162,11 +162,20 @@ private:
         float ccPan = 0.0f;        // CC10 as -1..1 offset (multi mode)
         float gain[4] = {};        // smoothed send L/R, dry L/R
         float target[4] = {};
+        // mono / legato note stack (last note priority) and glide source
+        static constexpr int kStack = 16;
+        Event stack[kStack];
+        int stackSize = 0;
+        uint32_t monoId = 0;       // note id of the sounding mono note (its unison voices share it)
+        int monoKey = -1;
+        float lastPitch = -1.0f;   // pitch of the previous note (portamento source)
     };
 
     void handleEvent(const Event& e);
     void partEvent(int part, const Event& e);
     void noteOn(int part, const Event& e);
+    void startNote(int part, const Event& e, float glideFrom);  // allocate + start (unison) voices
+    bool monoNoteOff(int part, const Event& e);                  // true if handled by the mono logic
     // part < 0: any part (note-id matched events in multi mode)
     void noteOff(const Event& e, int part);
     void perNote(const Event& e, int part);

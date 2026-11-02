@@ -166,10 +166,12 @@ void Voice::prepare(float sampleRate) {
     active_ = false;
 }
 
-void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random) {
+void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom) {
     const float* p = ctx.params;
     noteId_ = e.noteId;
     key_ = e.key;
+    pcmKey_ = e.key;
+    glide_ = glideFrom >= 0.0f ? glideFrom - (float)e.key : 0.0f;
     velocity_ = clampf(e.value, 0.0f, 1.0f);
     random_ = random;
     age_ = age;
@@ -210,7 +212,7 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
         ly.pcmCount = 0;
         switch (ly.type) {
             case LayerType::VA:
-                ly.osc1.reset(0.0f);
+                ly.osc1.reset(unisonDetune != 0.0f ? rng_.unipolar() : 0.0f);  // unison: free-running phases
                 ly.osc2.reset(rng_.unipolar());
                 break;
             case LayerType::FM:
@@ -287,6 +289,16 @@ void Voice::startReleaseRegions() {
         }
     }
     if (used > 0) relActive_ = true;
+}
+
+void Voice::legatoTo(const Event& e, bool glide) {
+    if (!active_) return;
+    const float from = currentPitch();
+    noteId_ = e.noteId;
+    key_ = e.key;
+    glide_ = glide ? from - (float)e.key : 0.0f;
+    released_ = sustained = hold = false;
+    notePitchT_ = notePressureT_ = noteTimbreT_ = noteXT_ = 0.0f;
 }
 
 int Voice::startedGroups(int* out, int max) const {
@@ -441,7 +453,14 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         timeSinceOn_ += dtSec;
     }
 
-    const float basePitch = (float)key_ + notePitch_ + ctx.pitchBendSemis + D(ModDest::Pitch) * 24.0f;
+    float basePitch = (float)key_ + notePitch_ + ctx.pitchBendSemis + D(ModDest::Pitch) * 24.0f;
+    if (glide_ != 0.0f || unisonDetune != 0.0f) {
+        basePitch += glide_ + unisonDetune;
+        // exponential glide: ~99 % of the interval within voice.glide seconds
+        const float t = p[P::Glide];
+        glide_ = t <= 0.0005f ? 0.0f : glide_ * std::exp(-4.6f * dtSec / t);
+        if (std::fabs(glide_) < 0.001f) glide_ = 0.0f;
+    }
 
     // Filter
     const auto ftype = (FilterType)(int)p[P::FilterType];
@@ -463,7 +482,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     // Amp / pan
     const float vs = p[P::AmpVelSens];
     const float ampTarget = (1.0f - vs + vs * velocity_ * velocity_) * clampf(1.0f + D(ModDest::Amp), 0.0f, 2.0f);
-    const float pan = clampf(D(ModDest::Pan), -1.0f, 1.0f);
+    const float pan = clampf(D(ModDest::Pan) + unisonPan, -1.0f, 1.0f);
     const float panL = std::min(1.0f, 1.0f - pan), panR = std::min(1.0f, 1.0f + pan);
     const float morph = clampf(p[P::Morph] + D(ModDest::Morph), -1.0f, 1.0f);
 
@@ -546,7 +565,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                     PcmPlayer& pl = ly.pcm[i];
                     if (!pl.active()) continue;
                     if (pl.region()->sample->channels == 2 || pl.region()->pan != 0.0f) layerStereo = true;
-                    pl.setPitch(lpitch - (float)key_, sr);
+                    pl.setPitch(lpitch - (float)pcmKey_, sr);
                     pl.render(tmp, tmpR, n, 1.0f);
                     if (pl.active()) ++running;
                 }

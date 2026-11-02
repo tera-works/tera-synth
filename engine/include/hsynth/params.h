@@ -18,6 +18,7 @@ enum class VaWave : int { Saw = 0, Square, Pulse, Triangle, Sine, Count };
 enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Ladder, CombPlus, CombMinus, Formant, Count };
 // Voice FX: per-voice insert after the filter, before the amp envelope.
 enum class VfxType : int { Off = 0, Saturate, Fold, Crush, Ring, Count };
+enum class VoiceMode : int { Poly = 0, Mono, Legato, Count };
 enum class LfoWave : int { Sine = 0, Triangle, Saw, Square, SampleHold, Count };
 
 enum class ModSource : int {
@@ -125,6 +126,12 @@ enum Global : int {
     CtlCc2,
     CtlCc3,
     CtlCc4,
+    VoiceMode,      // poly / mono (retrigger) / legato
+    Glide,          // portamento time, seconds (0 = off)
+    GlideMode,      // always / legato (only between overlapping notes)
+    Unison,         // voices per note 1..8
+    UnisonDetune,   // cents, total spread
+    UnisonSpread,   // stereo spread 0..1
     GlobalCount
 };
 

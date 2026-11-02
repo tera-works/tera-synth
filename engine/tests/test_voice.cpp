@@ -241,3 +241,183 @@ TEST(assignable_cc_mod_source) {
     const auto M = renderNote(e, 69, 1.0, {{0.5, Event::control(EventType::ModWheel, 1.0f)}});
     CHECK_NEAR(zeroCrossFreq(M, kSr, 28000, 47000), 880.0, 2.0);
 }
+
+// ------------------------------------------------------------ voice modes
+
+namespace {
+std::vector<float> renderJob(Engine& e, RenderJob job, std::vector<float>* right = nullptr) {
+    std::stable_sort(job.events.begin(), job.events.end(),
+                     [](const ScheduledEvent& a, const ScheduledEvent& b) { return a.time < b.time; });
+    std::vector<float> L, R;
+    renderOffline(e, job, L, R);
+    if (right) *right = R;
+    return L;
+}
+double freqAt(const std::vector<float>& x, double t0, double t1) {
+    return zeroCrossFreq(x, kSr, (size_t)(t0 * kSr), (size_t)(t1 * kSr));
+}
+}  // namespace
+
+TEST(voice_mono_last_note_priority) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    e.setParam(P::AmpRelease, 0.01f);
+    e.setParam(P::VoiceMode, (float)VoiceMode::Mono);
+    RenderJob job;
+    job.seconds = 1.6;
+    job.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});   // 220
+    job.events.push_back({0.4, Event::noteOn(2, 69, 1.0f)});   // 440 on top
+    job.events.push_back({0.8, Event::noteOff(2, 69)});        // back to 220
+    job.events.push_back({1.2, Event::noteOff(1, 57)});
+    const auto L = renderJob(e, job);
+    CHECK_NEAR(freqAt(L, 0.1, 0.35), 220.0, 1.0);
+    CHECK_NEAR(freqAt(L, 0.5, 0.75), 440.0, 1.5);
+    CHECK_NEAR(freqAt(L, 0.9, 1.15), 220.0, 1.0);
+    CHECK(rms(L, (size_t)(1.3 * kSr), (size_t)(1.6 * kSr)) < 1e-4);
+    CHECK(e.stats().activeVoices == 0);
+}
+
+TEST(voice_legato_vs_mono_retrigger) {
+    auto levelAfterChange = [](VoiceMode mode) {
+        Engine e;
+        e.prepare(48000);
+        sinePatch(e);
+        e.setParam(P::AmpAttack, 0.3f);
+        e.setParam(P::VoiceMode, (float)mode);
+        RenderJob job;
+        job.seconds = 1.2;
+        job.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});
+        job.events.push_back({0.8, Event::noteOn(2, 60, 1.0f)});
+        const auto L = renderJob(e, job);
+        INFO("mode %d: active voices %d\n", (int)mode, e.stats().activeVoices);
+        return rms(L, (size_t)(0.82 * kSr), (size_t)(0.86 * kSr)) / rms(L, (size_t)(0.7 * kSr), (size_t)(0.78 * kSr));
+    };
+    const double legato = levelAfterChange(VoiceMode::Legato), mono = levelAfterChange(VoiceMode::Mono);
+    INFO("level right after the note change: legato %.2f, mono %.2f (relative)\n", legato, mono);
+    CHECK(legato > 0.9);  // no new attack
+    CHECK(mono < 0.5);    // envelope restarts
+}
+
+TEST(voice_glide) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    e.setParam(P::VoiceMode, (float)VoiceMode::Legato);
+    e.setParam(P::Glide, 0.3f);
+    RenderJob job;
+    job.seconds = 1.4;
+    job.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});
+    job.events.push_back({0.5, Event::noteOn(2, 69, 1.0f)});
+    const auto L = renderJob(e, job);
+    const double mid = freqAt(L, 0.53, 0.58), end = freqAt(L, 1.0, 1.3);
+    INFO("glide 220 -> 440: %.1f Hz shortly after, %.1f Hz at the end\n", mid, end);
+    CHECK(freqAt(L, 0.1, 0.45) < 221.0);
+    CHECK(mid > 240.0 && mid < 420.0);
+    CHECK_NEAR(end, 440.0, 1.5);
+
+    // poly portamento: a new chord note glides from the previous note
+    Engine p;
+    p.prepare(48000);
+    sinePatch(p);
+    p.setParam(P::Glide, 0.3f);
+    RenderJob pj;
+    pj.seconds = 1.0;
+    addNote(pj, 0.0, 0.2, 57, 1.0f);
+    addNote(pj, 0.3, 0.6, 69, 1.0f);
+    const auto PL = renderJob(p, pj);
+    const double pmid = freqAt(PL, 0.32, 0.37);
+    CHECK(pmid > 240.0 && pmid < 420.0);
+    // glide mode "legato": detached notes do not glide
+    p.setParam(P::GlideMode, 1.0f);
+    const auto QL = renderJob(p, pj);
+    CHECK_NEAR(freqAt(QL, 0.32, 0.37), 440.0, 3.0);
+}
+
+TEST(voice_unison_stack) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    e.setParam(P::AmpRelease, 0.02f);
+    e.setParam(P::Unison, 4.0f);
+    e.setParam(P::UnisonDetune, 30.0f);
+    e.setParam(P::UnisonSpread, 1.0f);
+    RenderJob job;
+    job.seconds = 1.5;
+    addNote(job, 0.0, 1.0, 69, 1.0f);
+    std::vector<float> R;
+    RenderJob first = job;
+    first.seconds = 0.5;
+    const auto L0 = renderJob(e, first);
+    CHECK(e.stats().activeVoices == 4);
+    e.sendEvent(Event::control(EventType::AllSoundOff, 0));
+    const auto L = renderJob(e, job, &R);
+    double diff = 0;
+    for (size_t i = 4800; i < 40000; ++i) diff += std::fabs(L[i] - R[i]);
+    CHECK(diff > 10.0);                         // spread: stereo
+    CHECK_NEAR(freqAt(L, 0.1, 0.9), 440.0, 6.0); // centred on the note
+    CHECK(rms(L, (size_t)(1.2 * kSr), (size_t)(1.5 * kSr)) < 1e-4);
+    CHECK(e.stats().activeVoices == 0);          // note-off released the whole stack
+    // mono + unison: the stack moves together
+    e.setParam(P::VoiceMode, (float)VoiceMode::Legato);
+    RenderJob mj;
+    mj.seconds = 0.6;
+    mj.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});
+    mj.events.push_back({0.3, Event::noteOn(2, 69, 1.0f)});
+    const auto M = renderJob(e, mj);
+    CHECK(e.stats().activeVoices == 4);
+    CHECK_NEAR(freqAt(M, 0.35, 0.58), 440.0, 6.0);
+}
+
+TEST(voice_modes_no_stuck_notes_stress) {
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    for (int k = 0; k < 4; ++k) {
+        e.setPartParam(k, P::VoiceMode, (float)(k % 3));
+        e.setPartParam(k, P::Unison, (float)(1 + k));
+        e.setPartParam(k, P::Glide, k % 2 ? 0.05f : 0.0f);
+        e.setPartParam(k, P::AmpRelease, 0.01f);
+    }
+    e.setMaxVoices(24);
+    Rng r(9);
+    std::vector<float> L(128), R(128);
+    struct Held { uint32_t id; int key, ch; };
+    std::vector<Held> held;
+    uint32_t id = 1;
+    for (int b = 0; b < 3000; ++b) {
+        const float x = r.unipolar();
+        if (x < 0.3f && held.size() < 12) {
+            Held h{id++, 40 + (int)(r.unipolar() * 40), (int)(r.unipolar() * 4)};
+            Event ev = Event::noteOn(h.id, h.key, 0.8f);
+            ev.channel = (uint8_t)h.ch;
+            e.sendEvent(ev);
+            held.push_back(h);
+        } else if (x < 0.55f && !held.empty()) {
+            const size_t i = (size_t)(r.unipolar() * (float)held.size());
+            Event ev = Event::noteOff(r.unipolar() < 0.3f ? 0 : held[i].id, held[i].key);  // some key-matched
+            ev.channel = (uint8_t)held[i].ch;
+            e.sendEvent(ev);
+            held.erase(held.begin() + (long)i);
+        } else if (x < 0.57f) {
+            Event ev = Event::control(EventType::Sustain, r.unipolar() < 0.5f ? 1.0f : 0.0f);
+            ev.channel = (uint8_t)(r.unipolar() * 4);
+            e.sendEvent(ev);
+        }
+        e.process(L.data(), R.data(), 128);
+        for (float v : L) CHECK(std::isfinite(v));
+    }
+    for (auto& h : held) {
+        Event ev = Event::noteOff(h.id, h.key);
+        ev.channel = (uint8_t)h.ch;
+        e.sendEvent(ev);
+    }
+    for (int ch = 0; ch < 4; ++ch) {
+        Event ev = Event::control(EventType::Sustain, 0.0f);
+        ev.channel = (uint8_t)ch;
+        e.sendEvent(ev);
+    }
+    for (int b = 0; b < 200; ++b) e.process(L.data(), R.data(), 128);
+    INFO("voices left after all notes off: %d\n", e.stats().activeVoices);
+    CHECK(e.stats().activeVoices == 0);
+}

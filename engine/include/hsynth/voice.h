@@ -83,7 +83,11 @@ public:
 
     void prepare(float sampleRate);
 
-    void start(const Event& e, const VoiceContext& ctx, uint64_t age, float random);
+    // glideFrom: pitch (key, may be fractional) to glide from, < 0 = no glide
+    void start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom = -1.0f);
+    // Legato: move to a new note without retriggering (gliding if glide > 0).
+    void legatoTo(const Event& e, bool glide);
+    float currentPitch() const { return (float)key_ + glide_; }
     void release();
     void steal();            // fast fade-out
     void stopLayer(int l);   // immediately stop PCM playback of a layer (sample set swap)
@@ -108,6 +112,8 @@ public:
     bool hold = false;       // per-note hard-press hold (NoteHold event)
     int part = 0;            // owning part (multi-timbral), set by the engine
     int matchKey = 60;       // key as received (before part transpose), for key-matched events
+    float unisonDetune = 0;  // semitones (set by the engine before start)
+    float unisonPan = 0;     // -1..1
 
 private:
     static constexpr int kMaxReleaseRegions = 4;
@@ -139,6 +145,8 @@ private:
     bool active_ = false, released_ = false, stolen_ = false;
     uint32_t noteId_ = 0;
     int key_ = 60;
+    int pcmKey_ = 60;        // key the PCM regions were started for (legato keeps the samples)
+    float glide_ = 0.0f;     // portamento offset in semitones, decays to 0
     float velocity_ = 1.0f;
     float random_ = 0.0f;
     uint64_t age_ = 0;
