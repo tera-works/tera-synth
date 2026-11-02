@@ -87,6 +87,8 @@ enum class ModDest : int {
     UnisonDetune,   // x(1 + amount)
     VfxMix,         // +-1
     Lfo3Rate,       // +-4 octaves
+    FmOp5Level,
+    FmOp6Level,
     Count
 };
 
@@ -167,7 +169,7 @@ constexpr int kModBase = GlobalCount;
 
 // FM: the operator count is a compile-time constant; algorithms are data
 // tables (see dsp/fm.h) so 6/8-operator variants only need new tables.
-constexpr int kFmOps = 4;
+constexpr int kFmOps = 6;  // algorithms 1-8 use ops 1-4, 9-16 all six
 enum FmOpParam : int { OpRatio = 0, OpDetune, OpLevel, OpAttack, OpDecay, OpSustain, OpRelease, OpVelSens, FmOpCount };
 
 enum LayerParam : int {

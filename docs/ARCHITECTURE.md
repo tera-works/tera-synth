@@ -96,9 +96,11 @@ Effect rack: 12 スロット（31 種、docs/EFFECTS.md）→ Looper → Volume 
 サンプルセットと同じ仕組み（非音声スレッドで構築 → ポインタ差し替え）で読み込みます。
 
 - **VA**: polyBLEP（Saw/Square/Pulse）、polyBLAMP（Triangle）、Sine。2オシレーター + デチューン + ノイズ + PWM。
-- **FM**: 4オペレーター（`P::kFmOps` 定数 + アルゴリズムのデータテーブルにより6/8オペレーターへ拡張可能）。
-  8アルゴリズム、オペレーターごとの比率・デチューン・レベル・ADSR・ベロシティ感度、フィードバック。
-  32bit整数位相 + 4096点サイン表。オペレーターEGはコントロールレートで補間。
+- **FM**: 6 オペレーター（`P::kFmOps = 6`）。アルゴリズムはデータテーブルで、1〜8 は 4 オペレーター用（オペレーター 5・6 は
+  計算しないので従来と同じ音・同じ負荷）、9〜16 は DX7 系の 6 オペレーター構成（DX 1 / 2 / 5 / 7 / 16 / 22 / 31 / 32 相当）。
+  オペレーターごとの比率・デチューン・レベル・ADSR・ベロシティ感度、フィードバック。各オペレーターのレベルはモジュレーション先
+  （`fm.op1〜6.level`）。32bit整数位相 + 4096点サイン表。オペレーターEGはコントロールレートで補間。8 オペレーターへは
+  `kFmOps` とテーブルの追加で拡張可能。
 - **PCM**: WAV（8/16/24/32bit整数、32/64bit float、モノ/ステレオ、smplチャンクのループ点・ルートキー）/ FLAC（`flac.h`、自前デコーダー）、
   4点Hermite補間、ループ（no_loop / one_shot / loop_continuous / loop_sustain）、キーレンジ/ベロシティレイヤー/ラウンドロビン(lorand/hirand)、
   リージョン単位のADSR（ampeg_*）。SFZ対応範囲は `docs/FEATURES.md` 参照。
@@ -223,8 +225,8 @@ Part 1..16: パートパラメータ（ボイス・レイヤー・モッドマ�
   **cc1〜cc4**（割り当て可能な MIDI CC。`ctl.cc1..4` で CC 番号を指定、既定 16〜19。ネックセンサーやペダル等を
   CC として送れば任意の行き先へ割り当て可能。CC1 も指定可）, **constant**（常に 1。via と組み合わせると任意ソースの
   単純スケール、単独ならオフセット）
-- 行き先（36）: pitch, a/b/c.level, morph, a/b/c.pitch, **a/b/c.pan**, va.pw, va.mix, va.noise, fm.index, fm.feedback,
-  **fm.op1〜op4.level**（全 FM レイヤーのオペレーター出力、×(1+amt)）, cutoff, resonance, drive, filter.morph, amp, pan,
+- 行き先（38）: pitch, a/b/c.level, morph, a/b/c.pitch, **a/b/c.pan**, va.pw, va.mix, va.noise, fm.index, fm.feedback,
+  **fm.op1〜op6.level**（全 FM レイヤーのオペレーター出力、×(1+amt)）, cutoff, resonance, drive, filter.morph, amp, pan,
   **amp.attack / amp.decay / amp.release**（時間 ×8^amt、ベロシティで立ち上がりを速くする等）, lfo1.rate, **lfo3.rate**,
   wt.pos, wt.warp, vfx.amount, **vfx.mix**, **unison.detune**（×(1+amt)）
 - LFO: LFO1・LFO3 はボイス単位（キーシンク可）、LFO2 はパート単位。各 LFO に `lfoN.sync`（1/1〜1/32、付点・3 連）があり、

@@ -560,7 +560,9 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 break;
             }
             case LayerType::FM: {
-                ly.fm.control(p, l, &d[(int)ModDest::FmOp1Level]);
+                const float opMod[P::kFmOps] = {D(ModDest::FmOp1Level), D(ModDest::FmOp2Level), D(ModDest::FmOp3Level),
+                                                D(ModDest::FmOp4Level), D(ModDest::FmOp5Level), D(ModDest::FmOp6Level)};
+                ly.fm.control(p, l, opMod);
                 const float dtT = midiToHz(lpitch) / sr;
                 if (firstBlock_) ly.dt1 = dtT;
                 const float index = clampf(p[P::layer(l, P::FmIndex)] + D(ModDest::FmIndex), 0.0f, 1.0f) * 2.5f;

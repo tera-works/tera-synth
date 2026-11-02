@@ -525,3 +525,77 @@ TEST(mod_new_destinations) {
         CHECK(levelAt20ms(1.0f) > 3.0 * levelAt20ms(0.1f));
     }
 }
+
+// ---------------------------------------------------------- 6-operator FM
+
+namespace {
+Engine* fmEngine(int algo) {
+    auto* e = new Engine;
+    e->prepare(48000);
+    sinePatch(*e);
+    e->setParam(P::layer(0, P::LType), (float)LayerType::FM);
+    e->setParam(P::layer(0, P::FmAlgo), (float)algo);
+    for (int op = 0; op < P::kFmOps; ++op) {
+        e->setParam(P::fmOp(0, op, P::OpSustain), 1.0f);
+        e->setParam(P::fmOp(0, op, P::OpVelSens), 0.0f);
+    }
+    return e;
+}
+}  // namespace
+
+TEST(fm_six_operator_additive) {
+    // algorithm 16 = DX 32: six carriers at ratios 1..6
+    std::unique_ptr<Engine> e(fmEngine(15));
+    for (int op = 0; op < 6; ++op) {
+        e->setParam(P::fmOp(0, op, P::OpRatio), (float)(op + 1));
+        e->setParam(P::fmOp(0, op, P::OpLevel), 1.0f);
+    }
+    const auto L = renderNote(*e, 45, 0.6);  // 110 Hz
+    for (int h = 1; h <= 6; ++h) {
+        const double a = goertzel(L, kSr, 110.0 * h, 4800, 19200);
+        INFO("harmonic %d: %g\n", h, a);
+        CHECK(a > 0.02);
+    }
+    CHECK(goertzel(L, kSr, 770, 4800, 19200) < 1e-3);
+}
+
+TEST(fm_six_operator_stack_and_four_op_unchanged) {
+    // DX 1 (algorithm 9): 6>5>4>3 + 2>1; only op 6 -> ... chain modulates carrier 3
+    std::unique_ptr<Engine> e(fmEngine(8));
+    for (int op = 0; op < 6; ++op) e->setParam(P::fmOp(0, op, P::OpLevel), op == 0 || op == 2 ? 1.0f : 0.0f);
+    e->setParam(P::fmOp(0, 2, P::OpRatio), 2.0f);
+    auto L = renderNote(*e, 45, 0.6);
+    CHECK(goertzel(L, kSr, 110, 4800, 19200) > 0.05 && goertzel(L, kSr, 220, 4800, 19200) > 0.05);
+    CHECK(goertzel(L, kSr, 330, 4800, 19200) < 1e-3);  // no modulation yet: two pure carriers
+    e->setParam(P::fmOp(0, 5, P::OpLevel), 1.0f);      // op6 (top) -> op5 level 0 -> nothing reaches op3
+    e->sendEvent(Event::control(EventType::AllSoundOff, 0));
+    L = renderNote(*e, 45, 0.6);
+    CHECK(goertzel(L, kSr, 330, 4800, 19200) < 1e-3);
+    e->setParam(P::fmOp(0, 4, P::OpLevel), 1.0f);
+    e->setParam(P::fmOp(0, 3, P::OpLevel), 1.0f);      // full stack: sidebands around op3
+    e->sendEvent(Event::control(EventType::AllSoundOff, 0));
+    L = renderNote(*e, 45, 0.6);
+    CHECK(goertzel(L, kSr, 330, 4800, 19200) > 0.01);
+
+    // a 4-operator algorithm ignores operators 5 and 6 entirely
+    auto render4 = [](float op5level) {
+        std::unique_ptr<Engine> f(fmEngine(0));
+        f->setParam(P::fmOp(0, 4, P::OpLevel), op5level);
+        f->setParam(P::fmOp(0, 5, P::OpRatio), 7.0f);
+        return renderNote(*f, 57, 0.4);
+    };
+    const auto a = render4(0.0f), b = render4(1.0f);
+    double diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) diff = std::max(diff, (double)std::fabs(a[i] - b[i]));
+    CHECK(diff == 0.0);
+}
+
+TEST(fm_all_algorithms_finite) {
+    for (int algo = 0; algo < 16; ++algo) {
+        std::unique_ptr<Engine> e(fmEngine(algo));
+        e->setParam(P::layer(0, P::FmFeedback), 1.0f);
+        e->setParam(P::layer(0, P::FmIndex), 1.0f);
+        const auto L = renderNote(*e, 60, 0.3);
+        CHECK(allFinite(L) && peak(L) < 2.0 && rms(L, 2400, 14000) > 0.01);
+    }
+}

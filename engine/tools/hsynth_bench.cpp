@@ -86,6 +86,11 @@ int main(int argc, char** argv) {
         e.setParam(P::FilterType, 0);
         e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
     });
+    bench("FM 6-op (DX 1), filter off", voices, seconds, [](Engine& e) {
+        e.setParam(P::FilterType, 0);
+        e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
+        e.setParam(P::layer(0, P::FmAlgo), 8.0f);
+    });
     bench("VA+FM+VA, LP24", voices, seconds, [](Engine& e) {
         e.setParam(P::layer(1, P::LType), (float)LayerType::FM);
         e.setParam(P::layer(2, P::LType), (float)LayerType::VA);

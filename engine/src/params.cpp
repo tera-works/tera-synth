@@ -23,10 +23,12 @@ const std::vector<std::string> kModDestNames = {
     "va.pw", "va.mix", "va.noise", "fm.index", "fm.feedback", "cutoff", "resonance", "drive",
     "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp", "filter.morph", "vfx.amount",
     "a.pan", "b.pan", "c.pan", "fm.op1.level", "fm.op2.level", "fm.op3.level", "fm.op4.level",
-    "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate"};
+    "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate", "fm.op5.level", "fm.op6.level"};
 const std::vector<std::string> kFmAlgoNames = {
     "1: 4>3>2>1", "2: (4+3)>2>1", "3: 4>3>1 + 2>1", "4: 4>3 + 2>1", "5: 4>(3,2,1)",
-    "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4"};
+    "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4",
+    "9: 6op 6>5>4>3 + 2>1", "10: 6op 6>5>4>3 + 2>1 (fb 2)", "11: 6op 6>5 + 4>3 + 2>1", "12: 6op 6>5>3, 4>3, 2>1",
+    "13: 6op (2 + 4>3 + 6>5)>1", "14: 6op 6>(5,4,3) + 2>1", "15: 6op 6>5 + 1..4", "16: 6op 1+2+3+4+5+6"};
 
 struct Builder {
     std::vector<ParamInfo> t;
