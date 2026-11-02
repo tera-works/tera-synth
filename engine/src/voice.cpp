@@ -92,6 +92,11 @@ void Voice::prepare(float sampleRate) {
     ampEnv_.setSampleRate(sampleRate);
     env2_.setSampleRate(sampleRate);
     for (auto& l : layers_) l.fm.setSampleRate(sampleRate);
+    if (!combMem_) {
+        combMem_.reset(new float[2 * Comb::kSize]());
+        filterL_.setCombBuffer(combMem_.get());
+        filterR_.setCombBuffer(combMem_.get() + Comb::kSize);
+    }
     active_ = false;
 }
 
@@ -121,6 +126,7 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     lfo1Value_ = 0.0f;
     filterL_.reset();
     filterR_.reset();
+    vfx_.reset();
 
     const int vel127 = std::max(1, std::min(127, (int)std::lround(velocity_ * 127.0f)));
     for (int l = 0; l < kNumLayers; ++l) {
@@ -220,6 +226,10 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
         case ModSource::Random: return random_;
         case ModSource::Breath: return ctx.breath;
         case ModSource::Expression: return ctx.expression;
+        case ModSource::Cc1:
+        case ModSource::Cc2:
+        case ModSource::Cc3:
+        case ModSource::Cc4: return ctx.cc[(int)s - (int)ModSource::Cc1];
         default: return 0.0f;
     }
 }
@@ -277,8 +287,15 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const float cutoff = p[P::FilterCutoff] * fastExp2(clampf(cutoffOct, -12.0f, 12.0f));
     const float reso = clampf(p[P::FilterReso] + D(ModDest::Resonance), 0.0f, 1.0f);
     const float drive = clampf(p[P::FilterDrive] + D(ModDest::Drive), 0.0f, 1.0f);
-    filterL_.set(ftype, cutoff, reso, drive, sr);
+    const float fmorph = clampf(p[P::FilterMorph] + D(ModDest::FilterMorph), 0.0f, 1.0f);
+    filterL_.set(ftype, cutoff, reso, drive, sr, fmorph);
     if (stereo_) filterR_.copyCoefsFrom(filterL_);
+    const auto vfxType = (VfxType)(int)p[P::VfxType];
+    if (vfxType != VfxType::Off)
+        vfx_.set(vfxType, p[P::VfxAmount] + D(ModDest::VfxAmount), p[P::VfxMix],
+                 midiToHz(basePitch) * p[P::VfxRatio] / sr);
+    else
+        vfx_.set(VfxType::Off, 0.0f, 0.0f, 0.0f);
 
     // Amp / pan
     const float vs = p[P::AmpVelSens];
@@ -397,7 +414,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     }
 
     if (stereo && !stereo_) {
-        filterR_ = filterL_;  // continue from the mono state without a click
+        filterR_.copyFrom(filterL_);  // continue from the mono state without a click
         stereo_ = true;
     }
 
@@ -412,8 +429,13 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         gl += plStep;
         gr += prStep;
         const float env = ampEnv_.process() * a;
-        const float l = filterL_.process(bufL[i]);
-        const float r = stereo_ ? filterR_.process(bufR[i]) : l;
+        float l = filterL_.process(bufL[i]);
+        float r = stereo_ ? filterR_.process(bufR[i]) : l;
+        if (vfx_.active()) {
+            vfx_.advance();
+            l = vfx_.process(l, 0);
+            r = stereo_ ? vfx_.process(r, 1) : l;
+        }
         L[i] += l * env * gl;
         R[i] += r * env * gr;
     }

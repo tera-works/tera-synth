@@ -12,15 +12,16 @@ namespace {
 
 const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt"};
 const std::vector<std::string> kVaWaveNames = {"saw", "square", "pulse", "triangle", "sine"};
-const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch"};
+const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch", "ladder", "comb+", "comb-", "formant"};
+const std::vector<std::string> kVfxNames = {"off", "saturate", "fold", "crush", "ring"};
 const std::vector<std::string> kLfoWaveNames = {"sine", "triangle", "saw", "square", "s&h"};
 const std::vector<std::string> kModSourceNames = {
     "none", "velocity", "key", "ampenv", "env2", "lfo1", "lfo2", "modwheel", "pitchbend",
-    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression"};
+    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4"};
 const std::vector<std::string> kModDestNames = {
     "none", "pitch", "a.level", "b.level", "c.level", "morph", "a.pitch", "b.pitch", "c.pitch",
     "va.pw", "va.mix", "va.noise", "fm.index", "fm.feedback", "cutoff", "resonance", "drive",
-    "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp"};
+    "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp", "filter.morph", "vfx.amount"};
 const std::vector<std::string> kFmAlgoNames = {
     "1: 4>3>2>1", "2: (4+3)>2>1", "3: 4>3>1 + 2>1", "4: 4>3 + 2>1", "5: 4>(3,2,1)",
     "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4"};
@@ -96,6 +97,14 @@ std::vector<ParamInfo> build() {
     b.ex(Lfo2Rate, "lfo2.rate", "LFO", "LFO2 Rate", 0.01f, 40, 0.3f, "Hz");
 
     b.bo(Limiter, "master.limiter", "Master", "Limiter", true);
+    b.fl(P::FilterMorph, "filter.morph", "Filter", "Vowel", 0, 1, 0);
+    b.en(P::VfxType, "vfx.type", "Voice FX", "Type", kVfxNames, 0);
+    b.fl(P::VfxAmount, "vfx.amount", "Voice FX", "Amount", 0, 1, 0.5f);
+    b.ex(P::VfxRatio, "vfx.ratio", "Voice FX", "Ring Ratio", 0.25f, 16, 2, "x");
+    b.fl(P::VfxMix, "vfx.mix", "Voice FX", "Mix", 0, 1, 1);
+    for (int i = 0; i < 4; ++i)
+        b.in(P::CtlCc1 + i, "ctl.cc" + std::to_string(i + 1), "Controllers", "CC" + std::to_string(i + 1) + " #", 0, 127,
+             (float)(16 + i));
 
     buildFx(b);
 

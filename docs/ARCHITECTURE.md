@@ -78,7 +78,8 @@ Voice (最大64 + フェード用8)
  ├─ Layer A ┐  各レイヤー: Off / VA / FM / PCM / WT（ウェーブテーブル）
  ├─ Layer B ├─ level・pan・coarse/fine・velocity感度、Morph(A⇔B)
  ├─ Layer C ┘
- ├─ Stereo multimode filter (SVF: LP12/LP24/BP/HP/Notch, drive=非線形)
+ ├─ Stereo multimode filter (SVF: LP12/LP24/BP/HP/Notch、Ladder、Comb+/-、Formant、drive=非線形)
+ ├─ Voice FX（saturate / fold / crush / ring、ボイスごとに独立）
  ├─ Amp ADSR ・ Mod ADSR(Env2) ・ LFO1(ボイス単位、ディレイ付き)
  └─ per-note expression (pitch / pressure / timbre / X / hold)
 Effect rack: 12 スロット（31 種、docs/EFFECTS.md）→ Looper → Volume → Peak Limiter
@@ -186,15 +187,30 @@ Part 1..16: パートパラメータ（ボイス・レイヤー・モッドマ�
 - マルチの保存・読込（`saveMultiFile` / `loadMultiFile` → `applyMulti` / `captureMulti`）。
 - JNI ブリッジに上記関数を追加（Android は最後の S23 移植時）。
 
+**ボイスフィルター**（`dsp/svf.h`）: SVF 系に加えて
+- **Ladder**: 4 段トランジスタラダー LP（TPT / ゼロ遅延帰還、tanh 入力段）。resonance=1 で自己発振、パスバンドの音量低下を一部補正。
+- **Comb+ / Comb-**: カットオフ周波数に同調した帰還コム（遅延 = 1 / cutoff、resonance = 帰還量）。+ は倍音列、- は奇数倍音。
+  ループ内に穏やかなダンピングと tanh。遅延メモリ（4096 サンプル × 2ch）はボイスごとに `prepare()` で確保。
+- **Formant**: a / e / i / o / u のフォルマント（F1〜F3）を 3 本の並列 BPF で再現。`filter.morph`（Vowel, 0〜1）で母音を
+  連続変化、カットオフ 1 kHz で原音域・それ以外は比例シフト（0.25〜4 倍）、resonance で Q。
+
+**ボイス FX**（`dsp/voice_fx.h`、`vfx.*`）: フィルターとアンプ EG の間に入るボイス単位のインサート。
+`saturate`（tanh）、`fold`（サイン波フォールダー）、`crush`（16→3 bit + 最大 1/24 のサンプルレート低下）、
+`ring`（ノート周波数 × `vfx.ratio` のサイン波によるリングモジュレーション、キー追従）。`vfx.amount` はモジュレーション先
+（per-note 可）なので、鍵盤ごとの圧力で歪み量を変える、といった演奏ができます。オーバーサンプリングなし（軽量重視。
+重い歪みはラックの Drive / Amp を使用）。
+
 ## モジュレーションマトリクス
 
 8スロット、各スロット `source × via × amount → destination`。コントロールレート（16サンプル毎）で評価し、
 音声パラメータはブロック内で線形補間します。
 
-- ソース（16）: velocity, key, ampenv, env2, lfo1, lfo2, modwheel, pitchbend, chanpressure,
-  **notepressure, notetimbre, notex, notepitch**（鍵盤ごと）, random, breath(CC2), expression(CC11)
-- 行き先（19）: pitch, a/b/c.level, morph, a/b/c.pitch, va.pw, va.mix, va.noise, fm.index, fm.feedback,
-  cutoff, resonance, drive, amp, pan, lfo1.rate
+- ソース（20）: velocity, key, ampenv, env2, lfo1, lfo2, modwheel, pitchbend, chanpressure,
+  **notepressure, notetimbre, notex, notepitch**（鍵盤ごと）, random, breath(CC2), expression(CC11),
+  **cc1〜cc4**（割り当て可能な MIDI CC。`ctl.cc1..4` で CC 番号を指定、既定 16〜19。ネックセンサーやペダル等を
+  CC として送れば任意の行き先へ割り当て可能。CC1 も指定可）
+- 行き先（23）: pitch, a/b/c.level, morph, a/b/c.pitch, va.pw, va.mix, va.noise, fm.index, fm.feedback,
+  cutoff, resonance, drive, amp, pan, lfo1.rate, wt.pos, wt.warp, filter.morph, vfx.amount
 
 全てボイス単位で評価されるため、per-noteソースは鍵盤ごとに独立して作用します。
 ソース・行き先は enum に追加するだけで拡張可能です。エフェクトは全ボイス共通のため、別系統の **FX Mod**

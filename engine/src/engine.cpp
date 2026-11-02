@@ -372,7 +372,11 @@ void Engine::partEvent(int part, const Event& e) {
         case EventType::NoteX:
         case EventType::NoteHold: perNote(e, part); break;
         case EventType::PitchBend: ps.pitchBend = clampf(e.value, -1.0f, 1.0f); break;
-        case EventType::ModWheel: ps.ctx.modWheel = clampf(e.value, 0.0f, 1.0f); break;
+        case EventType::ModWheel:
+            ps.ctx.modWheel = clampf(e.value, 0.0f, 1.0f);
+            for (int i = 0; i < 4; ++i)
+                if ((int)ps.p[P::CtlCc1 + i] == 1) ps.ctx.cc[i] = ps.ctx.modWheel;
+            break;
         case EventType::ChannelPressure: ps.ctx.chanPressure = clampf(e.value, 0.0f, 1.0f); break;
         case EventType::Sustain: {
             const bool on = e.value >= 0.5f;
@@ -381,6 +385,8 @@ void Engine::partEvent(int part, const Event& e) {
             break;
         }
         case EventType::Controller:
+            for (int i = 0; i < 4; ++i)
+                if ((int)ps.p[P::CtlCc1 + i] == (int)e.controller) ps.ctx.cc[i] = clampf(e.value, 0.0f, 1.0f);
             switch (e.controller) {
                 case 1: ps.ctx.modWheel = clampf(e.value, 0.0f, 1.0f); break;
                 case 2: ps.ctx.breath = clampf(e.value, 0.0f, 1.0f); break;

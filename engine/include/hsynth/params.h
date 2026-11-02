@@ -15,7 +15,9 @@ namespace hsynth {
 
 enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Count };
 enum class VaWave : int { Saw = 0, Square, Pulse, Triangle, Sine, Count };
-enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Count };
+enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Ladder, CombPlus, CombMinus, Formant, Count };
+// Voice FX: per-voice insert after the filter, before the amp envelope.
+enum class VfxType : int { Off = 0, Saturate, Fold, Crush, Ring, Count };
 enum class LfoWave : int { Sine = 0, Triangle, Saw, Square, SampleHold, Count };
 
 enum class ModSource : int {
@@ -36,6 +38,10 @@ enum class ModSource : int {
     Random,         // random value per note-on
     Breath,         // CC2
     Expression,     // CC11
+    Cc1,            // assignable MIDI controllers (ctl.cc1..4: CC numbers), e.g. neck sensors
+    Cc2,
+    Cc3,
+    Cc4,
     Count
 };
 
@@ -62,6 +68,8 @@ enum class ModDest : int {
     Lfo1Rate,
     WtPos,          // wavetable position (all WT layers), +-1
     WtWarp,         // wavetable warp amount
+    FilterMorph,    // formant vowel position, +-1
+    VfxAmount,      // voice FX amount, +-1
     Count
 };
 
@@ -108,6 +116,15 @@ enum Global : int {
     Lfo2Wave,
     Lfo2Rate,
     Limiter,
+    FilterMorph,    // formant filter: vowel a-e-i-o-u (0..1)
+    VfxType,
+    VfxAmount,
+    VfxRatio,       // ring modulator frequency / note frequency
+    VfxMix,
+    CtlCc1,         // CC numbers feeding the mod sources cc1..cc4
+    CtlCc2,
+    CtlCc3,
+    CtlCc4,
     GlobalCount
 };
 

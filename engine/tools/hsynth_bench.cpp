@@ -69,6 +69,14 @@ int main(int argc, char** argv) {
     bench("VA saw x2, filter off", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, 0); });
     bench("VA saw x2, LP24", voices, seconds, [](Engine&) {});
     bench("VA saw x2, LP24 + drive", voices, seconds, [](Engine& e) { e.setParam(P::FilterDrive, 0.5f); });
+    bench("VA saw x2, ladder + drive", voices, seconds, [](Engine& e) {
+        e.setParam(P::FilterType, (float)FilterType::Ladder);
+        e.setParam(P::FilterDrive, 0.5f);
+    });
+    bench("VA saw x2, comb+", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, (float)FilterType::CombPlus); });
+    bench("VA saw x2, formant", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, (float)FilterType::Formant); });
+    bench("VA saw x2, LP24 + vfx ring", voices, seconds, [](Engine& e) { e.setParam(P::VfxType, (float)VfxType::Ring); });
+    bench("VA saw x2, LP24 + vfx crush", voices, seconds, [](Engine& e) { e.setParam(P::VfxType, (float)VfxType::Crush); });
     bench("FM 4-op, filter off", voices, seconds, [](Engine& e) {
         e.setParam(P::FilterType, 0);
         e.setParam(P::layer(0, P::LType), (float)LayerType::FM);

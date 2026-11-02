@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 
 #include "hsynth/common.h"
 #include "hsynth/dsp/envelope.h"
@@ -12,6 +13,7 @@
 #include "hsynth/dsp/lfo.h"
 #include "hsynth/dsp/oscillators.h"
 #include "hsynth/dsp/svf.h"
+#include "hsynth/dsp/voice_fx.h"
 #include "hsynth/dsp/wavetable.h"
 #include "hsynth/event.h"
 #include "hsynth/params.h"
@@ -30,6 +32,7 @@ struct VoiceContext {
     float breath = 0.0f;
     float expression = 1.0f;
     float lfo2 = 0.0f;
+    float cc[4] = {};              // assignable controllers (ctl.cc1..4)
     const SampleSet* sampleSets[kNumLayers] = {};
 };
 
@@ -123,6 +126,8 @@ private:
     float lfo1Value_ = 0.0f;
     Rng rng_;
     VoiceFilter filterL_, filterR_;
+    std::unique_ptr<float[]> combMem_;  // comb filter delay lines (L, R), allocated in prepare()
+    VoiceFx vfx_;
     float ampGain_ = 0.0f;           // smoothed
     float panL_ = 1.0f, panR_ = 1.0f;
     Layer layers_[kNumLayers];
