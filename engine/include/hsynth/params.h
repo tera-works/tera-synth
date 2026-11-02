@@ -167,7 +167,7 @@ enum Global : int {
     TuneLast = TuneC + 11,
     ArpOn,          // arpeggiator (per part)
     ArpMode,        // ArpMode
-    ArpRate,        // sync division (fx::SyncDiv, 1/1 .. 1/32)
+    ArpRate,        // division: option k = fx::SyncDiv k + 1 (1/1 .. 1/32, no "off")
     ArpOctaves,     // 1..4
     ArpGate,        // note length as a fraction of the step
     ArpSwing,       // delay of every second step, fraction of a step 0..0.5

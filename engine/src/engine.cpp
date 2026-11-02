@@ -364,7 +364,7 @@ void Engine::noteOn(int part, const Event& in) {
         for (auto& v : voices_)
             if (v.active() && !v.released() && v.part == part && v.noteId() == ps.monoId && v.matchKey == ps.monoKey) {
                 sounding = true;
-                from = v.currentPitch() - v.unisonDetune;
+                from = v.currentPitch();  // key + glide (unison detune is not part of it)
                 break;
             }
         const bool glide = glideOn && from >= 0.0f && (!glideLegatoOnly || sounding);
@@ -438,14 +438,11 @@ bool Engine::monoNoteOff(int part, const Event& e) {
     --ps.stackSize;
     if (!wasTop) return true;  // a note under the sounding one: just forget it
     if (ps.stackSize > 0) {
-        // return to the previous held note
-        Event back = ps.stack[ps.stackSize - 1];
-        const int rawKey = back.channel;
-        back.channel = kOmniChannel;
-        --ps.stackSize;  // noteOn pushes it again
-        ps.stack[ps.stackSize] = back;
-        Event again = back;
-        // legato return in both modes (no retrigger), gliding if enabled
+        // return to the previous held note (legato in both modes, gliding if enabled)
+        const Event& top = ps.stack[ps.stackSize - 1];
+        const int rawKey = top.channel;  // the stack keeps the untransposed key in .channel
+        Event again = top;
+        again.channel = kOmniChannel;
         const bool glideOn = ps.p[P::Glide] > 0.0005f;
         bool any = false;
         for (auto& v : voices_)
@@ -454,14 +451,15 @@ bool Engine::monoNoteOff(int part, const Event& e) {
                 v.matchKey = rawKey;
                 any = true;
             }
-        back.channel = (uint8_t)rawKey;
-        ps.stack[ps.stackSize++] = back;
         ps.monoId = again.noteId;
         ps.monoKey = rawKey;
         ps.lastPitch = (float)again.key;
-        if (any) return true;
-        // the voice was stolen meanwhile: start the returning note afresh
-        startNote(part, again, -1.0f);
+        if (!any) {
+            // the voice was stolen meanwhile: start the returning note afresh
+            startNote(part, again, -1.0f);
+            for (auto& v : voices_)
+                if (v.active() && v.part == part && v.noteId() == again.noteId && v.age() == ageCounter_) v.matchKey = rawKey;
+        }
         return true;
     }
     // last key released: normal note-off for the sounding voices
@@ -474,17 +472,18 @@ bool Engine::monoNoteOff(int part, const Event& e) {
 }
 
 void Engine::noteOff(const Event& e, int part) {
-    bool mono[kNumParts] = {};
+    bool mono[kNumParts] = {};  // part handled the note-off through its note stack
     for (int k = 0; k < kNumParts; ++k) {
         if (part >= 0 && k != part) continue;
         if ((VoiceMode)(int)parts_[k].p[P::VoiceMode] == VoiceMode::Poly) continue;
-        mono[k] = true;
-        monoNoteOff(k, e);
+        // notes the stack does not know (started before a switch to mono) are
+        // released by the normal path below
+        mono[k] = monoNoteOff(k, e);
     }
     for (auto& v : voices_) {
         if (!v.active() || v.released() || v.sustained) continue;
         if (part >= 0 && v.part != part) continue;
-        if (mono[v.part]) continue;  // handled by the note stack
+        if (mono[v.part] && v.noteId() == parts_[v.part].monoId) continue;  // handled by the note stack
         const bool match = e.noteId != 0 ? v.noteId() == e.noteId : v.matchKey == e.key;
         if (!match) continue;
         if (parts_[v.part].sustain || v.hold) v.sustained = true;
@@ -545,17 +544,19 @@ void Engine::partEvent(int part, const Event& e) {
                 case 10: if (multiActive_) ps.ccPan = clampf(e.value * 2.0f - 1.0f, -1.0f, 1.0f); break;
                 case 11: ps.ctx.expression = clampf(e.value, 0.0f, 1.0f); break;
                 case 64: partEvent(part, Event::control(EventType::Sustain, e.value)); break;
-                case 120: for (auto& v : voices_) if (v.part == part) v.hardStop(); break;
-                case 123: for (auto& v : voices_) if (v.active() && v.part == part) v.release(); break;
+                case 120: arpStop(part); ps.stackSize = 0; for (auto& v : voices_) if (v.part == part) v.hardStop(); break;
+                case 123: arpStop(part); ps.stackSize = 0; for (auto& v : voices_) if (v.active() && v.part == part) v.release(); break;
                 default: break;
             }
             break;
         case EventType::AllNotesOff:
+            arpStop(part);
             ps.sustain = false;
             ps.stackSize = 0;
             for (auto& v : voices_) if (v.active() && v.part == part) v.release();
             break;
         case EventType::AllSoundOff:
+            arpStop(part);
             ps.stackSize = 0;
             for (auto& v : voices_) if (v.part == part) v.hardStop();
             break;
@@ -569,21 +570,24 @@ void Engine::handleEvent(const Event& e) {
     if (e.type == EventType::Clock) { clockEvent((ClockMsg)e.controller); return; }
     if (!multiActive_) { partEvent(0, e); return; }
     const bool panic = e.type == EventType::AllNotesOff || e.type == EventType::AllSoundOff;
-    if (e.channel == kOmniChannel) {
-        if (panic) for (int k = 0; k < kNumParts; ++k) partEvent(k, e);
-        else partEvent(selectedPart_.load(std::memory_order_relaxed), e);
-        return;
-    }
-    // Note-id matched note-offs / expression find their voices in any part,
-    // so notes end correctly even if the part's channel changed meanwhile.
+    const bool omni = e.channel == kOmniChannel;
+    // Note-id matched note-offs / expression find their voices in any part, so
+    // notes end correctly even if the part's channel (or the selected part for
+    // omni input) changed while they were held.
     const bool byId = e.noteId != 0 && e.type != EventType::NoteOn && e.type <= EventType::NoteHold;
     if (byId) {
         if (e.type == EventType::NoteOff) {
             for (int k = 0; k < kNumParts; ++k)
-                if ((int)mix_[k][Mix::Channel] - 1 == (e.channel & 15)) arpInput(k, e);
+                if (omni || (int)mix_[k][Mix::Channel] - 1 == (e.channel & 15)) arpInput(k, e);
             noteOff(e, -1);
+        } else {
+            perNote(e, -1);
         }
-        else perNote(e, -1);
+        return;
+    }
+    if (omni) {
+        if (panic) for (int k = 0; k < kNumParts; ++k) partEvent(k, e);
+        else partEvent(selectedPart_.load(std::memory_order_relaxed), e);
         return;
     }
     for (int k = 0; k < kNumParts; ++k)
@@ -659,8 +663,27 @@ void Engine::runArps(int frameOffset, int frames) {
                 ++i;
             }
         }
+        // latch switched off while nothing is held: drop the latched notes
+        if (ps.p[P::ArpLatch] <= 0.5f && a.physical == 0) a.heldCount = 0;
+        // MIDI clock transport stopped: the beat stands still, so stop playing
+        if (clock && !clockRunning_) {
+            for (int i = 0; i < a.pendCount; ++i) noteOff(Event::noteOff(a.pend[i].id, a.pend[i].key), k);
+            a.pendCount = 0;
+            a.running = false;
+            continue;
+        }
         if (a.heldCount == 0) { a.running = false; continue; }
-        const float stepBeats = std::max(1.0f / 32.0f, fx::syncBeats((int)ps.p[P::ArpRate]));
+        const float stepBeats = fx::syncBeats((int)ps.p[P::ArpRate] + 1);  // arp.rate has no "off" entry
+        if (a.running) {
+            // time base jumped (clock start / appearing / lost): restart the pattern grid
+            const double next = a.origin + (double)a.step * stepBeats;
+            if (now < next - 2.0 * stepBeats || now > next + 4.0 * stepBeats) {
+                a.running = false;
+                // gate ends refer to the old time base: end those notes now
+                for (int i = 0; i < a.pendCount; ++i) noteOff(Event::noteOff(a.pend[i].id, a.pend[i].key), k);
+                a.pendCount = 0;
+            }
+        }
         if (!a.running) {
             a.running = true;
             a.origin = clock ? std::floor(now / stepBeats) * stepBeats : now;  // MIDI clock: stay on the grid
@@ -670,7 +693,7 @@ void Engine::runArps(int frameOffset, int frames) {
             a.dir = 1;
         }
         const double swing = ps.p[P::ArpSwing];
-        while (true) {
+        for (int guard = 0; guard < 8; ++guard) {  // a few steps per control block at most
             const double t = a.origin + (double)a.step * stepBeats + ((a.step & 1) ? swing * stepBeats : 0.0);
             if (now + 1e-9 < t) break;
             // pattern: held notes x octaves

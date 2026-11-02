@@ -829,3 +829,127 @@ TEST(arp_multi_parts_independent) {
     }
     CHECK(maxP1 == 1 && minP1 == 0);  // part 2 gates on and off
 }
+
+// ------------------------------------------- regressions from code review
+
+TEST(review_poly_notes_released_after_switch_to_mono) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    e.setParam(P::AmpRelease, 0.01f);
+    e.sendEvent(Event::noteOn(1, 60, 1.0f));
+    e.sendEvent(Event::noteOn(2, 64, 1.0f));
+    std::vector<float> l(128), r(128);
+    for (int b = 0; b < 20; ++b) e.process(l.data(), r.data(), 128);
+    e.setParam(P::VoiceMode, (float)VoiceMode::Mono);
+    e.sendEvent(Event::noteOff(1, 60));
+    e.sendEvent(Event::noteOff(2, 64));
+    for (int b = 0; b < 100; ++b) e.process(l.data(), r.data(), 128);
+    CHECK(e.stats().activeVoices == 0);
+}
+
+TEST(review_omni_note_off_after_select_part) {
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    e.setPartParam(0, P::AmpRelease, 0.01f);
+    e.sendEvent(Event::noteOn(1, 60, 1.0f));  // omni -> part 1
+    std::vector<float> l(128), r(128);
+    for (int b = 0; b < 10; ++b) e.process(l.data(), r.data(), 128);
+    e.selectPart(3);
+    e.sendEvent(Event::noteOff(1, 60));
+    for (int b = 0; b < 100; ++b) e.process(l.data(), r.data(), 128);
+    CHECK(e.stats().activeVoices == 0);
+}
+
+TEST(review_panic_stops_latched_arp) {
+    std::unique_ptr<Engine> e(arpEngine(ArpMode::Up));
+    e->setParam(P::ArpLatch, 1.0f);
+    e->sendEvent(Event::noteOn(1, 60, 1.0f));
+    e->sendEvent(Event::noteOff(1, 60));
+    std::vector<float> l(128), r(128);
+    for (int b = 0; b < 100; ++b) e->process(l.data(), r.data(), 128);
+    e->sendEvent(Event::control(EventType::AllNotesOff, 0));
+    int maxActive = 0;
+    for (int b = 0; b < 400; ++b) {
+        e->process(l.data(), r.data(), 128);
+        if (b > 20) maxActive = std::max(maxActive, e->stats().activeVoices);
+    }
+    CHECK(maxActive == 0);
+    // latch switched off with a latched chord and no keys down: the arp stops
+    e->sendEvent(Event::noteOn(2, 64, 1.0f));
+    e->sendEvent(Event::noteOff(2, 64));
+    for (int b = 0; b < 50; ++b) e->process(l.data(), r.data(), 128);
+    e->setParam(P::ArpLatch, 0.0f);
+    maxActive = 0;
+    for (int b = 0; b < 400; ++b) {
+        e->process(l.data(), r.data(), 128);
+        if (b > 40) maxActive = std::max(maxActive, e->stats().activeVoices);  // after the current gate (62.5 ms)
+    }
+    CHECK(maxActive == 0);
+    // arp.rate has no "off" option
+    CHECK(paramTable()[(size_t)P::ArpRate].options.front() == "1/1");
+}
+
+TEST(review_arp_follows_clock_start_and_stop) {
+    std::unique_ptr<Engine> e(arpEngine(ArpMode::Up));
+    e->setParam(P::ArpLatch, 1.0f);
+    e->setParam(P::fxChain(P::FxClockSync), 1.0f);
+    std::vector<float> l(128), r(128);
+    const double tick = 60.0 / (120.0 * 24.0);
+    double nextTick = 0.0;
+    int onsets = 0;
+    bool on = false;
+    auto run = [&](double from, double to, bool countOnsets) {
+        int count = 0;
+        for (double t = from; t < to; t += 128.0 / 48000.0) {
+            while (nextTick < t + 128.0 / 48000.0) {
+                e->sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Tick));
+                nextTick += tick;
+            }
+            e->process(l.data(), r.data(), 128);
+            const bool now = e->stats().activeVoices > 0;
+            if (countOnsets && now && !on) ++count;
+            on = now;
+        }
+        return count;
+    };
+    run(0.0, 1.0, false);
+    e->sendEvent(Event::noteOn(1, 60, 1.0f));
+    e->sendEvent(Event::noteOff(1, 60));
+    onsets = run(1.0, 3.0, true);
+    INFO("arp onsets before Start: %d\n", onsets);
+    CHECK(onsets >= 12);
+    e->sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Start));  // beat jumps back to 0
+    onsets = run(3.0, 5.0, true);
+    INFO("arp onsets after Start: %d\n", onsets);
+    CHECK(onsets >= 12);
+    e->sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Stop));  // ticks keep coming
+    run(5.0, 5.2, false);
+    CHECK(e->stats().activeVoices == 0);  // no hanging arp notes while stopped
+    CHECK(run(5.2, 6.0, true) == 0);
+    e->sendEvent(Event::control(EventType::Clock, 0.0f, (int)ClockMsg::Continue));
+    CHECK(run(6.0, 7.0, true) >= 5);
+}
+
+TEST(review_mono_glide_source_with_unison) {
+    auto startFreq = [](int unison) {
+        Engine e;
+        e.prepare(48000);
+        sinePatch(e);
+        e.setParam(P::VoiceMode, (float)VoiceMode::Mono);
+        e.setParam(P::Glide, 1.0f);
+        e.setParam(P::Unison, (float)unison);
+        e.setParam(P::UnisonDetune, 100.0f);
+        e.setParam(P::UnisonSpread, 0.0f);
+        RenderJob job;
+        job.seconds = 1.3;
+        job.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});
+        job.events.push_back({1.2, Event::noteOn(2, 69, 1.0f)});
+        const auto L = renderJob(e, job);
+        return freqAt(L, 1.205, 1.225);  // just after the new note: still near the old pitch
+    };
+    const double one = startFreq(1), two = startFreq(2);
+    INFO("glide start: unison 1 %.1f Hz, unison 2 %.1f Hz\n", one, two);
+    CHECK(std::fabs(12.0 * std::log2(two / one)) < 0.25);  // was half a semitone sharp
+}

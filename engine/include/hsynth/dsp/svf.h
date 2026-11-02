@@ -104,8 +104,13 @@ public:
     static constexpr int kSize = 4096;  // power of two; >= sampleRate / 20 Hz up to 81.9 kHz
     void setBuffer(float* buf) { buf_ = buf; }
     float* buffer() const { return buf_; }
+    bool dirty() const { return dirty_; }
+    void setDirty(bool d) { dirty_ = d; }
     void reset() {
-        if (buf_) std::memset(buf_, 0, sizeof(float) * kSize);
+        // clear the (16 KB) delay line only if it was written since the last
+        // clear: voices reset their filters on every note-on
+        if (buf_ && dirty_) std::memset(buf_, 0, sizeof(float) * kSize);
+        dirty_ = false;
         pos_ = 0;
         damp_ = 0.0f;
     }
@@ -117,7 +122,9 @@ public:
     }
     void copyCoefs(const Comb& o) { delay_ = o.delay_; fb_ = o.fb_; gain_ = o.gain_; }
     void copyState(const Comb& o) {
-        if (buf_ && o.buf_) std::memcpy(buf_, o.buf_, sizeof(float) * kSize);
+        if (buf_ && o.buf_ && o.dirty_) std::memcpy(buf_, o.buf_, sizeof(float) * kSize);
+        else if (buf_ && dirty_) std::memset(buf_, 0, sizeof(float) * kSize);
+        dirty_ = o.dirty_;
         pos_ = o.pos_;
         damp_ = o.damp_;
     }
@@ -131,12 +138,14 @@ public:
         damp_ += 0.7f * (d - damp_);  // gentle loop damping keeps high feedback smooth
         const float y = x + fb_ * damp_;
         buf_[pos_] = fastTanh(y * 0.5f) * 2.0f;
+        dirty_ = true;
         pos_ = (pos_ + 1) & (kSize - 1);
         return y * gain_;
     }
 
 private:
     float* buf_ = nullptr;
+    bool dirty_ = true;  // unknown contents until the first reset
     int pos_ = 0;
     float delay_ = 100.0f, fb_ = 0.0f, gain_ = 1.0f, damp_ = 0.0f;
 };
@@ -205,8 +214,10 @@ public:
     // Full copy (coefficients + state) keeping this filter's own comb memory.
     void copyFrom(const VoiceFilter& o) {
         float* buf = comb_.buffer();
+        const bool dirty = comb_.dirty();
         *this = o;
         comb_.setBuffer(buf);
+        comb_.setDirty(dirty);  // state of this filter's own memory
         comb_.copyState(o.comb_);
     }
 
