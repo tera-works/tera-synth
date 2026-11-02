@@ -160,6 +160,10 @@ enum Global : int {
     Env3Decay,
     Env3Sustain,
     Env3Release,
+    MasterTune,     // global (master section): cents, A4 = 440 Hz * 2^(tune / 1200)
+    VelCurve,       // velocity curve -1 (soft) .. 0 (linear) .. 1 (hard)
+    TuneC,          // scale tuning: cents offset per pitch class C .. B (12 params)
+    TuneLast = TuneC + 11,
     GlobalCount
 };
 
@@ -239,9 +243,9 @@ constexpr int kPartParams = kFxChainBase;
 constexpr int kNumParts = 16;
 
 // True for ids stored per part (everything below the effect rack except the
-// master volume and limiter switch).
+// master volume, limiter switch and master tune).
 constexpr bool isPartParam(int id) {
-    return id >= 0 && id < P::kPartParams && id != P::MasterVolume && id != P::Limiter;
+    return id >= 0 && id < P::kPartParams && id != P::MasterVolume && id != P::Limiter && id != P::MasterTune;
 }
 
 // Per-part mix settings (multi-timbral mode only; see engine.h).

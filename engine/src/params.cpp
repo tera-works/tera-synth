@@ -123,6 +123,14 @@ std::vector<ParamInfo> build() {
     b.ex(P::Env3Decay, "env3.decay", "Env 3", "Decay", 0.001f, 20, 0.5f, "s");
     b.fl(P::Env3Sustain, "env3.sustain", "Env 3", "Sustain", 0, 1, 0.0f);
     b.ex(P::Env3Release, "env3.release", "Env 3", "Release", 0.001f, 20, 0.3f, "s");
+    b.fl(P::MasterTune, "master.tune", "Master", "Master Tune", -100, 100, 0, "ct");
+    b.fl(P::VelCurve, "voice.velcurve", "Voice", "Velocity Curve", -1, 1, 0);
+    {
+        static const char* kPc[12] = {"c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"};
+        static const char* kPcLabel[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+        for (int i = 0; i < 12; ++i)
+            b.fl(P::TuneC + i, std::string("tune.") + kPc[i], "Tuning", kPcLabel[i], -100, 100, 0, "ct");
+    }
     for (int i = 0; i < 4; ++i)
         b.in(P::CtlCc1 + i, "ctl.cc" + std::to_string(i + 1), "Controllers", "CC" + std::to_string(i + 1) + " #", 0, 127,
              (float)(16 + i));

@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "hsynth/fx/ir_load.h"
+#include "hsynth/tuning.h"
 
 namespace hsynth {
 
@@ -166,6 +167,17 @@ MultiPreset captureMulti(const Engine& engine, const std::string& name, const st
         for (int i = 0; i < Mix::Count; ++i) m.mix[k][i] = engine.getPartMix(k, i);
     }
     return m;
+}
+
+bool applyScalaTuning(Engine& engine, int part, const std::string& sclPath, int root, std::string& error) {
+    ScalaScale s;
+    if (!loadScalaFile(sclPath, s, error)) return false;
+    float off[12];
+    std::string warn;
+    if (!scalaToOffsets(s, root, off, warn)) { error = warn; return false; }
+    for (int i = 0; i < 12; ++i) engine.setPartParam(part, P::TuneC + i, off[i]);
+    error = warn;  // non-fatal note (clamped degrees), empty if none
+    return true;
 }
 
 void addNote(RenderJob& job, double time, double duration, int key, float velocity, uint32_t id) {

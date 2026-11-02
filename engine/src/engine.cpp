@@ -318,6 +318,10 @@ void Engine::noteOn(int part, const Event& in) {
     }
     Event e = in;
     float send = 1.0f;
+    {
+        const float curve = parts_[part].p[P::VelCurve];
+        if (curve != 0.0f) e.value = std::pow(clampf(e.value, 0.0f, 1.0f), std::exp2(curve * 1.5f));  // >0: harder
+    }
     if (multiActive_) {
         const float* m = mix_[part];
         if (m[Mix::Mute] > 0.5f || in.key < (int)m[Mix::KeyLow] || in.key > (int)m[Mix::KeyHigh]) return;
@@ -815,6 +819,7 @@ void Engine::process(float* L, float* R, int n) {
     // 4. render
     for (auto& ps : parts_) {
         ps.ctx.tempo = rack_.tempo();
+        ps.ctx.masterTune = p_[P::MasterTune] * 0.01f;
         ps.ctx.pitchBendNorm = ps.pitchBend;
         ps.ctx.pitchBendSemis = ps.pitchBend * ps.p[P::BendRange];
     }

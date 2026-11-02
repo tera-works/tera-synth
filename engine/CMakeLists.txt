@@ -21,6 +21,7 @@ add_library(hsynth STATIC
     src/json.cpp
     src/wav.cpp
     src/flac.cpp
+    src/tuning.cpp
     src/sample_set.cpp
     src/sfz.cpp
     src/midi.cpp

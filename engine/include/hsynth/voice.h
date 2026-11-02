@@ -35,6 +35,7 @@ struct VoiceContext {
     float lfo2 = 0.0f;
     float cc[4] = {};              // assignable controllers (ctl.cc1..4)
     float tempo = 120.0f;          // bpm (effect rack tempo / MIDI clock) for synced LFOs
+    float masterTune = 0.0f;       // semitones (master.tune)
     const SampleSet* sampleSets[kNumLayers] = {};
     uint32_t seq[kNumLayers] = {};    // round-robin counters (SFZ seq_position)
     int keyswitch[kNumLayers] = {-1, -1, -1};  // active SFZ keyswitch per layer (-1 = default)

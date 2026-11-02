@@ -480,6 +480,10 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     }
 
     float basePitch = (float)key_ + notePitch_ + ctx.pitchBendSemis + D(ModDest::Pitch) * 24.0f;
+    {
+        const float tune = ctx.masterTune + p[P::TuneC + key_ % 12] * 0.01f;  // master tune + scale tuning
+        if (tune != 0.0f) basePitch += tune;
+    }
     if (glide_ != 0.0f || unisonDetune != 0.0f) {
         basePitch += glide_ + unisonDetune * clampf(1.0f + D(ModDest::UnisonDetune), 0.0f, 4.0f);
         // exponential glide: ~99 % of the interval within voice.glide seconds

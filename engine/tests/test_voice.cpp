@@ -4,6 +4,9 @@
 #include "hsynth/dsp/voice_fx.h"
 #include "hsynth/engine.h"
 #include "hsynth/host_utils.h"
+#include "hsynth/tuning.h"
+#include <filesystem>
+#include <fstream>
 #include "test.h"
 
 using namespace hsynth;
@@ -598,4 +601,74 @@ TEST(fm_all_algorithms_finite) {
         const auto L = renderNote(*e, 60, 0.3);
         CHECK(allFinite(L) && peak(L) < 2.0 && rms(L, 2400, 14000) > 0.01);
     }
+}
+
+// ------------------------------------------------- tuning / velocity curve
+
+
+TEST(tuning_master_and_scale) {
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    e.setParam(P::MasterTune, 100.0f);
+    CHECK_NEAR(zeroCrossFreq(renderNote(e, 69, 0.5), kSr, 4800, 20000), 440.0 * std::pow(2.0, 1.0 / 12.0), 1.5);
+    CHECK(!isPartParam(P::MasterTune) && isPartParam(P::TuneC + 3));
+    e.setParam(P::MasterTune, 0.0f);
+    e.setParam(P::TuneC + 9, -50.0f);  // A a quarter tone flat
+    e.sendEvent(Event::control(EventType::AllSoundOff, 0));
+    CHECK_NEAR(zeroCrossFreq(renderNote(e, 69, 0.5), kSr, 4800, 20000), 440.0 * std::pow(2.0, -0.5 / 12.0), 1.5);
+    e.sendEvent(Event::control(EventType::AllSoundOff, 0));
+    CHECK_NEAR(zeroCrossFreq(renderNote(e, 72, 0.5), kSr, 4800, 20000), 523.25, 1.5);  // C unchanged
+}
+
+TEST(tuning_scala_import) {
+    const std::string ji =
+        "! just.scl\n!\n5-limit just intonation\n 12\n!\n16/15\n9/8\n6/5\n5/4\n4/3\n45/32\n3/2\n8/5\n5/3\n9/5\n15/8\n2/1\n";
+    ScalaScale s;
+    std::string err;
+    CHECK(parseScala(ji, s, err));
+    CHECK(s.description == "5-limit just intonation" && s.cents.size() == 12);
+    float off[12];
+    CHECK(scalaToOffsets(s, 0, off, err));
+    CHECK_NEAR(off[4], 1200.0 * std::log2(1.25) - 400.0, 0.01);  // E: -13.69 ct
+    CHECK_NEAR(off[7], 1200.0 * std::log2(1.5) - 700.0, 0.01);   // G: +1.96 ct
+    CHECK(off[0] == 0.0f);
+    // root on D: degree 4 (major third) lands on F#
+    CHECK(scalaToOffsets(s, 2, off, err));
+    CHECK_NEAR(off[6], 1200.0 * std::log2(1.25) - 400.0, 0.01);
+    // cents notation, comments after the value, and a non-12 scale
+    ScalaScale c;
+    CHECK(parseScala("cents\n3\n400.0 major third\n700.0\n1200.0\n", c, err) && c.cents[1] == 700.0);
+    CHECK(!scalaToOffsets(c, 0, off, err));
+    CHECK(!parseScala("x\n4\n100.0\n", c, err));
+    // through the engine: E4 in just intonation from C = 261.63 * 5/4
+    const std::string path = (std::filesystem::temp_directory_path() / "hsynth_tests" / "just.scl").generic_string();
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream(path) << ji;
+    Engine e;
+    e.prepare(48000);
+    sinePatch(e);
+    CHECK(applyScalaTuning(e, 0, path, 0, err));
+    CHECK_NEAR(zeroCrossFreq(renderNote(e, 64, 0.5), kSr, 4800, 20000), 261.6256 * 1.25, 1.0);
+}
+
+TEST(velocity_curve) {
+    auto level = [](float curve, float vel) {
+        Engine e;
+        e.prepare(48000);
+        sinePatch(e);
+        e.setParam(P::AmpVelSens, 1.0f);
+        e.setParam(P::VelCurve, curve);
+        RenderJob job;
+        job.seconds = 0.3;
+        job.events.push_back({0.0, Event::noteOn(1, 69, vel)});
+        std::vector<float> L, R;
+        renderOffline(e, job, L, R);
+        return rms(L, 4800, 12000);
+    };
+    const double lin = level(0.0f, 0.5f), hard = level(1.0f, 0.5f), soft = level(-1.0f, 0.5f), full = level(1.0f, 1.0f);
+    INFO("velocity 0.5: linear %g, hard %g, soft %g; velocity 1 hard %g\n", lin, hard, soft, full);
+    CHECK(hard < 0.5 * lin);
+    CHECK(soft > 1.5 * lin);
+    CHECK_NEAR(full, level(0.0f, 1.0f), 1e-6);  // full velocity unaffected
 }

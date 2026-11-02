@@ -36,6 +36,10 @@ bool loadPartSamples(Engine& engine, int part, int layer, const std::string& pat
                      std::vector<std::string>& warnings);
 bool loadPartWavetable(Engine& engine, int part, int layer, const std::string& path, std::string& error);
 
+// Scala (.scl) scale -> tune.c .. tune.b of a part (scale degree 0 on pitch
+// class `root`, 0 = C). Non-12-note scales fail with an error.
+bool applyScalaTuning(Engine& engine, int part, const std::string& sclPath, int root, std::string& error);
+
 // Load a WAV/SFZ file into a layer. Returns false on failure (error set);
 // warnings receives non-fatal SFZ messages.
 bool loadLayerSamples(Engine& engine, int layer, const std::string& path, std::string& error,
