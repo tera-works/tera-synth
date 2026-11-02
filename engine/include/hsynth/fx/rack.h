@@ -66,6 +66,10 @@ public:
     // target 0 = cabinet, 1 = IR reverb
     void setUserIr(int target, const ConvIr* ir);
 
+    // audio thread: tempo / beat position for blocks outside the rack (part inserts)
+    float tempo() const { return tempo_; }
+    double beat() const { return beat_; }
+
     // any thread
     LooperStatus looperStatus() const { return looper_.status(); }
     // Blocks in processing order (duplicates and "none" removed); any thread.

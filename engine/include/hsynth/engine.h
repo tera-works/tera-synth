@@ -36,6 +36,7 @@
 #include "hsynth/dsp/lfo.h"
 #include "hsynth/event.h"
 #include "hsynth/fx/convolver.h"
+#include "hsynth/fx/insert.h"
 #include "hsynth/fx/rack.h"
 #include "hsynth/params.h"
 #include "hsynth/sample_set.h"
@@ -168,6 +169,7 @@ private:
     void releaseSustained(int part);
     Voice* allocateVoice(int part);
     void updateEffects();
+    void updateInserts(int part);
     void updatePartTargets();
     void processMulti(float* L, float* R, int n);
     void swapSampleSet(int part, int layer, SampleSet* s);
@@ -199,7 +201,9 @@ private:
     std::atomic<int> selectedPart_{0};
     bool multiActive_ = false;  // audio thread
     PartState parts_[kNumParts];
-    float partBuf_[kNumParts][2][kControlBlock] = {};
+    std::unique_ptr<float[]> partBus_;  // kNumParts x 2 x kMaxBlockSize (multi mode)
+    float* bus(int part, int ch) { return partBus_.get() + ((size_t)part * 2 + (size_t)ch) * kMaxBlockSize; }
+    std::unique_ptr<fx::InsertChain[]> inserts_;  // per part
     float dryL_[kMaxBlockSize] = {}, dryR_[kMaxBlockSize] = {};
     float gainStep_ = 0.0f;  // per sample
 

@@ -32,7 +32,7 @@ static double bench(const char* name, int voices, double seconds, const std::fun
 
 // Multi-timbral: `parts` parts with `perPart` voices each, one MIDI channel per
 // part, every part with its own copy of the VA saw x2 / LP24 patch.
-static double benchMulti(const char* name, int parts, int perPart, double seconds) {
+static double benchMulti(const char* name, int parts, int perPart, double seconds, bool inserts = false) {
     Engine e;
     e.prepare(48000);
     e.setMaxVoices(64);
@@ -43,6 +43,11 @@ static double benchMulti(const char* name, int parts, int perPart, double second
         e.setPartParam(k, P::FilterCutoff, 800.0f + 200.0f * (float)k);
         e.setPartMix(k, Mix::Pan, -1.0f + 2.0f * (float)k / (float)std::max(1, parts - 1));
         e.setPartMix(k, Mix::FxSend, k % 2 ? 1.0f : 0.5f);
+        if (inserts) {  // two inserts per part: comp + (chorus | phaser | drive | peq)
+            const int second[4] = {fx::Chorus, fx::Phaser, fx::Drive, fx::Peq};
+            e.setPartParam(k, P::insSlot(0), (float)(fx::insertIndex(fx::Comp) + 1));
+            e.setPartParam(k, P::insSlot(1), (float)(fx::insertIndex(second[k % 4]) + 1));
+        }
         for (int i = 0; i < perPart; ++i) {
             Event ev = Event::noteOn((uint32_t)(k * 16 + i + 1), 40 + 3 * i + k, 0.7f);
             ev.channel = (uint8_t)k;
@@ -112,5 +117,6 @@ int main(int argc, char** argv) {
     // multi-timbral: 16 parts x 4 voices vs. the same 64 voices in single-part mode
     bench("single part, 64 voices", 64, seconds, [](Engine&) {});
     benchMulti("multi 16 parts x 4 voices", 16, 4, seconds);
+    benchMulti("multi 16x4 + 2 inserts/part", 16, 4, seconds, true);
     return 0;
 }

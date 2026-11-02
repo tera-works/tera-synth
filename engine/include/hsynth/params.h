@@ -174,7 +174,11 @@ constexpr int kLayerBase = kModBase + kModSlots * ModSlotCount;
 // the parameters of every effect block.
 enum FxChainParam : int { FxTempo = 0, FxRetrig, FxMacro1, FxMacro2, LooperLevel, FxSlot1, FxChainCount = FxSlot1 + fx::kFxSlots };
 enum FxModParam : int { FxModSrc = 0, FxModDst, FxModAmt, FxModCount };
-constexpr int kFxChainBase = kLayerBase + 3 * LayerParamCount;
+// Part insert effects: slot params (enum: 0 = none, k = kInsertBlockList[k-1])
+// followed by the parameters of every insert block.
+constexpr int kInsBase = kLayerBase + 3 * LayerParamCount;
+constexpr int kInsBlockBase = kInsBase + fx::kInsertSlots;
+constexpr int kFxChainBase = kInsBlockBase + fx::kInsertParamTotal;
 constexpr int kFxModBase = kFxChainBase + FxChainCount;
 constexpr int kFxBlockBase = kFxModBase + fx::kFxModSlots * FxModCount;
 constexpr int kNumParams = kFxBlockBase + fx::kBlockParamTotal;
@@ -186,6 +190,9 @@ constexpr int fxChain(int p) { return kFxChainBase + p; }
 constexpr int fxSlot(int slot) { return kFxChainBase + FxSlot1 + slot; }
 constexpr int fxMod(int slot, int p) { return kFxModBase + slot * FxModCount + p; }
 constexpr int fxp(int block, int local) { return kFxBlockBase + fx::blockOffset(block) + local; }
+constexpr int insSlot(int slot) { return kInsBase + slot; }
+// parameter of insert block `block` (must be in fx::kInsertBlockList)
+constexpr int insp(int block, int local) { return kInsBlockBase + fx::insertOffset(fx::insertIndex(block)) + local; }
 
 // Multi-timbral parts: ids [0, kPartParams) form one part's patch (voice,
 // layers, mod matrix). MasterVolume and Limiter fall in that range but belong

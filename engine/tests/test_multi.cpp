@@ -445,3 +445,84 @@ TEST(multi_mode_switch_and_stress) {
     e->process(big.data(), bigR.data(), 3000);
     CHECK(allFinite(big));
 }
+
+// ---------------------------------------------------------------- part inserts
+
+namespace {
+void ringInsert(Engine& e, int part, float freq) {
+    e.setPartParam(part, P::insSlot(1), (float)(fx::insertIndex(fx::RingMod) + 1));
+    e.setPartParam(part, P::insp(fx::RingMod, fx::ringmod::Freq), freq);
+    e.setPartParam(part, P::insp(fx::RingMod, fx::ringmod::Mix), 1.0f);
+    e.setPartParam(part, P::insp(fx::RingMod, fx::ringmod::Spread), 0.0f);
+}
+}  // namespace
+
+TEST(part_insert_metadata) {
+    CHECK(findParam("ins.slot1") == P::insSlot(0));
+    CHECK(findParam("ins.chorus.mix") == P::insp(fx::Chorus, fx::chorus::Mix));
+    CHECK(paramTable()[(size_t)P::insp(fx::Comp, 0)].def == 1.0f);
+    CHECK(isPartParam(P::insp(fx::Stereo, fx::stereo::Output)) && !isPartParam(P::fxSlot(0)));
+    CHECK(paramTable()[(size_t)P::insSlot(2)].options.size() == (size_t)fx::kNumInsertBlocks + 1);
+    CHECK(fx::insertIndex(fx::Delay) < 0);
+}
+
+TEST(part_insert_single_mode) {
+    // ring modulator insert on the single patch: 440 Hz * 300 Hz -> 140 / 740 Hz
+    std::unique_ptr<Engine> e(makeEngine(false));
+    sinePart(*e, 0);
+    ringInsert(*e, 0, 300.0f);
+    e->sendEvent(Event::noteOn(1, 69, 1.0f));
+    std::vector<float> L;
+    run(*e, 0.6, &L);
+    const double s140 = goertzel(L, 48000, 140, 9600, 19200), s740 = goertzel(L, 48000, 740, 9600, 19200),
+                 s440 = goertzel(L, 48000, 440, 9600, 19200);
+    INFO("ring insert: 140 %g 740 %g 440 %g\n", s140, s740, s440);
+    CHECK(s140 > 10 * s440 && s740 > 10 * s440);
+    // removing the insert returns the clean sine (crossfade, no stale state)
+    e->setPartParam(0, P::insSlot(1), 0.0f);
+    run(*e, 0.3, &L);
+    CHECK(goertzel(L, 48000, 440, 4800, 9600) > 10 * goertzel(L, 48000, 740, 4800, 9600));
+}
+
+TEST(part_insert_only_affects_its_part) {
+    std::unique_ptr<Engine> e(makeEngine(true));
+    sinePart(*e, 0);
+    sinePart(*e, 1);
+    ringInsert(*e, 0, 300.0f);
+    e->setPartMix(0, Mix::FxSend, 0.0f);  // inserts run before the dry/send split
+    e->sendEvent(onCh(Event::noteOn(1, 69, 1.0f), 0));  // part 1: 440 Hz ring-modulated
+    e->sendEvent(onCh(Event::noteOn(2, 81, 1.0f), 1));  // part 2: clean 880 Hz
+    std::vector<float> L;
+    run(*e, 0.6, &L);
+    const double s880 = goertzel(L, 48000, 880, 9600, 19200);
+    const double s580 = goertzel(L, 48000, 580, 9600, 19200), s1180 = goertzel(L, 48000, 1180, 9600, 19200);
+    const double s740 = goertzel(L, 48000, 740, 9600, 19200), s440 = goertzel(L, 48000, 440, 9600, 19200);
+    INFO("part 2 clean 880 %g, its would-be sidebands 580 %g 1180 %g; part 1 sideband 740 %g, carrier 440 %g\n", s880,
+         s580, s1180, s740, s440);
+    CHECK(s880 > 0.05);
+    CHECK(s580 < s880 * 0.01 && s1180 < s880 * 0.01);
+    CHECK(s740 > 10 * s440);
+    // part 1's insert is part of its preset
+    const Preset p = capturePartPreset(*e, 0, "ring", "");
+    CHECK(p.params[(size_t)P::insSlot(1)] == (float)(fx::insertIndex(fx::RingMod) + 1));
+    const Preset q = capturePartPreset(*e, 1, "clean", "");
+    CHECK(q.params[(size_t)P::insSlot(1)] == 0.0f);
+}
+
+TEST(part_insert_all_blocks_finite) {
+    for (int k = 0; k < fx::kNumInsertBlocks; ++k) {
+        std::unique_ptr<Engine> e(makeEngine(true));
+        const int part = k % kNumParts;
+        e->setPartParam(part, P::insSlot(0), (float)(k + 1));
+        e->setPartParam(part, P::insSlot(2), (float)((k + 3) % fx::kNumInsertBlocks + 1));
+        e->setQuality(Quality::High);
+        for (int i = 0; i < 6; ++i) e->sendEvent(onCh(Event::noteOn((uint32_t)(i + 1), 40 + 5 * i, 0.9f), part));
+        std::vector<float> L, R;
+        run(*e, 0.5, &L, &R);
+        CHECK(allFinite(L) && allFinite(R) && peak(L) < 2.0);
+        CHECK(rms(L) > 1e-3);
+        e->sendEvent(onCh(Event::control(EventType::AllNotesOff, 0), part));
+        run(*e, 3.0, &L, &R);
+        CHECK(rms(L, L.size() - 4800, L.size()) < 1e-4);  // tails end
+    }
+}

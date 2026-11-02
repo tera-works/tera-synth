@@ -174,6 +174,26 @@ std::vector<ParamInfo> build() {
         b.fl(layer(l, WtSpread), n + ".wt.spread", gw, "Unison Spread", 0, 1, 0.7f);
     }
 
+    // Part insert effects: copies of the rack metadata of the insert blocks,
+    // renamed "ins.<key>.<param>", group "Part FX / <title>". On defaults to
+    // true: choosing a block for a slot is what switches it in.
+    {
+        std::vector<std::string> opts = {"none"};
+        for (int k = 0; k < fx::kNumInsertBlocks; ++k) opts.push_back(kBlockKeys[fx::kInsertBlockList[k]]);
+        for (int s = 0; s < fx::kInsertSlots; ++s)
+            b.en(insSlot(s), "ins.slot" + std::to_string(s + 1), "Part FX", "Insert " + std::to_string(s + 1), opts, 0);
+        for (int k = 0; k < fx::kNumInsertBlocks; ++k) {
+            const int blk = fx::kInsertBlockList[k];
+            for (int l = 0; l < fx::kBlockParams[blk]; ++l) {
+                ParamInfo info = b.t[(size_t)fxp(blk, l)];
+                info.name = "ins." + info.name.substr(3);  // "fx.chorus.mix" -> "ins.chorus.mix"
+                info.group = std::string("Part FX / ") + kBlockTitles[blk];
+                if (l == 0) info.def = 1.0f;
+                b.t[(size_t)insp(blk, l)] = info;
+            }
+        }
+    }
+
     // FX modulation destinations: every continuous or switch parameter of the
     // effect blocks, by name (stable in presets).
     std::vector<std::string> dstNames = {"none"};

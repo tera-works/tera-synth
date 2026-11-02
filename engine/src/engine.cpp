@@ -35,7 +35,9 @@ void atomicMaxI(std::atomic<int>& a, int v) {
 Engine::Engine()
     : sharedParams_(new std::atomic<float>[P::kNumParams]),
       partShared_(new std::atomic<float>[(size_t)(kNumParts - 1) * P::kPartParams]),
-      partP_(new float[(size_t)(kNumParts - 1) * P::kPartParams]) {
+      partP_(new float[(size_t)(kNumParts - 1) * P::kPartParams]),
+      partBus_(new float[(size_t)kNumParts * 2 * kMaxBlockSize]()),
+      inserts_(new fx::InsertChain[kNumParts]) {
     float defs[P::kNumParams];
     defaultParams(defs);
     for (int i = 0; i < P::kNumParams; ++i) sharedParams_[i].store(defs[i]);
@@ -86,6 +88,7 @@ void Engine::prepare(float sampleRate, int maxBlockSize) {
     for (auto& v : voices_) v.prepare(sampleRate);
     builtinWavetable(0);  // generate the shared tables now, not on the audio thread
     rack_.prepare(sampleRate);
+    for (int k = 0; k < kNumParts; ++k) inserts_[k].prepare(sampleRate);
     for (int t = 0; t < 2; ++t) rack_.setUserIr(t, currentIr_[t]);
     effectsQuality_ = -1;
     limiter_.prepare(sampleRate, kMaxBlockSize);
@@ -325,6 +328,12 @@ void Engine::noteOn(int part, const Event& in) {
     for (auto& v : voices_)
         if (v.active() && !v.released()) { held = true; break; }
     if (send > 0.0f) rack_.noteOn(e.key, e.value, !held);
+    if (!inserts_[part].empty()) {
+        bool partHeld = false;
+        for (auto& v : voices_)
+            if (v.active() && !v.released() && v.part == part) { partHeld = true; break; }
+        inserts_[part].noteOn(e.key, !partHeld);
+    }
     Voice* v = allocateVoice(part);
     v->start(e, parts_[part].ctx, ++ageCounter_, rng_.unipolar());
     v->part = part;
@@ -438,6 +447,13 @@ void Engine::updateEffects() {
     // Low: no oversampling, Normal: 2x, High: 4x (drive / amp stages)
     rack_.paramsChanged(p_, q == (int)Quality::Low ? 1 : q == (int)Quality::High ? 4 : 2, q == (int)Quality::High);
     limiter_.enabled = p_[P::Limiter] > 0.5f;
+    for (int k = 0; k < kNumParts; ++k) updateInserts(k);
+}
+
+void Engine::updateInserts(int part) {
+    const int q = effectsQuality_;
+    inserts_[part].paramsChanged(parts_[part].p, q == (int)Quality::Low ? 1 : q == (int)Quality::High ? 4 : 2,
+                                 q == (int)Quality::High);
 }
 
 void Engine::updatePartTargets() {
@@ -469,14 +485,15 @@ void Engine::swapSampleSet(int part, int layer, SampleSet* s) {
     currentSets_[part][layer] = s;
 }
 
-// Multi-timbral render: voices go into per-part control-block buffers that are
-// mixed (volume / pan / FX send) into the rack bus (L/R) and the dry bus.
+// Multi-timbral render: voices go into per-part buses, which run through the
+// part's insert effects and are mixed (volume / pan / FX send) into the rack
+// bus (L/R) and the dry bus.
 void Engine::processMulti(float* L, float* R, int n) {
     std::memset(dryL_, 0, sizeof(float) * n);
     std::memset(dryR_, 0, sizeof(float) * n);
+    bool used[kNumParts] = {};
     for (int off = 0; off < n; off += kControlBlock) {
         const int m = std::min(kControlBlock, n - off);
-        bool used[kNumParts] = {};
         for (int k = 0; k < kNumParts; ++k) {
             PartState& ps = parts_[k];
             ps.ctx.lfo2 = ps.lfo2.advance((LfoWave)(int)ps.p[P::Lfo2Wave], ps.p[P::Lfo2Rate], (float)m / sampleRate_,
@@ -487,36 +504,51 @@ void Engine::processMulti(float* L, float* R, int n) {
             const int k = v.part;
             if (!used[k]) {
                 used[k] = true;
-                std::memset(partBuf_[k][0], 0, sizeof(float) * m);
-                std::memset(partBuf_[k][1], 0, sizeof(float) * m);
+                std::memset(bus(k, 0), 0, sizeof(float) * n);
+                std::memset(bus(k, 1), 0, sizeof(float) * n);
             }
-            v.render(partBuf_[k][0], partBuf_[k][1], m, parts_[k].ctx);
+            v.render(bus(k, 0) + off, bus(k, 1) + off, m, parts_[k].ctx);
         }
-        const float inv = 1.0f / (float)m;
-        const float step = gainStep_ * (float)m;
-        for (int k = 0; k < kNumParts; ++k) {
-            PartState& ps = parts_[k];
-            float g0[4], dg[4];
-            for (int c = 0; c < 4; ++c) {
-                g0[c] = ps.gain[c];
-                const float g1 = g0[c] + clampf(ps.target[c] - g0[c], -step, step);  // linear ramp
-                ps.gain[c] = g1;
-                dg[c] = (g1 - g0[c]) * inv;
+    }
+    const float step = gainStep_;
+    for (int k = 0; k < kNumParts; ++k) {
+        PartState& ps = parts_[k];
+        fx::InsertChain& ins = inserts_[k];
+        if (!used[k] && ins.busy()) {  // let insert tails ring out
+            used[k] = true;
+            std::memset(bus(k, 0), 0, sizeof(float) * n);
+            std::memset(bus(k, 1), 0, sizeof(float) * n);
+        }
+        if (!used[k]) {
+            for (int c = 0; c < 4; ++c) ps.gain[c] += clampf(ps.target[c] - ps.gain[c], -step * n, step * n);
+            continue;
+        }
+        float* bl = bus(k, 0);
+        float* br = bus(k, 1);
+        if (!ins.empty()) {
+            ins.setTempo(rack_.tempo(), rack_.beat());
+            ins.process(bl, br, n);
+        }
+        bool steady = true;
+        for (int c = 0; c < 4; ++c) steady = steady && ps.gain[c] == ps.target[c];
+        if (steady) {
+            const float* g = ps.gain;
+            for (int i = 0; i < n; ++i) {
+                L[i] += bl[i] * g[0];
+                R[i] += br[i] * g[1];
+                dryL_[i] += bl[i] * g[2];
+                dryR_[i] += br[i] * g[3];
             }
-            if (!used[k]) continue;
-            const float* bl = partBuf_[k][0];
-            const float* br = partBuf_[k][1];
-            float* sl = L + off;
-            float* sr = R + off;
-            float* dl = dryL_ + off;
-            float* dr = dryR_ + off;
-            for (int i = 0; i < m; ++i) {
-                const float t = (float)(i + 1);
-                sl[i] += bl[i] * (g0[0] + dg[0] * t);
-                sr[i] += br[i] * (g0[1] + dg[1] * t);
-                dl[i] += bl[i] * (g0[2] + dg[2] * t);
-                dr[i] += br[i] * (g0[3] + dg[3] * t);
-            }
+            continue;
+        }
+        float* g = ps.gain;
+        const float* t = ps.target;
+        for (int i = 0; i < n; ++i) {  // linear ramps toward the targets
+            for (int c = 0; c < 4; ++c) g[c] += clampf(t[c] - g[c], -step, step);
+            L[i] += bl[i] * g[0];
+            R[i] += br[i] * g[1];
+            dryL_[i] += bl[i] * g[2];
+            dryR_[i] += br[i] * g[3];
         }
     }
 }
@@ -550,6 +582,7 @@ void Engine::process(float* L, float* R, int n) {
         float* dst = partP_.get() + (size_t)(k - 1) * P::kPartParams;
         const std::atomic<float>* src = partShared_.get() + (size_t)(k - 1) * P::kPartParams;
         for (int i = 0; i < P::kPartParams; ++i) dst[i] = src[i].load(std::memory_order_relaxed);
+        updateInserts(k);
     }
     const uint32_t mv = mixVersion_.load(std::memory_order_acquire);
     if (mv != seenMixVersion_) {
@@ -614,6 +647,10 @@ void Engine::process(float* L, float* R, int n) {
             ctx0.lfo2 = parts_[0].lfo2.advance((LfoWave)(int)p_[P::Lfo2Wave], p_[P::Lfo2Rate], (float)m / sampleRate_, rng_);
             for (auto& v : voices_)
                 if (v.active()) v.render(L + off, R + off, m, ctx0);
+        }
+        if (!inserts_[0].empty()) {
+            inserts_[0].setTempo(rack_.tempo(), rack_.beat());
+            inserts_[0].process(L, R, n);
         }
     }
 

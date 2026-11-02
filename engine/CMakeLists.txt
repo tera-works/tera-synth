@@ -28,6 +28,7 @@ add_library(hsynth STATIC
     src/fx/convolver.cpp
     src/fx/ir_load.cpp
     src/fx/rack.cpp
+    src/fx/insert.cpp
     src/fx/fx_dynamics.cpp
     src/fx/fx_drive.cpp
     src/fx/fx_filter.cpp
