@@ -99,6 +99,25 @@ constexpr int blockOffset(int b) {
 }
 constexpr int kBlockParamTotal = blockOffset(BlockCount);
 
+// Part insert effects (multi-timbral parts / single patch): kInsertSlots
+// serial slots per part choosing from this subset of light-weight blocks.
+// Each part has its own copy of these blocks' parameters ("ins.<key>.<param>").
+constexpr int kInsertSlots = 3;
+constexpr int kInsertBlockList[] = {Comp, Drive, Crush, Peq, Filter, Wah, Chorus, Flanger, Phaser, Tremolo, RingMod, Stereo};
+constexpr int kNumInsertBlocks = (int)(sizeof(kInsertBlockList) / sizeof(kInsertBlockList[0]));
+constexpr int insertOffset(int i) {
+    int s = 0;
+    for (int k = 0; k < i; ++k) s += kBlockParams[kInsertBlockList[k]];
+    return s;
+}
+constexpr int kInsertParamTotal = insertOffset(kNumInsertBlocks);
+// index into kInsertBlockList, or -1
+constexpr int insertIndex(int block) {
+    for (int k = 0; k < kNumInsertBlocks; ++k)
+        if (kInsertBlockList[k] == block) return k;
+    return -1;
+}
+
 // Enumerations shared by several blocks.
 enum class SyncDiv : int {
     Off = 0, D1_1, D1_2, D1_2D, D1_2T, D1_4, D1_4D, D1_4T, D1_8, D1_8D, D1_8T, D1_16, D1_16D, D1_16T, D1_32, Count

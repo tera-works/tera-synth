@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cmath>
+#include <complex>
 #include <vector>
 
 namespace hsynth_test {
@@ -56,6 +57,49 @@ inline double goertzel(const std::vector<float>& x, double sr, double f, size_t 
     }
     const double re = s1 - s2 * std::cos(w), im = s2 * std::sin(w);
     return std::sqrt(re * re + im * im) / (double)n * 4.0;
+}
+
+// Alias-to-harmonic energy ratio (dB) of a steady periodic tone with
+// fundamental f0: 32768-point FFT (4-term Blackman-Harris) from `from`;
+// bins within 6 bins of a harmonic below Nyquist count as signal, the rest as
+// alias / noise. maxHz limits the alias band (e.g. 10 kHz for the audible
+// part); returns the ratio for everything below maxHz.
+inline double aliasDb(const std::vector<float>& x, size_t from, double f0, double sr = 48000.0, double maxHz = 1e9) {
+    const size_t N = 32768;
+    std::vector<std::complex<double>> a(N);
+    for (size_t i = 0; i < N; ++i) {
+        const double t = 2.0 * 3.14159265358979323846 * (double)i / (double)(N - 1);
+        const double w = 0.35875 - 0.48829 * std::cos(t) + 0.14128 * std::cos(2 * t) - 0.01168 * std::cos(3 * t);
+        a[i] = from + i < x.size() ? x[from + i] * w : 0.0;
+    }
+    for (size_t i = 1, j = 0; i < N; ++i) {
+        size_t bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    for (size_t len = 2; len <= N; len <<= 1) {
+        const double ang = -2.0 * 3.14159265358979323846 / (double)len;
+        const std::complex<double> wl(std::cos(ang), std::sin(ang));
+        for (size_t i = 0; i < N; i += len) {
+            std::complex<double> w(1.0);
+            for (size_t j = 0; j < len / 2; ++j) {
+                const auto u = a[i + j], v = a[i + j + len / 2] * w;
+                a[i + j] = u + v;
+                a[i + j + len / 2] = u - v;
+                w *= wl;
+            }
+        }
+    }
+    const double bin = sr / (double)N;
+    double harm = 0, alias = 0;
+    for (size_t k = (size_t)(20.0 / bin); k < N / 2; ++k) {
+        const double f = (double)k * bin, p = std::norm(a[k]);
+        const double h = std::round(f / f0);
+        if (h >= 1 && std::fabs(f - h * f0) <= 6 * bin && h * f0 < sr / 2) harm += p;
+        else if (f < maxHz) alias += p;
+    }
+    return 10.0 * std::log10(alias / harm + 1e-30);
 }
 
 }  // namespace hsynth_test

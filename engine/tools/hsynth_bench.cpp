@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "hsynth/engine.h"
+#include "hsynth/sample_set.h"
 
 using namespace hsynth;
 
@@ -30,6 +31,68 @@ static double bench(const char* name, int voices, double seconds, const std::fun
     return sec;
 }
 
+// Multi-timbral: `parts` parts with `perPart` voices each, one MIDI channel per
+// part, every part with its own copy of the VA saw x2 / LP24 patch.
+static double benchMulti(const char* name, int parts, int perPart, double seconds, bool inserts = false) {
+    Engine e;
+    e.prepare(48000);
+    e.setMaxVoices(64);
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    e.setMultiTimbral(true);
+    for (int k = 0; k < parts; ++k) {
+        e.setPartParam(k, P::AmpSustain, 1.0f);
+        e.setPartParam(k, P::FilterCutoff, 800.0f + 200.0f * (float)k);
+        e.setPartMix(k, Mix::Pan, -1.0f + 2.0f * (float)k / (float)std::max(1, parts - 1));
+        e.setPartMix(k, Mix::FxSend, k % 2 ? 1.0f : 0.5f);
+        if (inserts) {  // two inserts per part: comp + (chorus | phaser | drive | peq)
+            const int second[4] = {fx::Chorus, fx::Phaser, fx::Drive, fx::Peq};
+            e.setPartParam(k, P::insSlot(0), (float)(fx::insertIndex(fx::Comp) + 1));
+            e.setPartParam(k, P::insSlot(1), (float)(fx::insertIndex(second[k % 4]) + 1));
+        }
+        for (int i = 0; i < perPart; ++i) {
+            Event ev = Event::noteOn((uint32_t)(k * 16 + i + 1), 40 + 3 * i + k, 0.7f);
+            ev.channel = (uint8_t)k;
+            e.sendEvent(ev);
+        }
+    }
+    std::vector<float> L(128), R(128);
+    e.process(L.data(), R.data(), 128);
+    const int blocks = (int)(48000 * seconds / 128);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int b = 0; b < blocks; ++b) e.process(L.data(), R.data(), 128);
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const int voices = parts * perPart;
+    std::printf("%-28s load %6.1f%%  %7.1f ns/voice-sample  (active %d)\n", name, sec / seconds * 100.0,
+                sec * 1e9 / ((double)blocks * 128 * voices), e.stats().activeVoices);
+    return sec;
+}
+
+// One looping 2 s stereo sample (bright saw), recorded pitch = root.
+static void pcmLayer(Engine& e, int root) {
+    auto set = std::make_unique<SampleSet>();
+    auto smp = std::make_unique<Sample>();
+    smp->channels = 2;
+    smp->sampleRate = 48000;
+    smp->frames = 96000;
+    for (int c = 0; c < 2; ++c) {
+        smp->data[c].assign(96000 + Sample::kPadFrames, 0.0f);
+        for (int i = 0; i < 96000; ++i) smp->data[c][(size_t)i] = 0.5f * (float)((i * (c ? 7 : 5)) % 400) / 400.0f - 0.25f;
+    }
+    smp->loopStart = 1000;
+    smp->loopEnd = 95000;
+    Region r;
+    r.sample = smp.get();
+    r.keycenter = root;
+    r.loopMode = LoopMode::Continuous;
+    r.loopStart = smp->loopStart;
+    r.loopEnd = smp->loopEnd;
+    set->regions.push_back(r);
+    set->samples.push_back(std::move(smp));
+    set->prepareMips();
+    e.setSampleSet(0, std::move(set));
+    e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
+}
+
 int main(int argc, char** argv) {
     const int voices = argc > 1 ? std::atoi(argv[1]) : 32;
     const double seconds = argc > 2 ? std::atof(argv[2]) : 3.0;
@@ -38,9 +101,22 @@ int main(int argc, char** argv) {
     bench("VA saw x2, filter off", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, 0); });
     bench("VA saw x2, LP24", voices, seconds, [](Engine&) {});
     bench("VA saw x2, LP24 + drive", voices, seconds, [](Engine& e) { e.setParam(P::FilterDrive, 0.5f); });
+    bench("VA saw x2, ladder + drive", voices, seconds, [](Engine& e) {
+        e.setParam(P::FilterType, (float)FilterType::Ladder);
+        e.setParam(P::FilterDrive, 0.5f);
+    });
+    bench("VA saw x2, comb+", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, (float)FilterType::CombPlus); });
+    bench("VA saw x2, formant", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, (float)FilterType::Formant); });
+    bench("VA saw x2, LP24 + vfx ring", voices, seconds, [](Engine& e) { e.setParam(P::VfxType, (float)VfxType::Ring); });
+    bench("VA saw x2, LP24 + vfx crush", voices, seconds, [](Engine& e) { e.setParam(P::VfxType, (float)VfxType::Crush); });
     bench("FM 4-op, filter off", voices, seconds, [](Engine& e) {
         e.setParam(P::FilterType, 0);
         e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
+    });
+    bench("FM 6-op (DX 1), filter off", voices, seconds, [](Engine& e) {
+        e.setParam(P::FilterType, 0);
+        e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
+        e.setParam(P::layer(0, P::FmAlgo), 8.0f);
     });
     bench("VA+FM+VA, LP24", voices, seconds, [](Engine& e) {
         e.setParam(P::layer(1, P::LType), (float)LayerType::FM);
@@ -52,6 +128,9 @@ int main(int argc, char** argv) {
         e.setParam(P::layer(0, P::WtUnison), 7.0f);
         e.setParam(P::layer(0, P::WtWarpMode), 2.0f);
     });
+    bench("PCM at/below root (cubic)", voices, seconds, [](Engine& e) { pcmLayer(e, 100); });
+    bench("PCM up 0-31 st (sinc + mips)", voices, seconds, [](Engine& e) { pcmLayer(e, 36); });
+    bench("PCM up, Quality Low (cubic)", voices, seconds, [](Engine& e) { pcmLayer(e, 36); e.setQuality(Quality::Low); });
     bench("VA + all FX", voices, seconds, [](Engine& e) {
         e.setParam(P::fxp(fx::Chorus, 0), 1.0f); e.setParam(P::fxp(fx::Chorus, fx::chorus::Mix), 0.5f);
         e.setParam(P::fxp(fx::Delay, 0), 1.0f); e.setParam(P::fxp(fx::Delay, fx::delay::Mix), 0.3f);
@@ -70,5 +149,9 @@ int main(int argc, char** argv) {
             }
         });
     }
+    // multi-timbral: 16 parts x 4 voices vs. the same 64 voices in single-part mode
+    bench("single part, 64 voices", 64, seconds, [](Engine&) {});
+    benchMulti("multi 16 parts x 4 voices", 16, 4, seconds);
+    benchMulti("multi 16x4 + 2 inserts/part", 16, 4, seconds, true);
     return 0;
 }

@@ -9,6 +9,7 @@
 
 #include "hsynth/fileio.h"
 #include "hsynth/fx/convolver.h"
+#include "hsynth/flac.h"
 #include "hsynth/wav.h"
 
 namespace hsynth {
@@ -26,7 +27,7 @@ std::unique_ptr<Wavetable> Wavetable::fromFrames(const std::vector<float>& raw, 
     wt->frames = frames;
     for (int k = 0; k < kLevels; ++k) {
         const int harm = std::max(1, 1024 >> k);
-        wt->size[k] = std::min(4096, std::max(64, 4 * harm));
+        wt->size[k] = std::min(4096, std::max(64, 8 * harm));
         wt->data[k].assign((size_t)frames * (size_t)(wt->size[k] + 1), 0.0f);
     }
     fx::Fft fwd;
@@ -106,30 +107,48 @@ float genBasic(float x, float t) {
     return a + (b - a) * f;
 }
 float genPwm(float x, float t) { return sq(x, 0.5f - 0.48f * t); }
-float genHarmonics(float x, float t) {
-    const int count = 1 + (int)(t * 63.0f);
-    float v = 0.0f;
-    for (int k = 1; k <= count; ++k) v += std::sin(kTwoPi * (float)k * x) / (float)k;
-    return v;
+// Additive generators fill a whole frame: amplitudes depend only on the frame,
+// sin(2 pi k i / N) comes from an exact table (k * i mod N).
+const std::vector<float>& sinTableN() {
+    static const std::vector<float> t = [] {
+        std::vector<float> v((size_t)N);
+        for (int i = 0; i < N; ++i) v[(size_t)i] = (float)std::sin(2.0 * 3.14159265358979323846 * i / N);
+        return v;
+    }();
+    return t;
 }
-float genFormant(float x, float t) {
+void additive(const float* amp, int count, float* out) {
+    const auto& st = sinTableN();
+    for (int i = 0; i < N; ++i) {
+        float v = 0.0f;
+        for (int k = 1; k <= count; ++k)
+            if (amp[k] != 0.0f) v += amp[k] * st[(size_t)(((int64_t)k * i) & (N - 1))];
+        out[i] = v;
+    }
+}
+void fillHarmonics(float t, float* out) {
+    const int count = 1 + (int)(t * 63.0f);
+    float amp[65] = {};
+    for (int k = 1; k <= count; ++k) amp[k] = 1.0f / (float)k;
+    additive(amp, count, out);
+}
+void fillFormant(float t, float* out) {
     // vowels a e i o u as formant envelopes over harmonics of a 110 Hz voice
     static const float F[5][3] = {{800, 1150, 2900}, {400, 1600, 2700}, {350, 2300, 3000}, {450, 800, 2830}, {325, 700, 2530}};
     const float seg = t * 4.0f;
     const int i = std::min(3, (int)seg);
     const float fr = seg - (float)i;
-    float v = 0.0f;
+    float amp[61] = {};
     for (int k = 1; k <= 60; ++k) {
         const float hz = 110.0f * (float)k;
-        float amp = 0.0f;
         for (int j = 0; j < 3; ++j) {
             const float c = F[i][j] + (F[i + 1][j] - F[i][j]) * fr;
             const float bw = 80.0f + 40.0f * (float)j;
-            amp += std::exp(-0.5f * (hz - c) * (hz - c) / (bw * bw)) / (float)(j + 1);
+            const float z = 0.5f * (hz - c) * (hz - c) / (bw * bw);
+            if (z < 80.0f) amp[k] += std::exp(-z) / (float)(j + 1);  // skip underflowing terms (slow path in libm)
         }
-        v += amp * std::sin(kTwoPi * (float)k * x);
     }
-    return v;
+    additive(amp, 60, out);
 }
 float genSync(float x, float t) {
     const float r = 1.0f + 7.0f * t;
@@ -158,12 +177,15 @@ float genOrgan(float x, float t) {
     return v;
 }
 
+using Fill = void (*)(float t, float* out);  // whole frame at once (additive generators)
 struct Builtin {
     const char* name;
     Gen gen;
+    Fill fill;
 };
-const Builtin kBuiltins[] = {{"basic", genBasic}, {"pwm", genPwm},   {"harmonics", genHarmonics}, {"formant", genFormant},
-                             {"sync", genSync},   {"fold", genFold}, {"digital", genDigital},     {"organ", genOrgan}};
+const Builtin kBuiltins[] = {{"basic", genBasic, nullptr}, {"pwm", genPwm, nullptr},     {"harmonics", nullptr, fillHarmonics},
+                             {"formant", nullptr, fillFormant}, {"sync", genSync, nullptr}, {"fold", genFold, nullptr},
+                             {"digital", genDigital, nullptr}, {"organ", genOrgan, nullptr}};
 constexpr int kBuiltinCount = (int)(sizeof kBuiltins / sizeof kBuiltins[0]);
 
 std::vector<std::unique_ptr<Wavetable>> buildAll() {
@@ -172,7 +194,9 @@ std::vector<std::unique_ptr<Wavetable>> buildAll() {
         std::vector<float> raw((size_t)kBuiltinFrames * N);
         for (int f = 0; f < kBuiltinFrames; ++f) {
             const float t = (float)f / (float)(kBuiltinFrames - 1);
-            for (int i = 0; i < N; ++i) raw[(size_t)f * N + (size_t)i] = b.gen((float)i / (float)N, t);
+            if (b.fill) b.fill(t, raw.data() + (size_t)f * N);
+            else
+                for (int i = 0; i < N; ++i) raw[(size_t)f * N + (size_t)i] = b.gen((float)i / (float)N, t);
         }
         auto wt = Wavetable::fromFrames(raw, N, kBuiltinFrames, b.name, true);
         v.push_back(std::move(wt));
@@ -222,7 +246,8 @@ const Wavetable& builtinWavetable(int index) {
 
 std::unique_ptr<Wavetable> loadWavetableFile(const std::string& path, std::string& error) {
     WavData w;
-    if (!readWav(path, w, error)) return nullptr;
+    const bool flac = path.size() > 5 && (path.compare(path.size() - 5, 5, ".flac") == 0 || path.compare(path.size() - 5, 5, ".FLAC") == 0);
+    if (!(flac ? readFlac(path, w, error) : readWav(path, w, error))) return nullptr;
     std::vector<float> mono(w.left);
     if (!w.right.empty())
         for (size_t i = 0; i < mono.size(); ++i) mono[i] = 0.5f * (mono[i] + w.right[i]);
@@ -295,12 +320,20 @@ inline float warpPhase(float p, WtWarp w, float amt) {
         default: return p;
     }
 }
+// 4-point Hermite interpolation (size is a power of two; indices wrap). Linear
+// interpolation left the first images of the top harmonics only ~21 dB down,
+// which folded back as inharmonic spurs (about -45 dB on bright frames).
 inline float readTable(const float* t, int size, float phase) {
     const float idx = phase * (float)size;
     int i = (int)idx;
     const float f = idx - (float)i;
-    if (i >= size) i = size - 1;
-    return t[i] + f * (t[i + 1] - t[i]);
+    const int m = size - 1;
+    i &= m;
+    const float xm1 = t[(i - 1) & m], x0 = t[i], x1 = t[(i + 1) & m], x2 = t[(i + 2) & m];
+    const float c1 = 0.5f * (x1 - xm1);
+    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+    return ((c3 * f + c2) * f + c1) * f + x0;
 }
 }  // namespace
 
@@ -314,8 +347,11 @@ bool WtOsc::render(const Wavetable& wt, float pos, float dt, WtWarp warp, float 
     float w0;
     if (x <= 0.0f) { k0 = 0; w0 = 1.0f; }
     else {
+        // level k0 is alias-free for x <= k0; over the last half octave before
+        // the switch it crossfades into the duller k0 + 1 so that sweeping the
+        // pitch never steps (the rest of the time only one level is read)
         k0 = (int)std::ceil(x);
-        w0 = (float)k0 - x;  // weight of level k0, rest goes to the duller k0 + 1
+        w0 = clampf(2.0f * ((float)k0 - x), 0.0f, 1.0f);
     }
     if (k0 >= Wavetable::kLevels - 1) { k0 = Wavetable::kLevels - 1; w0 = 1.0f; }
     const int k1 = std::min(k0 + 1, Wavetable::kLevels - 1);
@@ -342,11 +378,14 @@ bool WtOsc::render(const Wavetable& wt, float pos, float dt, WtWarp warp, float 
             ph += vdt;
             if (ph >= 1.0f) ph -= 1.0f;
             const float p = warp == WtWarp::None ? ph : warpPhase(ph, warp, warpAmt);
-            const float ra = readTable(a0, sa, p);
-            float s = w0 * (ra + ff * (readTable(a1, sa, p) - ra));
+            float s = 0.0f;
+            if (w0 > 0.0f) {
+                const float ra = readTable(a0, sa, p);
+                s = w0 * (ff > 0.0f ? ra + ff * (readTable(a1, sa, p) - ra) : ra);
+            }
             if (w1 > 0.0f) {
                 const float rb = readTable(b0, sb, p);
-                s += w1 * (rb + ff * (readTable(b1, sb, p) - rb));
+                s += w1 * (ff > 0.0f ? rb + ff * (readTable(b1, sb, p) - rb) : rb);
             }
             L[i] += s * gl;
             R[i] += s * gr;

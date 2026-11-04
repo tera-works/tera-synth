@@ -27,7 +27,15 @@ enum class EventType : uint8_t {
     AllNotesOff,
     AllSoundOff,
     Looper,          // controller = fx::LooperCmd
+    Clock,           // MIDI clock: controller = ClockMsg (tick 24 ppqn / start / continue / stop)
 };
+
+enum class ClockMsg : uint16_t { Tick = 0, Start, Continue, Stop };
+
+// Event::channel value for events that are not tied to a MIDI channel (touch
+// keyboard, host UI, offline renders). In multi-timbral mode they go to the
+// engine's selected part; in single-part mode the channel is ignored.
+constexpr uint8_t kOmniChannel = 0xFF;
 
 struct Event {
     EventType type = EventType::NoteOn;
@@ -36,6 +44,7 @@ struct Event {
     uint32_t noteId = 0;      // unique id of a sounding note (0 = match by key)
     float value = 0.0f;
     uint32_t frame = 0;       // reserved for sample-accurate scheduling
+    uint8_t channel = kOmniChannel;  // MIDI channel 0..15 (set by MidiTranslator) or kOmniChannel
 
     static Event noteOn(uint32_t id, int key, float vel) {
         Event e; e.type = EventType::NoteOn; e.noteId = id; e.key = (uint8_t)key; e.value = vel; return e;

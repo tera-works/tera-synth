@@ -7,7 +7,7 @@ namespace hsynth {
 
 class Adsr {
 public:
-    enum class Stage { Idle, Attack, Decay, Sustain, Release };
+    enum class Stage { Idle, Attack, Hold, Decay, Sustain, Release };
 
     void setSampleRate(float sr) { sampleRate_ = sr; }
 
@@ -24,6 +24,9 @@ public:
         decayBase_ = (sustain_ - kDecayRatio) * (1.0f - decayCoef_);
         releaseBase_ = -kDecayRatio * (1.0f - releaseCoef_);
     }
+
+    // Optional hold time at full level between attack and decay (SFZ ampeg_hold).
+    void setHold(float seconds) { holdSamples_ = (int)(seconds * sampleRate_); }
 
     void gate(bool on) {
         if (on) {
@@ -48,7 +51,14 @@ public:
             case Stage::Idle: break;
             case Stage::Attack:
                 level_ = attackBase_ + level_ * attackCoef_;
-                if (level_ >= 1.0f) { level_ = 1.0f; stage_ = Stage::Decay; }
+                if (level_ >= 1.0f) {
+                    level_ = 1.0f;
+                    stage_ = holdSamples_ > 0 ? Stage::Hold : Stage::Decay;
+                    holdLeft_ = holdSamples_;
+                }
+                break;
+            case Stage::Hold:
+                if (--holdLeft_ <= 0) stage_ = Stage::Decay;
                 break;
             case Stage::Decay:
                 level_ = decayBase_ + level_ * decayCoef_;
@@ -92,6 +102,7 @@ private:
     float decayCoef_ = 0, decayBase_ = 0;
     float releaseCoef_ = 0, releaseBase_ = 0;
     float level_ = 0.0f;
+    int holdSamples_ = 0, holdLeft_ = 0;
     Stage stage_ = Stage::Idle;
 };
 

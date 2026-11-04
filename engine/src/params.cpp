@@ -1,5 +1,6 @@
 #include "hsynth/params.h"
 
+#include <algorithm>
 #include <cmath>
 #include <unordered_map>
 
@@ -11,18 +12,23 @@ namespace {
 
 const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt"};
 const std::vector<std::string> kVaWaveNames = {"saw", "square", "pulse", "triangle", "sine"};
-const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch"};
+const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch", "ladder", "comb+", "comb-", "formant"};
+const std::vector<std::string> kVfxNames = {"off", "saturate", "fold", "crush", "ring"};
 const std::vector<std::string> kLfoWaveNames = {"sine", "triangle", "saw", "square", "s&h"};
 const std::vector<std::string> kModSourceNames = {
     "none", "velocity", "key", "ampenv", "env2", "lfo1", "lfo2", "modwheel", "pitchbend",
-    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression"};
+    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4", "lfo3", "env3", "constant"};
 const std::vector<std::string> kModDestNames = {
     "none", "pitch", "a.level", "b.level", "c.level", "morph", "a.pitch", "b.pitch", "c.pitch",
     "va.pw", "va.mix", "va.noise", "fm.index", "fm.feedback", "cutoff", "resonance", "drive",
-    "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp"};
+    "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp", "filter.morph", "vfx.amount",
+    "a.pan", "b.pan", "c.pan", "fm.op1.level", "fm.op2.level", "fm.op3.level", "fm.op4.level",
+    "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate", "fm.op5.level", "fm.op6.level"};
 const std::vector<std::string> kFmAlgoNames = {
     "1: 4>3>2>1", "2: (4+3)>2>1", "3: 4>3>1 + 2>1", "4: 4>3 + 2>1", "5: 4>(3,2,1)",
-    "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4"};
+    "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4",
+    "9: 6op 6>5>4>3 + 2>1", "10: 6op 6>5>4>3 + 2>1 (fb 2)", "11: 6op 6>5 + 4>3 + 2>1", "12: 6op 6>5>3, 4>3, 2>1",
+    "13: 6op (2 + 4>3 + 6>5)>1", "14: 6op 6>(5,4,3) + 2>1", "15: 6op 6>5 + 1..4", "16: 6op 1+2+3+4+5+6"};
 
 struct Builder {
     std::vector<ParamInfo> t;
@@ -95,6 +101,47 @@ std::vector<ParamInfo> build() {
     b.ex(Lfo2Rate, "lfo2.rate", "LFO", "LFO2 Rate", 0.01f, 40, 0.3f, "Hz");
 
     b.bo(Limiter, "master.limiter", "Master", "Limiter", true);
+    b.fl(P::FilterMorph, "filter.morph", "Filter", "Vowel", 0, 1, 0);
+    b.en(P::VfxType, "vfx.type", "Voice FX", "Type", kVfxNames, 0);
+    b.fl(P::VfxAmount, "vfx.amount", "Voice FX", "Amount", 0, 1, 0.5f);
+    b.ex(P::VfxRatio, "vfx.ratio", "Voice FX", "Ring Ratio", 0.25f, 16, 2, "x");
+    b.fl(P::VfxMix, "vfx.mix", "Voice FX", "Mix", 0, 1, 1);
+    b.en(P::VoiceMode, "voice.mode", "Voice", "Mode", {"poly", "mono", "legato"}, 0);
+    b.fl(P::Glide, "voice.glide", "Voice", "Glide", 0, 2, 0, "s");
+    b.en(P::GlideMode, "voice.glidemode", "Voice", "Glide Mode", {"always", "legato"}, 0);
+    b.in(P::Unison, "voice.unison", "Voice", "Unison", 1, 8, 1);
+    b.fl(P::UnisonDetune, "voice.unidetune", "Voice", "Unison Detune", 0, 100, 15, "ct");
+    b.fl(P::UnisonSpread, "voice.unispread", "Voice", "Unison Spread", 0, 1, 0.5f);
+    const std::vector<std::string>& syncNames = kSyncNames;
+    b.en(P::Lfo1Sync, "lfo1.sync", "LFO", "LFO1 Sync", syncNames, 0);
+    b.en(P::Lfo2Sync, "lfo2.sync", "LFO", "LFO2 Sync", syncNames, 0);
+    b.en(P::Lfo3Wave, "lfo3.wave", "LFO", "LFO3 Wave", kLfoWaveNames, 0);
+    b.ex(P::Lfo3Rate, "lfo3.rate", "LFO", "LFO3 Rate", 0.01f, 40, 2.0f, "Hz");
+    b.en(P::Lfo3Sync, "lfo3.sync", "LFO", "LFO3 Sync", syncNames, 0);
+    b.bo(P::Lfo3KeySync, "lfo3.keysync", "LFO", "LFO3 Key Sync", true);
+    b.ex(P::Env3Attack, "env3.attack", "Env 3", "Attack", 0.0005f, 10, 0.003f, "s");
+    b.ex(P::Env3Decay, "env3.decay", "Env 3", "Decay", 0.001f, 20, 0.5f, "s");
+    b.fl(P::Env3Sustain, "env3.sustain", "Env 3", "Sustain", 0, 1, 0.0f);
+    b.ex(P::Env3Release, "env3.release", "Env 3", "Release", 0.001f, 20, 0.3f, "s");
+    b.bo(P::ArpOn, "arp.on", "Arpeggiator", "Arp On", false);
+    b.en(P::ArpMode, "arp.mode", "Arpeggiator", "Mode", {"up", "down", "updown", "random", "order", "chord"}, 0);
+    b.en(P::ArpRate, "arp.rate", "Arpeggiator", "Rate", std::vector<std::string>(kSyncNames.begin() + 1, kSyncNames.end()),
+         10);  // 1/16 (option k = fx::SyncDiv k + 1)
+    b.in(P::ArpOctaves, "arp.octaves", "Arpeggiator", "Octaves", 1, 4, 1);
+    b.fl(P::ArpGate, "arp.gate", "Arpeggiator", "Gate", 0.05f, 1.0f, 0.5f);
+    b.fl(P::ArpSwing, "arp.swing", "Arpeggiator", "Swing", 0, 0.5f, 0);
+    b.bo(P::ArpLatch, "arp.latch", "Arpeggiator", "Latch", false);
+    b.fl(P::MasterTune, "master.tune", "Master", "Master Tune", -100, 100, 0, "ct");
+    b.fl(P::VelCurve, "voice.velcurve", "Voice", "Velocity Curve", -1, 1, 0);
+    {
+        static const char* kPc[12] = {"c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"};
+        static const char* kPcLabel[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+        for (int i = 0; i < 12; ++i)
+            b.fl(P::TuneC + i, std::string("tune.") + kPc[i], "Tuning", kPcLabel[i], -100, 100, 0, "ct");
+    }
+    for (int i = 0; i < 4; ++i)
+        b.in(P::CtlCc1 + i, "ctl.cc" + std::to_string(i + 1), "Controllers", "CC" + std::to_string(i + 1) + " #", 0, 127,
+             (float)(16 + i));
 
     buildFx(b);
 
@@ -162,6 +209,26 @@ std::vector<ParamInfo> build() {
         b.in(layer(l, WtUnison), n + ".wt.unison", gw, "Unison", 1, 7, 1);
         b.fl(layer(l, WtDetune), n + ".wt.detune", gw, "Unison Detune", 0, 100, 12, "ct");
         b.fl(layer(l, WtSpread), n + ".wt.spread", gw, "Unison Spread", 0, 1, 0.7f);
+    }
+
+    // Part insert effects: copies of the rack metadata of the insert blocks,
+    // renamed "ins.<key>.<param>", group "Part FX / <title>". On defaults to
+    // true: choosing a block for a slot is what switches it in.
+    {
+        std::vector<std::string> opts = {"none"};
+        for (int k = 0; k < fx::kNumInsertBlocks; ++k) opts.push_back(kBlockKeys[fx::kInsertBlockList[k]]);
+        for (int s = 0; s < fx::kInsertSlots; ++s)
+            b.en(insSlot(s), "ins.slot" + std::to_string(s + 1), "Part FX", "Insert " + std::to_string(s + 1), opts, 0);
+        for (int k = 0; k < fx::kNumInsertBlocks; ++k) {
+            const int blk = fx::kInsertBlockList[k];
+            for (int l = 0; l < fx::kBlockParams[blk]; ++l) {
+                ParamInfo info = b.t[(size_t)fxp(blk, l)];
+                info.name = "ins." + info.name.substr(3);  // "fx.chorus.mix" -> "ins.chorus.mix"
+                info.group = std::string("Part FX / ") + kBlockTitles[blk];
+                if (l == 0) info.def = 1.0f;
+                b.t[(size_t)insp(blk, l)] = info;
+            }
+        }
     }
 
     // FX modulation destinations: every continuous or switch parameter of the
@@ -239,6 +306,44 @@ float sanitizeParam(int id, float value) {
     if (value < p.min) value = p.min;
     if (value > p.max) value = p.max;
     if (p.kind != ParamKind::Float) value = std::round(value);
+    return value;
+}
+
+const std::vector<ParamInfo>& partMixTable() {
+    static const std::vector<ParamInfo> table = [] {
+        std::vector<ParamInfo> t((size_t)Mix::Count);
+        auto set = [&](int id, const char* name, const char* label, ParamKind kind, float mn, float mx, float def,
+                       const char* unit = "") {
+            ParamInfo& p = t[(size_t)id];
+            p.name = name; p.group = "Part"; p.label = label; p.kind = kind;
+            p.min = mn; p.max = mx; p.def = def; p.unit = unit;
+        };
+        set(Mix::Volume, "volume", "Volume", ParamKind::Float, 0, 1, 1);
+        set(Mix::Pan, "pan", "Pan", ParamKind::Float, -1, 1, 0);
+        set(Mix::Mute, "mute", "Mute", ParamKind::Bool, 0, 1, 0);
+        set(Mix::Channel, "channel", "MIDI Ch", ParamKind::Int, 1, 16, 1);
+        set(Mix::KeyLow, "key.low", "Key Lo", ParamKind::Int, 0, 127, 0);
+        set(Mix::KeyHigh, "key.high", "Key Hi", ParamKind::Int, 0, 127, 127);
+        set(Mix::Transpose, "transpose", "Transpose", ParamKind::Int, -48, 48, 0, "st");
+        set(Mix::FxSend, "fx.send", "FX Send", ParamKind::Float, 0, 1, 1);
+        return t;
+    }();
+    return table;
+}
+
+void defaultPartMix(int part, float* values) {
+    const auto& t = partMixTable();
+    for (int i = 0; i < Mix::Count; ++i) values[i] = t[(size_t)i].def;
+    values[Mix::Channel] = (float)(1 + std::max(0, std::min(kNumParts - 1, part)) % 16);
+}
+
+float sanitizePartMix(int id, float value) {
+    if (id < 0 || id >= Mix::Count) return 0.0f;
+    const ParamInfo& p = partMixTable()[(size_t)id];
+    if (!std::isfinite(value)) value = p.def;
+    value = std::min(p.max, std::max(p.min, value));
+    if (p.kind == ParamKind::Bool) return value > 0.5f ? 1.0f : 0.0f;
+    if (p.kind == ParamKind::Int) return std::round(value);
     return value;
 }
 

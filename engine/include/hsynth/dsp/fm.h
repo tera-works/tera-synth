@@ -2,7 +2,8 @@
 // Algorithms are data: each operator lists a bitmask of the operators that
 // modulate it, plus a carrier mask. Modulators always have a higher index than
 // the operator they modulate, so evaluation runs from the last operator down.
-// To support 6 or 8 operators, raise P::kFmOps and add tables.
+// P::kFmOps = 6; each algorithm states how many operators it uses (4-operator
+// algorithms do not compute ops 5-6). 8 operators: raise kFmOps, add tables.
 #pragma once
 
 #include <cstdint>
@@ -18,20 +19,31 @@ struct FmAlgorithm {
     uint8_t modulators[P::kFmOps];  // bit i set => op i modulates this op
     uint8_t carriers;               // bit i set => op i is audible
     int8_t feedbackOp;              // operator with self-feedback
+    int8_t numOps;                  // operators used (4 or 6); the others are not computed
 };
 
-constexpr int kNumFmAlgorithms = 8;
+constexpr int kNumFmAlgorithms = 16;
 
 inline const FmAlgorithm& fmAlgorithm(int index) {
     static const FmAlgorithm table[kNumFmAlgorithms] = {
-        {{0b0010, 0b0100, 0b1000, 0}, 0b0001, 3},  // 4>3>2>1
-        {{0b0010, 0b1100, 0, 0}, 0b0001, 3},       // (4+3)>2>1
-        {{0b0110, 0, 0b1000, 0}, 0b0001, 3},       // 4>3>1 + 2>1
-        {{0b0010, 0, 0b1000, 0}, 0b0101, 3},       // 4>3 + 2>1
-        {{0b1000, 0b1000, 0b1000, 0}, 0b0111, 3},  // 4>(3,2,1)
-        {{0, 0b0100, 0b1000, 0}, 0b0011, 3},       // 4>3>2 + 1
-        {{0b1000, 0, 0, 0}, 0b0111, 3},            // 4>1 + 2 + 3
-        {{0, 0, 0, 0}, 0b1111, 3},                 // additive
+        // 4 operators
+        {{0b0010, 0b0100, 0b1000, 0, 0, 0}, 0b0001, 3, 4},  // 4>3>2>1
+        {{0b0010, 0b1100, 0, 0, 0, 0}, 0b0001, 3, 4},       // (4+3)>2>1
+        {{0b0110, 0, 0b1000, 0, 0, 0}, 0b0001, 3, 4},       // 4>3>1 + 2>1
+        {{0b0010, 0, 0b1000, 0, 0, 0}, 0b0101, 3, 4},       // 4>3 + 2>1
+        {{0b1000, 0b1000, 0b1000, 0, 0, 0}, 0b0111, 3, 4},  // 4>(3,2,1)
+        {{0, 0b0100, 0b1000, 0, 0, 0}, 0b0011, 3, 4},       // 4>3>2 + 1
+        {{0b1000, 0, 0, 0, 0, 0}, 0b0111, 3, 4},            // 4>1 + 2 + 3
+        {{0, 0, 0, 0, 0, 0}, 0b1111, 3, 4},                 // additive
+        // 6 operators (DX7 numbering: op1 = carrier side, op6 = top of the stack)
+        {{0b000010, 0, 0b001000, 0b010000, 0b100000, 0}, 0b000101, 5, 6},        // DX 1: 6>5>4>3 + 2>1
+        {{0b000010, 0, 0b001000, 0b010000, 0b100000, 0}, 0b000101, 1, 6},        // DX 2: same, feedback on 2
+        {{0b000010, 0, 0b001000, 0, 0b100000, 0}, 0b010101, 5, 6},               // DX 5: 6>5 + 4>3 + 2>1
+        {{0b000010, 0, 0b011000, 0, 0b100000, 0}, 0b000101, 5, 6},               // DX 7: 6>5>3, 4>3, 2>1
+        {{0b010110, 0, 0b001000, 0, 0b100000, 0}, 0b000001, 5, 6},               // DX 16: (2 + 4>3 + 6>5)>1
+        {{0b000010, 0, 0b100000, 0b100000, 0b100000, 0}, 0b011101, 5, 6},        // DX 22: 6>(5,4,3) + 2>1
+        {{0, 0, 0, 0, 0b100000, 0}, 0b011111, 5, 6},                             // DX 31: 6>5 + 1..4
+        {{0, 0, 0, 0, 0, 0}, 0b111111, 5, 6},                                    // DX 32: additive x6
     };
     if (index < 0) index = 0;
     if (index >= kNumFmAlgorithms) index = kNumFmAlgorithms - 1;
@@ -64,7 +76,8 @@ public:
     }
 
     // Update per-control-block settings from the parameter array.
-    void control(const float* p, int layerIdx) {
+    // levelMod: optional per-operator level modulation (x(1 + m), clamped 0..2).
+    void control(const float* p, int layerIdx, const float* levelMod = nullptr) {
         algo_ = &fmAlgorithm((int)p[P::layer(layerIdx, P::FmAlgo)]);
         for (int i = 0; i < P::kFmOps; ++i) {
             const float coarse = p[P::fmOp(layerIdx, i, P::OpRatio)];
@@ -76,11 +89,12 @@ public:
             }
             const float vs = p[P::fmOp(layerIdx, i, P::OpVelSens)];
             level_[i] = p[P::fmOp(layerIdx, i, P::OpLevel)] * (1.0f - vs + vs * velocity_);
+            if (levelMod && levelMod[i] != 0.0f) level_[i] *= clampf(1.0f + levelMod[i], 0.0f, 2.0f);
             env_[i].set(p[P::fmOp(layerIdx, i, P::OpAttack)], p[P::fmOp(layerIdx, i, P::OpDecay)],
                         p[P::fmOp(layerIdx, i, P::OpSustain)], p[P::fmOp(layerIdx, i, P::OpRelease)]);
         }
         int carriers = 0;
-        for (int i = 0; i < P::kFmOps; ++i)
+        for (int i = 0; i < algo_->numOps; ++i)
             if (algo_->carriers & (1 << i)) ++carriers;
         carrierGain_ = carriers > 0 ? 1.0f / (float)carriers : 0.0f;
     }
@@ -97,7 +111,8 @@ public:
         const float invN = 1.0f / (float)n;
         const float fbAmt = feedback * 0.35f;
         constexpr float kTwo32 = 4294967296.0f;
-        for (int i = P::kFmOps - 1; i >= 0; --i) {
+        const int numOps = algo_->numOps;
+        for (int i = numOps - 1; i >= 0; --i) {
             const float e0 = env_[i].level();
             const float e1 = env_[i].processBlock(n);
             const float lvl = level_[i];
@@ -111,7 +126,7 @@ public:
             }
             const uint8_t mask = algo_->modulators[i];
             for (int s = 0; s < n; ++s) mod[s] = 0.0f;
-            for (int m = i + 1; m < P::kFmOps; ++m)
+            for (int m = i + 1; m < numOps; ++m)
                 if (mask & (1 << m))
                     for (int s = 0; s < n; ++s) mod[s] += buf[m][s];
             const float eStep = (e1 - e0) * invN;
@@ -147,7 +162,7 @@ public:
 
     // True while any carrier envelope is still running.
     bool active() const {
-        for (int i = 0; i < P::kFmOps; ++i)
+        for (int i = 0; i < algo_->numOps; ++i)
             if ((algo_->carriers & (1 << i)) && env_[i].active()) return true;
         return false;
     }
@@ -156,7 +171,7 @@ private:
     const FmAlgorithm* algo_ = &fmAlgorithm(0);
     Adsr env_[P::kFmOps];
     uint32_t phase_[P::kFmOps] = {};
-    float ratio_[P::kFmOps] = {1, 1, 1, 1};
+    float ratio_[P::kFmOps] = {1, 1, 1, 1, 1, 1};
     float lastCoarse_[P::kFmOps] = {}, lastDetune_[P::kFmOps] = {};
     float level_[P::kFmOps] = {};
     float velocity_ = 1.0f;
