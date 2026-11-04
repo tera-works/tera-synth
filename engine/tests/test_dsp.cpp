@@ -1,3 +1,5 @@
+#include <filesystem>
+
 #include "analysis.h"
 #include "hsynth/dsp/envelope.h"
 #include "hsynth/dsp/fm.h"
@@ -178,7 +180,9 @@ TEST(wavetable_band_limited) {
 }
 
 TEST(wavetable_wav_import) {
-    const std::string dir = std::string(HSYNTH_TEST_DATA) + "/../../build-desktop";
+    const std::filesystem::path dirPath = std::filesystem::temp_directory_path() / "hsynth_tests" / "wavetable";
+    std::filesystem::create_directories(dirPath);
+    const std::string dir = dirPath.generic_string();
     // two 2048-sample frames (sine, square)
     std::vector<float> two(4096);
     for (int i = 0; i < 2048; ++i) {
