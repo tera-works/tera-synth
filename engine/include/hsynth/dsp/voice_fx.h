@@ -15,11 +15,15 @@ public:
         phase_ = 0.0f;
         hold_[0] = hold_[1] = 0.0f;
         holdCount_ = 0;
+        adaa_[0].reset();
+        adaa_[1].reset();
     }
 
     // Once per control block. ringDt: ring carrier phase increment (cycles / sample).
-    void set(VfxType type, float amount, float mix, float ringDt) {
+    // hq: anti-aliased saturator (Quality::High)
+    void set(VfxType type, float amount, float mix, float ringDt, bool hq = false) {
         type_ = type;
+        hq_ = hq;
         amount_ = clampf(amount, 0.0f, 1.0f);
         mix_ = clampf(mix, 0.0f, 1.0f);
         // shapers are fully neutral at amount 0 and fade in over the first 20 %
@@ -58,7 +62,7 @@ public:
     float process(float x, int ch) {
         float y = x;
         switch (type_) {
-            case VfxType::Saturate: y = fastTanh(x * gain_) * comp_; break;
+            case VfxType::Saturate: y = (hq_ ? adaa_[ch].process(x * gain_) : fastTanh(x * gain_)) * comp_; break;
             case VfxType::Fold: y = std::sin(x * gain_ * (kPi * 0.5f)) * 0.7f; break;
             case VfxType::Crush:
                 if (update_) hold_[ch] = std::round(x * levels_) / levels_;
@@ -77,6 +81,8 @@ private:
     float hold_[2] = {};
     int holdLen_ = 1, holdCount_ = 0;
     bool update_ = true;
+    bool hq_ = false;
+    AdaaTanh adaa_[2];
 };
 
 }  // namespace hsynth

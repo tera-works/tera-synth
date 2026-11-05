@@ -167,12 +167,14 @@ inline void formantSet(float morph, float out[3][2]) {
 // Voice filter: chooses mode, cascades two SVFs for 24 dB/oct low-pass.
 class VoiceFilter {
 public:
-    void reset() { s1_.reset(); s2_.reset(); s3_.reset(); ladder_.reset(); comb_.reset(); }
+    void reset() { s1_.reset(); s2_.reset(); s3_.reset(); ladder_.reset(); comb_.reset(); adaa_.reset(); }
     void setCombBuffer(float* buf) { comb_.setBuffer(buf); }
 
     // morph: formant vowel position (other types ignore it)
-    void set(FilterType type, float cutoff, float res, float drive, float sampleRate, float morph = 0.0f) {
+    // hq: anti-aliased drive stage (Quality::High)
+    void set(FilterType type, float cutoff, float res, float drive, float sampleRate, float morph = 0.0f, bool hq = false) {
         type_ = type;
+        hq_ = hq;
         if (type == FilterType::Off) return;
         drive_ = drive;
         driveGain_ = 1.0f + drive * 8.0f;
@@ -203,7 +205,7 @@ public:
 
     // Share coefficients with another filter (stereo pair) without touching state.
     void copyCoefsFrom(const VoiceFilter& o) {
-        type_ = o.type_; drive_ = o.drive_; driveGain_ = o.driveGain_; driveComp_ = o.driveComp_;
+        type_ = o.type_; drive_ = o.drive_; driveGain_ = o.driveGain_; driveComp_ = o.driveComp_; hq_ = o.hq_;
         s1_.copyCoefs(o.s1_);
         s2_.copyCoefs(o.s2_);
         s3_.copyCoefs(o.s3_);
@@ -223,7 +225,7 @@ public:
 
     float process(float x) {
         if (type_ == FilterType::Off) return x;
-        if (drive_ > 0.001f) x = fastTanh(x * driveGain_) * driveComp_ * 1.5f;
+        if (drive_ > 0.001f) x = (hq_ ? adaa_.process(x * driveGain_) : fastTanh(x * driveGain_)) * driveComp_ * 1.5f;
         const bool nl = drive_ > 0.001f;
         switch (type_) {
             case FilterType::LP12: return (nl ? s1_.tickNonlinear(x) : s1_.tick(x)).lp;
@@ -255,6 +257,8 @@ private:
     Ladder ladder_;
     Comb comb_;
     float fGain_[3] = {1, 1, 1};
+    AdaaTanh adaa_;
+    bool hq_ = false;
     FilterType type_ = FilterType::LP24;
     float drive_ = 0.0f, driveGain_ = 1.0f, driveComp_ = 1.0f;
 };

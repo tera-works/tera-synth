@@ -159,3 +159,32 @@ TEST(quality_mips_only_where_needed) {
     CHECK(set->samples[0]->mipLevels == 1);
     CHECK(set->samples[0]->mipFrames[0] == 500);
 }
+
+TEST(quality_high_antialiased_drive_and_saturate) {
+    auto measure = [](Quality q, int key, bool saturate) {
+        Engine e;
+        e.prepare(48000);
+        plain(e);
+        e.setQuality(q);
+        e.setParam(P::layer(0, P::VaMix), 0.0f);
+        if (saturate) {
+            e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Sine);
+            e.setParam(P::VfxType, (float)VfxType::Saturate);
+            e.setParam(P::VfxAmount, 0.8f);
+        } else {
+            e.setParam(P::FilterType, (float)FilterType::LP24);
+            e.setParam(P::FilterCutoff, 20000.0f);
+            e.setParam(P::FilterKeytrack, 0.0f);
+            e.setParam(P::FilterEnvAmt, 0.0f);
+            e.setParam(P::FilterDrive, 1.0f);
+        }
+        return aliasDb(steadyNote(e, key), 9600, hz(key), kSr, 10000.0);
+    };
+    for (int key : {84, 96}) {
+        const double dn = measure(Quality::Normal, key, false), dh = measure(Quality::High, key, false);
+        const double sn = measure(Quality::Normal, key, true), sh = measure(Quality::High, key, true);
+        INFO("key %d: drive %.1f -> %.1f dB, saturate %.1f -> %.1f dB (Normal -> High)\n", key, dn, dh, sn, sh);
+        CHECK(dh < dn - 10.0);
+        CHECK(sh < sn - 10.0);
+    }
+}

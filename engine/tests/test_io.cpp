@@ -336,3 +336,21 @@ TEST(factory_presets_render) {
         for (int ch : channels) CHECK(e.partActiveVoices(ch) >= 0);
     }
 }
+
+TEST(wav_write_unequal_channel_lengths) {
+    // a shorter channel is padded with silence (it was read out of bounds)
+    const std::string dir = tempDir("wav_unequal");
+    std::vector<float> l(1000, 0.25f), r(400, -0.5f);
+    std::string err;
+    for (bool f32 : {false, true}) {
+        CHECK(writeWav(dir + "/u.wav", l, &r, 48000, f32, err));
+        WavData w;
+        CHECK(readWav(dir + "/u.wav", w, err));
+        CHECK(w.frames == 1000 && w.channels == 2);
+        CHECK(std::fabs(w.right[399] + 0.5f) < 1e-3f && w.right[400] == 0.0f && w.right[999] == 0.0f);
+        CHECK(std::fabs(w.left[999] - 0.25f) < 1e-3f);
+        // longer right channel: the file follows the longer one
+        CHECK(writeWav(dir + "/u2.wav", r, &l, 48000, f32, err));
+        CHECK(readWav(dir + "/u2.wav", w, err) && w.frames == 1000 && w.left[999] == 0.0f);
+    }
+}

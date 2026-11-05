@@ -1,6 +1,7 @@
 #include "hsynth/wav.h"
 #include "hsynth/fileio.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -119,7 +120,9 @@ bool writeWav(const std::string& path, const std::vector<float>& left, const std
               int sampleRate, bool float32, std::string& error, int unityNote, int64_t loopStart, int64_t loopEnd) {
     const int ch = right ? 2 : 1;
     const int bytes = float32 ? 4 : 2;
-    const uint32_t frames = (uint32_t)left.size();
+    // channels of different length: the file is as long as the longer one, the
+    // shorter one is padded with silence (it used to be read out of bounds)
+    const uint32_t frames = (uint32_t)std::max(left.size(), right ? right->size() : (size_t)0);
     std::vector<uint8_t> v;
     v.reserve(64 + frames * ch * bytes);
     wrTag(v, "RIFF"); wr32(v, 0); wrTag(v, "WAVE");
@@ -144,7 +147,8 @@ bool writeWav(const std::string& path, const std::vector<float>& left, const std
     wrTag(v, "data"); wr32(v, frames * ch * bytes);
     for (uint32_t i = 0; i < frames; ++i) {
         for (int c = 0; c < ch; ++c) {
-            float s = (c == 0 ? left[i] : (*right)[i]);
+            const std::vector<float>& src = c == 0 ? left : *right;
+            float s = i < src.size() ? src[i] : 0.0f;
             if (float32) {
                 uint32_t u; std::memcpy(&u, &s, 4); wr32(v, u);
             } else {

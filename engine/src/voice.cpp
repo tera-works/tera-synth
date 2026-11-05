@@ -561,12 +561,13 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const float reso = clampf(p[P::FilterReso] + D(ModDest::Resonance), 0.0f, 1.0f);
     const float drive = clampf(p[P::FilterDrive] + D(ModDest::Drive), 0.0f, 1.0f);
     const float fmorph = clampf(p[P::FilterMorph] + D(ModDest::FilterMorph), 0.0f, 1.0f);
-    filterL_.set(ftype, cutoff, reso, drive, sr, fmorph);
+    const bool hq = ctx.quality >= 2;
+    filterL_.set(ftype, cutoff, reso, drive, sr, fmorph, hq);
     if (stereo_) filterR_.copyCoefsFrom(filterL_);
     const auto vfxType = (VfxType)(int)p[P::VfxType];
     if (vfxType != VfxType::Off)
         vfx_.set(vfxType, p[P::VfxAmount] + D(ModDest::VfxAmount), p[P::VfxMix] + D(ModDest::VfxMix),
-                 midiToHz(basePitch) * p[P::VfxRatio] / sr);
+                 midiToHz(basePitch) * p[P::VfxRatio] / sr, hq);
     else
         vfx_.set(VfxType::Off, 0.0f, 0.0f, 0.0f);
 

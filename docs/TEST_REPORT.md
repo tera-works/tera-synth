@@ -44,10 +44,21 @@ FM 4op 57 / 6op 69、WT ユニゾン 7 266、PCM 原音程以下 39 / ピッチ�
   Strings、Vibraphone、Warm Pad の一部。**エンジンではなく録音素材の差**（例: Grand Piano v120 の fs5 = -14.2 dB →
   a5 = -26.7 dB、fs5 の v80 と v120 の差 26 dB）。サンプラー側（`hsynth_sampler` / 元の SoundFont）での確認が必要
 
+### 追加の検証（v0.4.1）
+
+- **ThreadSanitizer**: UI スレッド（パート / ミックス / モード編集と読み出し、`captureMulti`）・ローダースレッド
+  （パートのサンプル差し替え）・オーディオスレッドの同時実行テスト（`multi_api_concurrent_threads`）と
+  `engine_sample_swap_concurrent` でデータ競合なし
+- **clang -Wall -Wextra -Wshadow / clang-tidy（bugprone, performance）**: 実害のある指摘なし（変数のシャドーイング 1 件を修正）
+- **ホストの互換性**: Android JNI ブリッジとデスクトップ `app.cpp` が現在のエンジン API でコンパイルできることを確認
+  （プラットフォームヘッダーはスタブ。Windows / Android のビルド自体は未実施）
+- **`writeWav` の範囲外読み出しを修正**: 左右のチャンネル長が違うと短い方を範囲外まで読んでいた（ファイルにメモリの
+  ゴミが入り、マシンや実行ごとに内容が変わる）。短い方は無音で埋めるように修正（`wav_write_unequal_channel_lengths`）
+
 ### 既知の問題・制限（v0.4 で追加分）
 
-- フィルタードライブ / Voice FX saturate / ring / fold はオーバーサンプリングなし。高音域・強いドライブで折り返しが残る
-  （例: 2 kHz のサイン、ゲイン 9 で -30 dB。ADAA（1 次）で 5〜16 dB 改善するが CPU が整形部の約 6 倍のため見送り）。
+- フィルタードライブ / Voice FX saturate は Normal ではオーバーサンプリングなし（高音域・強いドライブで可聴帯域 -24〜-30 dB）。
+  Quality High では ADAA で 12〜17 dB 改善（`quality_high_antialiased_drive_and_saturate`）。fold / ring / ladder の tanh は対象外。
 - PCM の 3 オクターブを超えるピッチアップは帯域制限が不完全（ミップは 2 段まで）。
 - サンプルセットの差し替え（プリセット読込）時、鳴っているそのレイヤーの PCM は即停止（短いクリックの可能性）。
 - Windows ビルド・試聴・Android 実機は未確認（クラウドでは engine のみ）。

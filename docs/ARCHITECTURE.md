@@ -299,6 +299,9 @@ v0.1 の固定エフェクト（`chorus.* / delay.* / reverb.* / eq.*`）は `ap
 - マルチティンバーの負荷: `hsynth_bench` の `multi 16 parts x 4 voices` 行（同じ 64 ボイスのシングルパートと比較）。
   パートごとの追加コストは 16 サンプル単位のパートバス合成と LFO2 程度です。
 - DSP品質: Low / Normal / High。Drive・Amp のオーバーサンプリングが 1x / 2x / 4x に切り替わります。
+  High ではボイスのフィルタードライブと Voice FX saturate が 1 次 ADAA（反微分によるアンチエイリアス、`AdaaTanh`）になり、
+  可聴帯域の折り返しが 12〜17 dB 減ります（ボイス・サンプル当たり +6〜9 ns、該当機能使用時のみ）。Low は PCM の
+  ピッチアップも 4 点 Hermite のみ。
 - 高速化: `fastFloor` / `fastExp2`（多項式）/ 整数位相FM / 係数共有のステレオフィルター。
   NEON明示最適化は未実装（Phase 4）。現在のコードは汎用C++で、コンパイラの自動ベクトル化に任せています。
   `HSYNTH_ENABLE_SIMD` オプションは将来のSIMD実装用で、無効でも同じ結果になるよう汎用パスを維持する方針です。

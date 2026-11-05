@@ -62,6 +62,30 @@ inline float fastTanh(float x) {
     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
 }
 
+// fastTanh with first-order antiderivative anti-aliasing (ADAA): the output
+// is the average of the shaper over the segment between consecutive inputs,
+// which suppresses the aliasing of the harmonics the shaper creates. Costs a
+// log per sample (double precision: the difference quotient cancels), so it
+// is used for Quality::High only. One instance per signal (keeps the previous
+// input).
+struct AdaaTanh {
+    static double antiderivative(double x) {
+        // fastTanh(x) = x / 9 + 24 x / (9 x^2 + 27) for |x| <= 3, +-1 beyond
+        const double a = std::fabs(x);
+        if (a <= 3.0) return x * x / 18.0 + (4.0 / 3.0) * std::log(9.0 * x * x + 27.0);
+        return 0.5 + (4.0 / 3.0) * std::log(108.0) + (a - 3.0);
+    }
+    double x1 = 0.0, f1 = antiderivative(0.0);
+    void reset() { x1 = 0.0; f1 = antiderivative(0.0); }
+    float process(float xf) {
+        const double x = xf, fx = antiderivative(x), d = x - x1;
+        const float y = std::fabs(d) > 1e-5 ? (float)((fx - f1) / d) : fastTanh((float)(0.5 * (x + x1)));
+        x1 = x;
+        f1 = fx;
+        return y;
+    }
+};
+
 // Deterministic per-engine random generator (xorshift32). Avoids std::rand and
 // keeps offline renders reproducible.
 struct Rng {
