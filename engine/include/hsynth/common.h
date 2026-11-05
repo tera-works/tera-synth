@@ -75,10 +75,18 @@ struct AdaaTanh {
         if (a <= 3.0) return x * x / 18.0 + (4.0 / 3.0) * std::log(9.0 * x * x + 27.0);
         return 0.5 + (4.0 / 3.0) * std::log(108.0) + (a - 3.0);
     }
-    double x1 = 0.0, f1 = antiderivative(0.0);
-    void reset() { x1 = 0.0; f1 = antiderivative(0.0); }
+    double x1 = 0.0, f1 = 0.0;
+    bool primed = false;  // false: the next sample starts a new segment (no stale history)
+    void reset() { primed = false; }
     float process(float xf) {
-        const double x = xf, fx = antiderivative(x), d = x - x1;
+        const double x = xf, fx = antiderivative(x);
+        if (!primed) {  // first sample after (re)start: plain shaper, remember the point
+            primed = true;
+            x1 = x;
+            f1 = fx;
+            return fastTanh(xf);
+        }
+        const double d = x - x1;
         const float y = std::fabs(d) > 1e-5 ? (float)((fx - f1) / d) : fastTanh((float)(0.5 * (x + x1)));
         x1 = x;
         f1 = fx;

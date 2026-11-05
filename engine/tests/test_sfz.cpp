@@ -314,3 +314,19 @@ TEST(sfz_velocity_and_key_crossfades) {
     CHECK_NEAR(k74.first / k72.first, 0.5, 0.05);               // linear: half way at 74
     CHECK_NEAR(k74.second / k77.second, 0.5, 0.05);
 }
+
+TEST(review_silent_crossfade_region_is_not_started) {
+    const std::string dir = dirFor("sfz_xf_silent");
+    wavSine(dir + "/a.wav", 440, 1.0);
+    wavSine(dir + "/b.wav", 3000, 2.0);
+    auto e = pcmEngine(dir,
+                       "<region> sample=b.wav key=46 group=1 loop_mode=one_shot\n"
+                       "<region> sample=a.wav key=42 lovel=60 hivel=127 xfin_lovel=60 xfin_hivel=100 off_by=1 group=2\n"
+                       "<region> sample=a.wav key=42 lovel=1 hivel=59 group=3\n");
+    std::string err;
+    auto set = loadSampleSet(dir + "/t.sfz", err);
+    const Region* out[4];
+    CHECK(set->findRegions(42, 60, 0.5f, out, 4) == 0);  // gain 0 at xfin_lovel: not selected
+    CHECK(set->findRegions(42, 80, 0.5f, out, 4) == 1);
+    CHECK(set->findRegions(42, 30, 0.5f, out, 4) == 1);
+}

@@ -823,32 +823,37 @@ void Engine::updatePartTargets() {
 
 void Engine::swapSampleSet(int part, int layer, SampleSet* s) {
     SampleSet* old = currentSets_[part][layer];
+    keyswitch_[part][layer] = -1;
+    seqCount_[part][layer] = 0;
+    if (!old) {
+        currentSets_[part][layer] = s;
+        return;
+    }
+    bool playing = false;
+    for (auto& v : voices_) playing = playing || (v.part == part && v.playsLayer(layer));
     // Voices still playing the old set fade out (no click) while it stays alive
-    // in retiring_; without a free slot they stop at once as before.
+    // in retiring_; with nothing playing it, or no free slot, it goes to the
+    // garbage queue right away (sounding voices then stop at once).
     int slot = -1;
-    for (int i = 0; i < kRetiring && old; ++i)
+    for (int i = 0; i < kRetiring && playing; ++i)
         if (!retiring_[i].set) { slot = i; break; }
-    if (old && slot >= 0) {
+    if (slot >= 0) {
         for (auto& v : voices_)
             if (v.part == part) v.fadeLayer(layer);
         retiring_[slot].set = old;
         retiring_[slot].frames = (int)(2.0f * Voice::kSwapFadeSeconds * sampleRate_) + kControlBlock;
         currentSets_[part][layer] = s;
-        keyswitch_[part][layer] = -1;
-        seqCount_[part][layer] = 0;
         return;
     }
-    for (auto& v : voices_)
-        if (v.part == part) v.stopLayer(layer);
-    keyswitch_[part][layer] = -1;
-    seqCount_[part][layer] = 0;
-    if (currentSets_[part][layer] && !retired_.push(currentSets_[part][layer])) {
+    if (!retired_.push(old)) {
         // garbage queue full (collectGarbage not called): put the new set back
-        // and retry next block.
+        // and retry next block
         SampleSet* expected = nullptr;
         if (!pendingSets_[part][layer].compare_exchange_strong(expected, s)) retired_.push(s);
         return;
     }
+    for (auto& v : voices_)
+        if (v.part == part) v.stopLayer(layer);
     currentSets_[part][layer] = s;
 }
 

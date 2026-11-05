@@ -27,7 +27,7 @@ struct Sample {
     static constexpr int kPadFrames = 4;
     const float* channel(int c) const { return data[c < channels ? c : 0].data(); }
 
-    // Anti-aliased half / quarter rate copies for playback more than one
+    // Anti-aliased 1/2, 1/4, 1/8 rate copies for playback more than one
     // octave above the recorded pitch (built by buildMips() on the loader
     // thread, only for samples whose regions can be pitched that far up).
     static constexpr int kMaxMips = 3;

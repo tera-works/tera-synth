@@ -254,7 +254,7 @@ private:
     // Swapped-out sets stay alive while their voices fade (Voice::fadeLayer),
     // then go to retired_. Audio thread only.
     struct Retiring { SampleSet* set = nullptr; int frames = 0; };
-    static constexpr int kRetiring = 16;
+    static constexpr int kRetiring = kNumParts * kNumLayers;  // a whole multi can swap at once
     Retiring retiring_[kRetiring];
     void advanceRetiring(int n);
     std::mutex loaderMutex_;

@@ -24,6 +24,10 @@ public:
     void set(VfxType type, float amount, float mix, float ringDt, bool hq = false) {
         type_ = type;
         hq_ = hq;
+        if (!(hq && type == VfxType::Saturate)) {  // restart the ADAA history when it comes back
+            adaa_[0].reset();
+            adaa_[1].reset();
+        }
         amount_ = clampf(amount, 0.0f, 1.0f);
         mix_ = clampf(mix, 0.0f, 1.0f);
         // shapers are fully neutral at amount 0 and fade in over the first 20 %

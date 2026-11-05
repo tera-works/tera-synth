@@ -658,3 +658,48 @@ TEST(multi_api_concurrent_threads) {
     e.collectGarbage();
     CHECK(finite);
 }
+
+TEST(review_multi_load_swap_still_fades_sounding_parts) {
+    auto sineSet = [](float freq) {
+        auto set = std::make_unique<SampleSet>();
+        auto s = std::make_unique<Sample>();
+        s->frames = 48000;
+        s->data[0].resize(48000 + Sample::kPadFrames);
+        for (int i = 0; i < 48000; ++i) s->data[0][(size_t)i] = 0.5f * std::sin(2.0f * kPi * freq * (float)i / 48000.0f);
+        Region r;
+        r.sample = s.get();
+        r.loopMode = LoopMode::Continuous;
+        r.loopStart = 0;
+        r.loopEnd = 48000;
+        set->regions.push_back(r);
+        set->samples.push_back(std::move(s));
+        return set;
+    };
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    for (int k = 0; k < kNumParts; ++k) {
+        e.setPartParam(k, P::layer(0, P::LType), (float)LayerType::PCM);
+        e.setPartParam(k, P::FilterType, 0.0f);
+        e.setPartParam(k, P::AmpSustain, 1.0f);
+        for (int l = 0; l < kNumLayers; ++l) e.setPartSampleSet(k, l, sineSet(220.0f));
+    }
+    Event on = Event::noteOn(1, 60, 1.0f);
+    on.channel = 15;  // only part 16 sounds
+    e.sendEvent(on);
+    std::vector<float> L, l(128), r(128);
+    for (int b = 0; b < 300; ++b) {
+        if (b == 200)  // a whole multi loads: every part / layer swaps in the same block
+            for (int k = 0; k < kNumParts; ++k)
+                for (int y = 0; y < kNumLayers; ++y) e.setPartSampleSet(k, y, sineSet(330.0f));
+        e.process(l.data(), r.data(), 128);
+        L.insert(L.end(), l.begin(), l.end());
+        e.collectGarbage();
+    }
+    double steady = 0, swap = 0;
+    for (size_t i = 15000; i < 25600; ++i) steady = std::max(steady, (double)std::fabs(L[i] - 2 * L[i - 1] + L[i - 2]));
+    for (size_t i = 25600; i < 27000; ++i) swap = std::max(swap, (double)std::fabs(L[i] - 2 * L[i - 1] + L[i - 2]));
+    INFO("multi load: steady %.5f, swap %.5f\n", steady, swap);
+    CHECK(swap < 0.005);
+}

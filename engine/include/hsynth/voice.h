@@ -64,6 +64,7 @@ public:
     void render(float* L, float* R, int n, float gain);
 
 private:
+    void startFade(float seconds);                   // linear fade to silence, then the player stops
     float at(int c, int64_t idx) const;
     float atLevel(int c, int64_t j) const;           // sample j of the current mip level, loop-aware
     float sampleAt(int c, int64_t idx, float f) const;  // 4-point Hermite (level 0)
@@ -111,6 +112,7 @@ public:
     void steal();            // fast fade-out
     void stopLayer(int l);   // immediately stop PCM playback of a layer (sample set swap)
     void fadeLayer(int l);   // fade PCM playback of a layer out within kSwapFadeSeconds (sample set swap)
+    bool playsLayer(int l) const;  // PCM / release players of layer l still sounding
     static constexpr float kSwapFadeSeconds = 0.006f;
     // SFZ exclusive groups: groups started by this voice (returns count), and
     // cutting this voice's regions with off_by == group.

@@ -67,19 +67,22 @@ void PcmPlayer::release() {
 void PcmPlayer::cut() {
     if (!region_) return;
     if (region_->offFast || !useEnv_) {
-        fadeStep_ = 1.0f / (0.006f * sr_);
-        if (fadeStep_ > fade_) fadeStep_ = fade_;
+        startFade(Voice::kSwapFadeSeconds);  // off_mode=fast: 6 ms, same as a sample set swap
     } else {
         env_.gate(false);
         looping_ = looping_ && region_->loopMode != LoopMode::Sustain;
     }
 }
 
+void PcmPlayer::startFade(float seconds) {
+    const float step = 1.0f / (seconds * sr_);
+    if (fadeStep_ < step) fadeStep_ = std::min(step, fade_);  // never slow down a faster fade
+}
+
 void PcmPlayer::fadeOut() {
     if (!region_) return;
     if (delay_ > 0) { region_ = nullptr; return; }
-    const float step = 1.0f / (Voice::kSwapFadeSeconds * sr_);
-    if (fadeStep_ < step) fadeStep_ = std::min(step, fade_);
+    startFade(Voice::kSwapFadeSeconds);
 }
 
 void PcmPlayer::setPitch(float pitchSemis, float engineRate, int quality) {
@@ -425,6 +428,15 @@ void Voice::stopLayer(int l) {
         if (relLayer_[i] == l) relPcm_[i].stop();
     sets_[l] = nullptr;
     if (ly.type == LayerType::PCM) ly.finished = true;
+}
+
+bool Voice::playsLayer(int l) const {
+    if (!active_) return false;
+    for (const auto& pl : layers_[l].pcm)
+        if (pl.active()) return true;
+    for (int i = 0; i < kMaxReleaseRegions; ++i)
+        if (relLayer_[i] == l && relPcm_[i].active()) return true;
+    return false;
 }
 
 void Voice::fadeLayer(int l) {

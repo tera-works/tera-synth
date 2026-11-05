@@ -175,6 +175,7 @@ public:
     void set(FilterType type, float cutoff, float res, float drive, float sampleRate, float morph = 0.0f, bool hq = false) {
         type_ = type;
         hq_ = hq;
+        if (!hq || drive <= 0.001f || type == FilterType::Off) adaa_.reset();  // restart cleanly when it comes back
         if (type == FilterType::Off) return;
         drive_ = drive;
         driveGain_ = 1.0f + drive * 8.0f;

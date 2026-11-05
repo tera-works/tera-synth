@@ -50,13 +50,8 @@ void SampleSet::prepareMips() {
 }
 
 namespace {
-// position in a crossfade range: 0 below lo, 1 above hi (lo >= hi: no fade)
-float xfPos(int v, int lo, int hi) {
-    if (hi <= lo) return 1.0f;
-    if (v <= lo) return 0.0f;
-    if (v >= hi) return 1.0f;
-    return (float)(v - lo) / (float)(hi - lo);
-}
+// position in a crossfade range [lo, hi] (callers ensure hi > lo)
+float xfPos(int v, int lo, int hi) { return std::min(1.0f, std::max(0.0f, (float)(v - lo) / (float)(hi - lo))); }
 float xfCurve(float t, bool power) { return power ? std::sqrt(t) : t; }
 }  // namespace
 
@@ -79,6 +74,7 @@ int SampleSet::findRegions(const RegionQuery& q, const Region** out, int max) co
         if (q.rand01 < r.lorand || q.rand01 >= r.hirand) continue;
         if (r.seqLength > 1 && (int)(q.seq % (uint32_t)r.seqLength) != r.seqPosition - 1) continue;
         if (r.swLast >= 0 && r.swLast != sw) continue;
+        if (r.crossfadeGain(q.key, q.vel127) <= 0.0f) continue;  // fully faded out: not started at all
         if (!r.sample) continue;
         out[n++] = &r;
         if (n >= max) break;

@@ -188,3 +188,75 @@ TEST(quality_high_antialiased_drive_and_saturate) {
         CHECK(sh < sn - 10.0);
     }
 }
+
+namespace {
+// largest second difference in [a, b) relative to the steady state before
+double transientRatio(const std::vector<float>& x, size_t steadyFrom, size_t a, size_t b) {
+    auto d2 = [&](size_t from, size_t to) {
+        double m = 0;
+        for (size_t i = from; i < to; ++i) m = std::max(m, (double)std::fabs(x[i] - 2 * x[i - 1] + x[i - 2]));
+        return m;
+    };
+    return d2(a, b) / d2(steadyFrom, a);
+}
+}  // namespace
+
+TEST(review_adaa_switch_on_mid_note_has_no_glitch) {
+    auto run = [](Quality q, bool saturate) {
+        Engine e;
+        e.prepare(48000);
+        plain(e);
+        e.setQuality(q);
+        e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Sine);
+        e.setParam(P::layer(0, P::VaMix), 0.0f);
+        e.setParam(P::FilterType, (float)FilterType::LP24);
+        e.setParam(P::FilterCutoff, 20000.0f);
+        e.setParam(P::FilterKeytrack, 0.0f);
+        e.setParam(P::FilterEnvAmt, 0.0f);
+        e.sendEvent(Event::noteOn(1, 57, 1.0f));
+        std::vector<float> L, l(128), r(128);
+        for (int b = 0; b < 200; ++b) {
+            if (b == 120) {  // the shaper switches on while the note plays
+                if (saturate) {
+                    e.setParam(P::VfxType, (float)VfxType::Saturate);
+                    e.setParam(P::VfxAmount, 0.05f);  // gentle: a glitch would stand out
+                } else {
+                    e.setParam(P::FilterDrive, 0.05f);
+                }
+            }
+            e.process(l.data(), r.data(), 128);
+            L.insert(L.end(), l.begin(), l.end());
+        }
+        double steady = 0, sw = 0;
+        for (size_t i = 12000; i < 15360; ++i) steady = std::max(steady, (double)std::fabs(L[i] - 2 * L[i - 1] + L[i - 2]));
+        for (size_t i = 15360; i < 15600; ++i) sw = std::max(sw, (double)std::fabs(L[i] - 2 * L[i - 1] + L[i - 2]));
+        INFO("  %s %s: steady %.6f, switch %.6f\n", q == Quality::High ? "High  " : "Normal", saturate ? "saturate" : "drive", steady, sw);
+        return transientRatio(L, 12000, 15360, 15600);
+    };
+    for (bool sat : {false, true}) {
+        const double normal = run(Quality::Normal, sat), high = run(Quality::High, sat);
+        INFO("%s switched on: transient x%.2f (Normal) x%.2f (High)\n", sat ? "saturate" : "drive", normal, high);
+        CHECK(high < 1.5 * normal + 0.5);  // no extra step from a stale ADAA history
+    }
+}
+
+TEST(review_adaa_partial_mix_keeps_the_top_end) {
+    // saturate with mix 0.5 at Quality High must not comb-filter the dry path
+    auto level = [](Quality q) {
+        Engine e;
+        e.prepare(48000);
+        plain(e);
+        e.setQuality(q);
+        e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Sine);
+        e.setParam(P::layer(0, P::VaMix), 0.0f);
+        e.setParam(P::VfxType, (float)VfxType::Saturate);
+        e.setParam(P::VfxAmount, 0.21f);  // shaper fully in, still gentle
+        e.setParam(P::VfxMix, 0.5f);
+        return rms(steadyNote(e, 124), 9600, 40000);  // ~10.5 kHz
+    };
+    const double n = level(Quality::Normal), h = level(Quality::High);
+    INFO("10.5 kHz through saturate mix 0.5: Normal %.4f, High %.4f (%.2f dB)\n", n, h, 20 * std::log10(h / n));
+    // first-order ADAA is centred half a sample back: mixed with the dry path
+    // that is a gentle roll-off (no notch below Nyquist), about -1 dB here
+    CHECK(std::fabs(20 * std::log10(h / n)) < 1.5);
+}
