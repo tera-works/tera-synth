@@ -62,7 +62,7 @@ FM 4op 57 / 6op 69、WT ユニゾン 7 266、PCM 原音程以下 39 / ピッチ�
 
 - フィルタードライブ / Voice FX saturate は Normal ではオーバーサンプリングなし（高音域・強いドライブで可聴帯域 -24〜-30 dB）。
   Quality High では ADAA で 12〜17 dB 改善（`quality_high_antialiased_drive_and_saturate`）。fold / ring / ladder の tanh は対象外。
-- PCM の 3 オクターブを超えるピッチアップは帯域制限が不完全（ミップは 2 段まで）。
+- PCM の 4 オクターブを超えるピッチアップは帯域制限が不完全（ミップは 3 段 = 1/8 レートまで。+43 半音で -75 dB）。
 - Windows ビルド・試聴・Android 実機は未確認（クラウドでは engine のみ）。
 
 ---

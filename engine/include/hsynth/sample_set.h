@@ -30,7 +30,7 @@ struct Sample {
     // Anti-aliased half / quarter rate copies for playback more than one
     // octave above the recorded pitch (built by buildMips() on the loader
     // thread, only for samples whose regions can be pitched that far up).
-    static constexpr int kMaxMips = 2;
+    static constexpr int kMaxMips = 3;
     int mipLevels = 0;
     std::vector<float> mip[kMaxMips][2];
     int64_t mipFrames[kMaxMips] = {};

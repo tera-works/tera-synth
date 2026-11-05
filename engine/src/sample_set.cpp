@@ -45,7 +45,7 @@ void SampleSet::prepareMips() {
         if (maxSemis < -1e8) continue;
         // +2 semitones pitch bend headroom; rate relative to the lowest common engine rate
         const double step = std::exp2((maxSemis + 2.0) / 12.0) * s->sampleRate / 44100.0;
-        s->buildMips(step > 4.0 ? 2 : step > 2.0 ? 1 : 0);
+        s->buildMips(step > 8.0 ? 3 : step > 4.0 ? 2 : step > 2.0 ? 1 : 0);
     }
 }
 

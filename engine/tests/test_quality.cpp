@@ -95,7 +95,7 @@ TEST(quality_pcm_pitch_up_band_limited) {
         e.setSampleSet(0, fullBandSaw());
         return aliasDb(steadyNote(e, key), 9600, hz(key), kSr, maxHz);
     };
-    for (int key : {52, 57, 69, 81}) {  // +7 .. +36 semitones
+    for (int key : {52, 57, 69, 81, 88}) {  // +7 .. +43 semitones (level 3 above +36)
         const double good = measure(Quality::Normal, key, 10000.0), cubic = measure(Quality::Low, key, 10000.0);
         INFO("PCM +%d st: alias below 10 kHz %.1f dB (cubic %.1f dB)\n", key - 45, good, cubic);
         CHECK(good < -75.0);
@@ -122,14 +122,14 @@ TEST(quality_pcm_sinc_gain_and_loop_seam) {
     set->regions.push_back(r);
     set->samples.push_back(std::move(s));
     set->prepareMips();
-    CHECK(set->samples[0]->mipLevels == 2);
+    CHECK(set->samples[0]->mipLevels == 3);  // whole keyboard above key 36: up to 1/8 rate
     Engine e;
     e.prepare(48000);
     plain(e);
     e.setParam(P::AmpVelSens, 0.0f);
     e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
     e.setSampleSet(0, std::move(set));
-    for (int key : {37, 50, 61, 79}) {  // sinc on level 0, 1, 2 (+43: beyond the mips)
+    for (int key : {37, 50, 61, 79, 96}) {  // sinc on level 0, 1, 2, 3 (+60: beyond the mips)
         const auto L = steadyNote(e, key);
         double lo = 1e9, hi = -1e9;
         for (size_t i = 9600; i < 48000; ++i) { lo = std::min(lo, (double)L[i]); hi = std::max(hi, (double)L[i]); }
