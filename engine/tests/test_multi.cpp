@@ -1,6 +1,9 @@
 // Multi-timbral operation: 16 parts, channel routing, per-part mix, voice
 // stealing across parts, multi presets, single-part compatibility.
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 #include "analysis.h"
 #include "hsynth/engine.h"
@@ -575,4 +578,83 @@ TEST(multi_random_part_parameter_stress) {
     e.sendEvent(Event::control(EventType::AllSoundOff, 0));
     for (int b = 0; b < 10; ++b) e.process(L.data(), R.data(), 128);
     CHECK(e.stats().activeVoices == 0);
+}
+
+// Thread contract: a UI thread edits parts / mix / modes and reads state back,
+// a loader thread swaps part sample sets, while the audio thread renders.
+// Meant to be run under ThreadSanitizer as well.
+TEST(multi_api_concurrent_threads) {
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    for (int k = 0; k < 4; ++k) e.setPartParam(k, P::layer(1, P::LType), (float)LayerType::PCM);
+    auto makeSet = [](float freq) {
+        auto set = std::make_unique<SampleSet>();
+        auto s = std::make_unique<Sample>();
+        s->frames = 2400;
+        s->data[0].resize(2400 + Sample::kPadFrames);
+        for (int i = 0; i < 2400; ++i) s->data[0][(size_t)i] = 0.4f * std::sin(2.0f * kPi * freq * (float)i / 48000.0f);
+        Region r;
+        r.sample = s.get();
+        r.loopMode = LoopMode::Continuous;
+        r.loopStart = 0;
+        r.loopEnd = 2400;
+        set->regions.push_back(r);
+        set->samples.push_back(std::move(s));
+        return set;
+    };
+    std::atomic<bool> stop{false};
+    std::thread ui([&] {
+        Rng r(5);
+        int i = 0;
+        std::vector<float> all((size_t)P::kNumParams);
+        while (!stop.load()) {
+            const int part = (int)(r.next() % 4);
+            e.setPartParam(part, P::FilterCutoff, 200.0f + 4000.0f * r.unipolar());
+            e.setPartMix(part, Mix::Pan, r.bipolar());
+            e.setPartParam(part, P::ArpOn, (i % 97) < 30 ? 1.0f : 0.0f);
+            e.setParam(P::fxp(fx::Delay, fx::delay::Mix), r.unipolar() * 0.3f);
+            if (i % 50 == 0) e.selectPart(part);
+            if (i % 200 == 0) e.setMultiTimbral(i % 400 == 0);
+            e.getPartParams(part, all.data());
+            (void)e.getPartMix(part, Mix::Volume);
+            (void)e.stats();
+            (void)e.partActiveVoices(part);
+            (void)e.partSampleSetName(part, 1);
+            if (i % 300 == 0) (void)captureMulti(e, "snap", "");
+            ++i;
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    });
+    std::thread loader([&] {
+        int i = 0;
+        while (!stop.load()) {
+            e.setPartSampleSet(i % 4, 1, makeSet(200.0f + (float)(i % 7) * 30.0f));
+            e.collectGarbage();
+            ++i;
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+        }
+    });
+    std::vector<float> L(64), R(64);
+    bool finite = true;
+    uint32_t id = 1;
+    for (int b = 0; b < 15000; ++b) {
+        if (b % 20 == 0) {
+            Event on = Event::noteOn(id++, 48 + (b / 20) % 24, 0.8f);
+            on.channel = (uint8_t)((b / 20) % 4);
+            e.sendEvent(on);
+        }
+        if (b % 20 == 10) {
+            Event off = Event::noteOff(id - 1, 0);
+            off.channel = (uint8_t)(((b - 10) / 20) % 4);
+            e.sendEvent(off);
+        }
+        e.process(L.data(), R.data(), 64);
+        for (float v : L) if (!std::isfinite(v)) finite = false;
+    }
+    stop = true;
+    ui.join();
+    loader.join();
+    e.collectGarbage();
+    CHECK(finite);
 }

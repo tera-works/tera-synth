@@ -1035,9 +1035,9 @@ void Engine::process(float* L, float* R, int n) {
     const float target = p_[P::MasterVolume] * p_[P::MasterVolume];  // perceptual taper
     float peak = 0.0f;
     for (int i = 0; i < n; ++i) {
-        const float g = masterGain_.process(target);
-        L[i] *= g;
-        R[i] *= g;
+        const float mg = masterGain_.process(target);
+        L[i] *= mg;
+        R[i] *= mg;
     }
     limiter_.process(L, R, n);
     for (int i = 0; i < n; ++i) peak = std::max(peak, std::max(std::fabs(L[i]), std::fabs(R[i])));
