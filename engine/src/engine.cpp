@@ -74,6 +74,10 @@ Engine::~Engine() {
             delete currentSets_[k][l];
             currentSets_[k][l] = nullptr;
         }
+    for (auto& r : retiring_) {
+        delete r.set;
+        r.set = nullptr;
+    }
     for (int t = 0; t < 2; ++t) {
         fx::ConvIr* p = pendingIr_[t].exchange(nullptr);
         if (p != &unloadIr_) delete p;
@@ -818,6 +822,22 @@ void Engine::updatePartTargets() {
 }
 
 void Engine::swapSampleSet(int part, int layer, SampleSet* s) {
+    SampleSet* old = currentSets_[part][layer];
+    // Voices still playing the old set fade out (no click) while it stays alive
+    // in retiring_; without a free slot they stop at once as before.
+    int slot = -1;
+    for (int i = 0; i < kRetiring && old; ++i)
+        if (!retiring_[i].set) { slot = i; break; }
+    if (old && slot >= 0) {
+        for (auto& v : voices_)
+            if (v.part == part) v.fadeLayer(layer);
+        retiring_[slot].set = old;
+        retiring_[slot].frames = (int)(2.0f * Voice::kSwapFadeSeconds * sampleRate_) + kControlBlock;
+        currentSets_[part][layer] = s;
+        keyswitch_[part][layer] = -1;
+        seqCount_[part][layer] = 0;
+        return;
+    }
     for (auto& v : voices_)
         if (v.part == part) v.stopLayer(layer);
     keyswitch_[part][layer] = -1;
@@ -830,6 +850,14 @@ void Engine::swapSampleSet(int part, int layer, SampleSet* s) {
         return;
     }
     currentSets_[part][layer] = s;
+}
+
+void Engine::advanceRetiring(int n) {
+    for (auto& r : retiring_) {
+        if (!r.set) continue;
+        r.frames -= n;
+        if (r.frames <= 0 && retired_.push(r.set)) r.set = nullptr;  // queue full: retry next block
+    }
 }
 
 // Multi-timbral render: voices go into per-part buses, which run through the
@@ -1041,6 +1069,8 @@ void Engine::process(float* L, float* R, int n) {
     }
     limiter_.process(L, R, n);
     for (int i = 0; i < n; ++i) peak = std::max(peak, std::max(std::fabs(L[i]), std::fabs(R[i])));
+
+    advanceRetiring(n);
 
     // 6. stats
     int active = 0;

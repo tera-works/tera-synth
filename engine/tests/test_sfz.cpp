@@ -234,3 +234,47 @@ TEST(sfz_region_filter_and_amp_keytrack) {
     const auto k60 = render(*e, job);
     CHECK_NEAR(20 * std::log10(rms(k72, 2400, 21600) / rms(k60, 2400, 21600)), -6.0, 0.3);
 }
+
+TEST(sample_set_swap_fades_without_click) {
+    auto sineSet = [](float freq) {
+        auto set = std::make_unique<SampleSet>();
+        auto s = std::make_unique<Sample>();
+        s->frames = 48000;
+        s->data[0].resize(48000 + Sample::kPadFrames);
+        for (int i = 0; i < 48000; ++i) s->data[0][(size_t)i] = 0.5f * std::sin(2.0f * kPi * freq * (float)i / 48000.0f);
+        Region r;
+        r.sample = s.get();
+        r.keycenter = 60;
+        r.loopMode = LoopMode::Continuous;
+        r.loopStart = 0;
+        r.loopEnd = 48000;  // whole cycles of 220 Hz at 48 kHz
+        set->regions.push_back(r);
+        set->samples.push_back(std::move(s));
+        return set;
+    };
+    Engine e;
+    e.prepare(48000);
+    e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
+    e.setParam(P::FilterType, 0.0f);
+    e.setParam(P::AmpSustain, 1.0f);
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    e.setSampleSet(0, sineSet(220.0f));
+    e.sendEvent(Event::noteOn(1, 60, 1.0f));
+    std::vector<float> L, l(128), r(128);
+    for (int b = 0; b < 375; ++b) {
+        if (b == 200) e.setSampleSet(0, sineSet(330.0f));  // preset load while the note sounds
+        e.process(l.data(), r.data(), 128);
+        L.insert(L.end(), l.begin(), l.end());
+        e.collectGarbage();
+    }
+    auto maxD2 = [&](size_t a, size_t b) {
+        double m = 0;
+        for (size_t i = a; i < b; ++i) m = std::max(m, (double)std::fabs(L[i] - 2 * L[i - 1] + L[i - 2]));
+        return m;
+    };
+    const double steady = maxD2(10000, 25000), swap = maxD2(25000, 27000);
+    INFO("second difference: steady %.5f, around the swap %.5f\n", steady, swap);
+    CHECK(swap < 0.005);                                 // a hard cut gives a step of the signal amplitude (~0.1)
+    CHECK(rms(L, 26200, 27000) < 1e-4);                  // faded out within ~6 ms
+    CHECK(e.stats().activeVoices == 0);                  // the PCM voice ended with the fade
+}

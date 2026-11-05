@@ -48,8 +48,8 @@ Raspberry Pi / Linux / Windows / macOS では、同じ `engine/` を CMake で�
 - パラメータ：UIは `std::atomic<float>` 配列に書き込み、バージョンカウンタを進める。音声スレッドはバージョン変化時のみ
   ローカル配列にコピー。
 - サンプルセット：ローダースレッドでWAVを全てデコードしてから `SampleSet` を作成し、`pendingSets_[layer]` に
-  アトミックに格納。音声スレッドはブロック先頭で取り出して差し替え、旧セットを使用中のボイスのPCM再生を停止した上で
-  旧セットを「廃棄キュー」（SPSC）へ送る。解放は UI スレッドの `collectGarbage()`（250 ms毎）で行う。
+  アトミックに格納。音声スレッドはブロック先頭で取り出して差し替え、旧セットを使用中のボイスの PCM を 6 ms で
+  フェードアウトさせ（クリック防止）、フェードが終わってから旧セットを「廃棄キュー」（SPSC）へ送る。解放は UI スレッドの `collectGarbage()`（250 ms毎）で行う。
 - イベントキュー溢れはカウント（`droppedEvents`）され、Monitor画面に表示。
 - デノーマル対策：`process()` 冒頭で FTZ/DAZ（ARM64: FPCR.FZ、x86: MXCSR）を有効化。
 

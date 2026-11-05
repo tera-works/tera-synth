@@ -251,6 +251,12 @@ private:
     std::atomic<SampleSet*> pendingSets_[kNumParts][kNumLayers];
     SampleSet* currentSets_[kNumParts][kNumLayers] = {};
     SpscQueue<SampleSet*> retired_{128};
+    // Swapped-out sets stay alive while their voices fade (Voice::fadeLayer),
+    // then go to retired_. Audio thread only.
+    struct Retiring { SampleSet* set = nullptr; int frames = 0; };
+    static constexpr int kRetiring = 16;
+    Retiring retiring_[kRetiring];
+    void advanceRetiring(int n);
     std::mutex loaderMutex_;
     mutable std::mutex nameMutex_;
     std::string setNames_[kNumParts][kNumLayers];

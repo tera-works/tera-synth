@@ -52,6 +52,9 @@ FM 4op 57 / 6op 69、WT ユニゾン 7 266、PCM 原音程以下 39 / ピッチ�
 - **clang -Wall -Wextra -Wshadow / clang-tidy（bugprone, performance）**: 実害のある指摘なし（変数のシャドーイング 1 件を修正）
 - **ホストの互換性**: Android JNI ブリッジとデスクトップ `app.cpp` が現在のエンジン API でコンパイルできることを確認
   （プラットフォームヘッダーはスタブ。Windows / Android のビルド自体は未実施）
+- **サンプルセット差し替え時のクリックを除去**: 鳴っているレイヤーの PCM を即停止していたのを 6 ms のフェードに変更
+  （古いセットはフェードが終わるまで保持してから破棄）。差し替え時の段差（2 階差分の最大）0.173 → 0.0007
+  （`sample_set_swap_fades_without_click`、ASan でも確認）
 - **`writeWav` の範囲外読み出しを修正**: 左右のチャンネル長が違うと短い方を範囲外まで読んでいた（ファイルにメモリの
   ゴミが入り、マシンや実行ごとに内容が変わる）。短い方は無音で埋めるように修正（`wav_write_unequal_channel_lengths`）
 
@@ -60,7 +63,6 @@ FM 4op 57 / 6op 69、WT ユニゾン 7 266、PCM 原音程以下 39 / ピッチ�
 - フィルタードライブ / Voice FX saturate は Normal ではオーバーサンプリングなし（高音域・強いドライブで可聴帯域 -24〜-30 dB）。
   Quality High では ADAA で 12〜17 dB 改善（`quality_high_antialiased_drive_and_saturate`）。fold / ring / ladder の tanh は対象外。
 - PCM の 3 オクターブを超えるピッチアップは帯域制限が不完全（ミップは 2 段まで）。
-- サンプルセットの差し替え（プリセット読込）時、鳴っているそのレイヤーの PCM は即停止（短いクリックの可能性）。
 - Windows ビルド・試聴・Android 実機は未確認（クラウドでは engine のみ）。
 
 ---

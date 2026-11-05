@@ -72,6 +72,13 @@ void PcmPlayer::cut() {
     }
 }
 
+void PcmPlayer::fadeOut() {
+    if (!region_) return;
+    if (delay_ > 0) { region_ = nullptr; return; }
+    const float step = 1.0f / (Voice::kSwapFadeSeconds * sr_);
+    if (fadeStep_ < step) fadeStep_ = std::min(step, fade_);
+}
+
 void PcmPlayer::setPitch(float pitchSemis, float engineRate, int quality) {
     if (!region_) return;
     step_ = baseRatio_ * std::exp2((double)pitchSemis / 12.0) * region_->sample->sampleRate / (double)engineRate;
@@ -415,6 +422,13 @@ void Voice::stopLayer(int l) {
         if (relLayer_[i] == l) relPcm_[i].stop();
     sets_[l] = nullptr;
     if (ly.type == LayerType::PCM) ly.finished = true;
+}
+
+void Voice::fadeLayer(int l) {
+    for (auto& pl : layers_[l].pcm) pl.fadeOut();
+    for (int i = 0; i < kMaxReleaseRegions; ++i)
+        if (relLayer_[i] == l) relPcm_[i].fadeOut();
+    sets_[l] = nullptr;  // no new release regions from the outgoing set
 }
 
 void Voice::applyExpression(EventType type, float value) {

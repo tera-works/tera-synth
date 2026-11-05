@@ -52,6 +52,9 @@ public:
     void stop() { region_ = nullptr; }
     // Exclusive-group cut: fast fade (6 ms) or the region's normal release.
     void cut();
+    // 6 ms fade regardless of the region (sample set swap); a player still in
+    // its start delay stops at once (it is silent anyway).
+    void fadeOut();
     bool active() const { return region_ != nullptr; }
     bool oneShot() const { return region_ && region_->loopMode == LoopMode::OneShot; }
     const Region* region() const { return region_; }
@@ -107,6 +110,8 @@ public:
     void release();
     void steal();            // fast fade-out
     void stopLayer(int l);   // immediately stop PCM playback of a layer (sample set swap)
+    void fadeLayer(int l);   // fade PCM playback of a layer out within kSwapFadeSeconds (sample set swap)
+    static constexpr float kSwapFadeSeconds = 0.006f;
     // SFZ exclusive groups: groups started by this voice (returns count), and
     // cutting this voice's regions with off_by == group.
     int startedGroups(int* out, int max) const;
