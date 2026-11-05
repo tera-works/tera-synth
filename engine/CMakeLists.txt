@@ -67,6 +67,8 @@ if(HSYNTH_BUILD_TOOLS AND NOT ANDROID)
     target_link_libraries(hsynth_assets PRIVATE hsynth)
     add_executable(hsynth_bench tools/hsynth_bench.cpp)
     target_link_libraries(hsynth_bench PRIVATE hsynth)
+    add_executable(hsynth_fuzz tools/hsynth_fuzz.cpp)
+    target_link_libraries(hsynth_fuzz PRIVATE hsynth)
 endif()
 
 if(HSYNTH_BUILD_TESTS AND NOT ANDROID)
