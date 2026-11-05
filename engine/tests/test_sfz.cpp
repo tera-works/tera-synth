@@ -330,3 +330,19 @@ TEST(review_silent_crossfade_region_is_not_started) {
     CHECK(set->findRegions(42, 80, 0.5f, out, 4) == 1);
     CHECK(set->findRegions(42, 30, 0.5f, out, 4) == 1);
 }
+
+TEST(sfz_empty_or_directory_sample_does_not_crash) {
+    // found by fuzzing: "sample=" (empty) resolved to the instrument folder;
+    // reading a directory as a WAV tried to allocate its bogus size
+    const std::string dir = dirFor("sfz_dir_sample");
+    wavSine(dir + "/ok.wav", 440, 0.2);
+    fs::create_directories(dir + "/sub");
+    std::ofstream(dir + "/t.sfz") << "<region> sample= key=60\n<region> sample=sub key=61\n<region> sample=ok.wav key=62\n";
+    std::string err;
+    auto set = loadSampleSet(dir + "/t.sfz", err);
+    CHECK(set != nullptr);
+    if (set) CHECK(set->regions.size() == 1);
+    WavData w;
+    CHECK(!readWav(dir + "/sub", w, err));
+    CHECK(!readWav(dir, w, err));
+}

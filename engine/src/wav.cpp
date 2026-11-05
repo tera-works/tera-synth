@@ -67,6 +67,9 @@ bool readWavMemory(const uint8_t* data, size_t size, WavData& out, std::string& 
     if (isFloat && !(bits == 32 || bits == 64)) { error = "unsupported float bit depth " + std::to_string(bits); return false; }
 
     const int bytes = bits / 8;
+    // the frame stride must hold every channel that is decoded (a smaller
+    // blockAlign used to read past the end of the data chunk)
+    if (blockAlign < bytes * channels) { error = "inconsistent fmt chunk (block align " + std::to_string(blockAlign) + ")"; return false; }
     const int64_t frames = (int64_t)(pcmSize / (size_t)blockAlign);
     out.channels = channels >= 2 ? 2 : 1;
     out.sampleRate = rate;
@@ -107,6 +110,8 @@ bool readWav(const std::string& path, WavData& out, std::string& error) {
     const long len = std::ftell(f.get());
     std::fseek(f.get(), 0, SEEK_SET);
     if (len <= 0) { error = "empty file " + path; return false; }
+    // a directory opens on POSIX and reports a bogus size; RIFF cannot exceed 4 GB
+    if (len > 0xFFFFFFFFL) { error = "not a WAV file (directory or too large): " + path; return false; }
     std::vector<uint8_t> buf((size_t)len);
     if (std::fread(buf.data(), 1, buf.size(), f.get()) != buf.size()) { error = "read error " + path; return false; }
     if (!readWavMemory(buf.data(), buf.size(), out, error)) {

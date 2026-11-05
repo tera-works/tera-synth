@@ -354,3 +354,27 @@ TEST(wav_write_unequal_channel_lengths) {
         CHECK(readWav(dir + "/u2.wav", w, err) && w.frames == 1000 && w.left[999] == 0.0f);
     }
 }
+
+TEST(wav_reader_rejects_bad_block_align) {
+    // fmt chunk declaring a frame stride smaller than the samples it holds
+    // (found by fuzzing: the last frame was read past the data chunk)
+    auto make = [](uint16_t channels, uint16_t bits, uint16_t blockAlign, uint32_t dataBytes) {
+        std::vector<uint8_t> v;
+        auto w32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) v.push_back((uint8_t)(x >> (8 * i))); };
+        auto w16 = [&](uint16_t x) { v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8)); };
+        auto tag = [&](const char* t) { v.insert(v.end(), t, t + 4); };
+        tag("RIFF"); w32(36 + dataBytes); tag("WAVE");
+        tag("fmt "); w32(16); w16(1); w16(channels); w32(48000); w32(48000u * blockAlign); w16(blockAlign); w16(bits);
+        tag("data"); w32(dataBytes);
+        for (uint32_t i = 0; i < dataBytes; ++i) v.push_back((uint8_t)i);
+        return v;
+    };
+    WavData w;
+    std::string err;
+    auto bad = make(1, 16, 1, 101);   // 16-bit samples, 1-byte stride
+    CHECK(!readWavMemory(bad.data(), bad.size(), w, err));
+    auto bad2 = make(2, 24, 3, 99);   // stereo 24-bit, stride of one sample
+    CHECK(!readWavMemory(bad2.data(), bad2.size(), w, err));
+    auto good = make(2, 16, 4, 100);
+    CHECK(readWavMemory(good.data(), good.size(), w, err) && w.frames == 25 && w.channels == 2);
+}

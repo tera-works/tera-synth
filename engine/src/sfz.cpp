@@ -288,6 +288,7 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
 
         auto it = op.find("sample");
         if (it == op.end()) { parser.warnings.push_back("region without sample= skipped"); continue; }
+        if (it->second.empty()) { parser.warnings.push_back("region with an empty sample= skipped"); continue; }
         RegionTrigger trigger = RegionTrigger::Attack;
         if (auto trig = op.find("trigger"); trig != op.end()) {
             if (trig->second == "release" || trig->second == "release_key") trigger = RegionTrigger::Release;
