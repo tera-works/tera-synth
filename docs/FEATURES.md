@@ -37,7 +37,8 @@
   ampeg_release, amp_veltrack, amp_keytrack, amp_keycenter, trigger (attack / release / release_key), rt_decay,
   group, off_by, off_mode (fast / normal), seq_length, seq_position, sw_lokey, sw_hikey, sw_last, sw_default,
   fil_type (lpf_1p, hpf_1p, lpf_2p, hpf_2p, bpf_2p, brf_2p; *_4p は 2 ポールで代用し警告), cutoff, resonance,
-  fil_keytrack, fil_keycenter, fil_veltrack, default_path, note_offset, octave_offset`
+  fil_keytrack, fil_keycenter, fil_veltrack, xfin_lovel, xfin_hivel, xfout_lovel, xfout_hivel, xfin_lokey, xfin_hikey,
+  xfout_lokey, xfout_hikey, xf_velcurve, xf_keycurve (power / gain), default_path, note_offset, octave_offset`
 - 音名（`c4` = 60, `c#4`, `db4`）、サンプル名の空白、`\` 区切りパス
 - 動作の補足:
   - リリーストリガー（`trigger=release`）はノートオフでノートオンのベロシティを使って発音。ボイスのアンプ EG / フィルターを
@@ -46,6 +47,8 @@
     （`off_mode=fast` は 6 ms フェード、`normal` はリージョンのリリース）。
   - ラウンドロビン（`seq_*`）のカウンターはパート × レイヤーごとにノートオンで 1 進みます（キーごとではない）。
   - キースイッチの状態はパート × レイヤーごと。`sw_default` が無い場合は最小の `sw_last` から開始。サンプルセット差し替えでリセット。
+  - クロスフェード（`xfin_*` / `xfout_*`）: 範囲内で 0→1 / 1→0、既定は等パワー（`power`）、`gain` で直線。ベロシティ
+    レイヤーやキーゾーンの境目の段差をなめらかにできます（重なる範囲の両方のリージョンが同時に鳴る前提）。
   - リージョンフィルターはノートオン時に固定（キー / ベロシティ追従あり、フィルター EG・LFO は未対応）。ボイスのフィルターとは別に掛かります。
 - 未対応（警告）: `fileg_*`、`pitcheg_*`、LFO 系、`trigger=first/legato`、CC 系 `on_locc` / `locc` 等、`ampeg_vel2*`、
   `*` ジェネレーターサンプル、`<curve> <effect> <midi>` ヘッダ、OGG（FLAC は対応済み）

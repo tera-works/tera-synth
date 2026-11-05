@@ -278,3 +278,39 @@ TEST(sample_set_swap_fades_without_click) {
     CHECK(rms(L, 26200, 27000) < 1e-4);                  // faded out within ~6 ms
     CHECK(e.stats().activeVoices == 0);                  // the PCM voice ended with the fade
 }
+
+TEST(sfz_velocity_and_key_crossfades) {
+    const std::string dir = dirFor("sfz_xfade_layers");
+    wavSine(dir + "/soft.wav", 440, 1.0);
+    wavSine(dir + "/loud.wav", 660, 1.0);
+    std::vector<std::string> warn;
+    auto e = pcmEngine(dir,
+                       "<region> sample=soft.wav key=60 lovel=1 hivel=100 xfout_lovel=60 xfout_hivel=100\n"
+                       "<region> sample=loud.wav key=60 lovel=60 hivel=127 xfin_lovel=60 xfin_hivel=100\n"
+                       "<region> sample=soft.wav lokey=70 hikey=79 pitch_keycenter=72 xfout_lokey=72 xfout_hikey=76 xf_keycurve=gain\n"
+                       "<region> sample=loud.wav lokey=72 hikey=84 pitch_keycenter=72 xfin_lokey=72 xfin_hikey=76 xf_keycurve=gain\n",
+                       &warn);
+    CHECK(warn.empty());
+    auto levels = [&](int key, float vel, double f1, double f2) {
+        RenderJob job;
+        job.seconds = 0.4;
+        job.events.push_back({0.0, Event::noteOn(1, key, vel)});
+        const auto L = render(*e, job);
+        return std::make_pair(tone(L, f1, 0.05, 0.3), tone(L, f2, 0.05, 0.3));
+    };
+    const auto lo = levels(60, 40 / 127.0f, 440, 660), mid = levels(60, 80 / 127.0f, 440, 660), hi = levels(60, 120 / 127.0f, 440, 660);
+    INFO("velocity 40: %.3f / %.3f, 80: %.3f / %.3f, 120: %.3f / %.3f (soft / loud)\n", lo.first, lo.second, mid.first,
+         mid.second, hi.first, hi.second);
+    CHECK(lo.first > 0.01 && lo.second < 1e-3 * lo.first);   // below the crossfade: soft only
+    CHECK(hi.second > 0.05 && hi.first < 1e-3 * hi.second);  // above: loud only
+    CHECK_NEAR(mid.first / mid.second, 1.0, 0.05);           // half way, equal power: both at 1/sqrt(2)
+    // key crossfade, linear ("gain"); both samples are recorded at key 72 (440 / 660 Hz)
+    auto at = [](double f, int semis) { return f * std::pow(2.0, semis / 12.0); };
+    const auto k72 = levels(72, 1.0f, 440.0, 660.0), k74 = levels(74, 1.0f, at(440, 2), at(660, 2)),
+               k77 = levels(77, 1.0f, at(440, 5), at(660, 5));
+    INFO("key 72: %.3f / %.3f, 74: %.3f / %.3f, 77: %.3f / %.3f\n", k72.first, k72.second, k74.first, k74.second, k77.first, k77.second);
+    CHECK(k72.second < 1e-3 * k72.first && k72.first > 0.05);  // loud fades in from 72: silent there
+    CHECK(k77.first < 1e-3 * k77.second && k77.second > 0.05);  // soft has faded out by 76
+    CHECK_NEAR(k74.first / k72.first, 0.5, 0.05);               // linear: half way at 74
+    CHECK_NEAR(k74.second / k77.second, 0.5, 0.05);
+}

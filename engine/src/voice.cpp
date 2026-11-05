@@ -25,7 +25,10 @@ void PcmPlayer::start(const Region* r, int key, float velocity, float startFrac,
     baseRatio_ = std::exp2(((double)(key - r->keycenter) * r->pitchKeytrack / 100.0 + r->transpose) / 12.0 + r->tune / 1200.0);
     const float t = clampf(r->ampVeltrack / 100.0f * velTrackScale, 0.0f, 1.0f);
     const float vg = (1.0f - t) + t * velocity * velocity;
-    const float g = dbToGain(r->volumeDb + gainDb + r->ampKeytrack * (float)(key - r->ampKeycenter)) * vg;
+    float g = dbToGain(r->volumeDb + gainDb + r->ampKeytrack * (float)(key - r->ampKeycenter)) * vg;
+    const int vel127 = std::max(1, std::min(127, (int)std::lround(velocity * 127.0f)));
+    const float xf = r->crossfadeGain(key, vel127);
+    if (xf != 1.0f) g *= xf;
     gainL_ = g * std::min(1.0f, 1.0f - r->pan);
     gainR_ = g * std::min(1.0f, 1.0f + r->pan);
     fade_ = 1.0f;

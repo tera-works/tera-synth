@@ -85,6 +85,13 @@ struct Region {
     float ampKeytrack = 0.0f;        // dB per key
     int ampKeycenter = 60;
     int swLast = -1;                 // keyswitch: region plays only while this switch key is active
+    // crossfades (SFZ xfin_* / xfout_*): gain 0 -> 1 over the "in" range and
+    // 1 -> 0 over the "out" range; equal-power (xf_*curve=power) or linear
+    int xfinLoVel = 0, xfinHiVel = 0, xfoutLoVel = 127, xfoutHiVel = 127;
+    int xfinLoKey = 0, xfinHiKey = 0, xfoutLoKey = 127, xfoutHiKey = 127;
+    bool xfVelPower = true, xfKeyPower = true;
+    // crossfade gain for a note (1 when no crossfade applies)
+    float crossfadeGain(int key, int vel127) const;
 };
 
 // Region lookup context (per note).

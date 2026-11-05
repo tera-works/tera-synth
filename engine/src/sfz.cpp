@@ -30,7 +30,9 @@ const std::set<std::string>& supportedSet() {
         "trigger", "default_path", "note_offset", "octave_offset",
         "delay", "ampeg_delay", "ampeg_hold", "rt_decay", "group", "off_by", "off_mode", "seq_length", "seq_position",
         "loop_crossfade", "fil_type", "filtype", "cutoff", "resonance", "fil_keytrack", "fil_keycenter", "fil_veltrack",
-        "amp_keytrack", "amp_keycenter", "sw_lokey", "sw_hikey", "sw_last", "sw_default"};
+        "amp_keytrack", "amp_keycenter", "sw_lokey", "sw_hikey", "sw_last", "sw_default",
+        "xfin_lovel", "xfin_hivel", "xfout_lovel", "xfout_hivel", "xfin_lokey", "xfin_hikey", "xfout_lokey", "xfout_hikey",
+        "xf_velcurve", "xf_keycurve"};
     return s;
 }
 
@@ -433,6 +435,16 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
             if (r.cutoff <= 0.0f) r.filter = RegionFilter::None;
         }
         num("amp_keytrack", r.ampKeytrack);
+        if (auto v = get("xfin_lovel")) r.xfinLoVel = std::atoi(v->c_str());
+        if (auto v = get("xfin_hivel")) r.xfinHiVel = std::atoi(v->c_str());
+        if (auto v = get("xfout_lovel")) r.xfoutLoVel = std::atoi(v->c_str());
+        if (auto v = get("xfout_hivel")) r.xfoutHiVel = std::atoi(v->c_str());
+        note("xfin_lokey", r.xfinLoKey);
+        note("xfin_hikey", r.xfinHiKey);
+        note("xfout_lokey", r.xfoutLoKey);
+        note("xfout_hikey", r.xfoutHiKey);
+        if (auto v = get("xf_velcurve")) r.xfVelPower = *v != "gain";
+        if (auto v = get("xf_keycurve")) r.xfKeyPower = *v != "gain";
         note("amp_keycenter", r.ampKeycenter);
         if (get("sw_last")) note("sw_last", r.swLast);
         {

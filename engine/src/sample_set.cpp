@@ -1,6 +1,7 @@
 #include "hsynth/sample_set.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 
 #include "hsynth/dsp/resample.h"
@@ -46,6 +47,26 @@ void SampleSet::prepareMips() {
         const double step = std::exp2((maxSemis + 2.0) / 12.0) * s->sampleRate / 44100.0;
         s->buildMips(step > 4.0 ? 2 : step > 2.0 ? 1 : 0);
     }
+}
+
+namespace {
+// position in a crossfade range: 0 below lo, 1 above hi (lo >= hi: no fade)
+float xfPos(int v, int lo, int hi) {
+    if (hi <= lo) return 1.0f;
+    if (v <= lo) return 0.0f;
+    if (v >= hi) return 1.0f;
+    return (float)(v - lo) / (float)(hi - lo);
+}
+float xfCurve(float t, bool power) { return power ? std::sqrt(t) : t; }
+}  // namespace
+
+float Region::crossfadeGain(int key, int vel) const {
+    float g = 1.0f;
+    if (xfinHiVel > xfinLoVel) g *= xfCurve(xfPos(vel, xfinLoVel, xfinHiVel), xfVelPower);
+    if (xfoutHiVel > xfoutLoVel) g *= xfCurve(1.0f - xfPos(vel, xfoutLoVel, xfoutHiVel), xfVelPower);
+    if (xfinHiKey > xfinLoKey) g *= xfCurve(xfPos(key, xfinLoKey, xfinHiKey), xfKeyPower);
+    if (xfoutHiKey > xfoutLoKey) g *= xfCurve(1.0f - xfPos(key, xfoutLoKey, xfoutHiKey), xfKeyPower);
+    return g;
 }
 
 int SampleSet::findRegions(const RegionQuery& q, const Region** out, int max) const {
