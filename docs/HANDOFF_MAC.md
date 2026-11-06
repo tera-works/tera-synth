@@ -57,7 +57,7 @@ xcrun devicectl device install app --device <ID> build/Release-iphoneos/HSynth.a
 |---|---|
 | `library/user/` | サンプル。assets リポジトリの `library/user` の中身（`gm/`、`soniccell/`）をそのまま。プリセットが `user/gm/...` のように参照する |
 | `presets/user/` | assets リポジトリの `presets/user/*.json`（「GM ...」「SC ...」のプリセット） |
-| `midi/` | MIDI ファイル（.mid）。Player の「Open Songs」からも取り込める |
+| `midi/` | MIDI ファイル（.mid）。assets リポジトリの `midi/` の中身。Player の「Open Songs」からも取り込める |
 
 ```bash
 git lfs install
@@ -66,8 +66,9 @@ git clone https://github.com/tera-works/tera-synth-assets ../tera-synth-assets  
 Finder の HSynth のファイル欄に、`../tera-synth-assets/library/user` を `library` の中へ、`presets/user` を `presets` の中へドラッグする。
 `library/factory` はアプリ内蔵の音源へのリンクなので、消したり上書きしたりしない（起動のたびに作り直される）。
 
-MIDI ファイルは Windows PC の `C:\WorkSpace\MIDI\原本`（43 曲、4 MB）にしかありません。Mac への移し方はユーザーに確認すること
-（GitHub の公開リポジトリには絶対に置かない）。
+MIDI ファイル（43 曲、4 MB）は非公開の assets リポジトリの `midi/` にあります（2026-11-06 にユーザーの指示で追加）。
+`../tera-synth-assets/midi/*.mid` を HSynth の `midi` フォルダへドラッグすれば Player に出ます。
+公開リポジトリやアプリ本体には絶対に入れないこと。
 
 Player（iOS）: 曲を選ぶと、そのチャンネルの GM 音色を全プリセット（内蔵 + `presets/user`）から選んで 16 パートに読み込む
 （Android と同じ `gm_bank.h`）。SonicCell / GM のプリセットがあればそれが優先される。

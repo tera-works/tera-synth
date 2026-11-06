@@ -12,7 +12,8 @@ Layout in the assets repository (mirrors desktop/data, so presets resolve unchan
   library/user/soniccell/...    Roland SonicCell captures + catalog.csv
   presets/user/GM *.json, SC *.json
   soundfonts/MuseScore_General.sf2 (+ license)
-Test material only - never distribute (Roland sound data).
+  midi/*.mid                     the user's MIDI files (C:\WorkSpace\MIDI\原本)
+Test material only - never distribute (Roland sound data, the user's MIDI files).
 """
 import argparse
 import json
@@ -24,6 +25,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SYNTH = os.path.normpath(os.path.join(HERE, '..', '..'))
 DATA = os.path.join(SYNTH, 'desktop', 'data')
+MIDI = r'C:\WorkSpace\MIDI\原本'
 
 
 def copy_if_changed(src, dst):
@@ -71,6 +73,10 @@ def sync(assets):
             continue
         if a and os.path.exists(os.path.join(assets, 'library', a.replace('/', os.sep))):
             copied += copy_if_changed(os.path.join(pdir, f), os.path.join(assets, 'presets', 'user', f))
+    if os.path.isdir(MIDI):
+        for f in sorted(os.listdir(MIDI)):
+            if f.lower().endswith(('.mid', '.midi')):
+                copied += copy_if_changed(os.path.join(MIDI, f), os.path.join(assets, 'midi', f))
     sf = os.path.join(SYNTH, 'testdata', 'soundfonts')
     for f in ('MuseScore_General.sf2', 'MuseScore_General_License.md'):
         if os.path.exists(os.path.join(sf, f)):
