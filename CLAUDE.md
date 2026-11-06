@@ -43,7 +43,7 @@ macOS 版と iOS アプリは `docs/APPLE.md` を参照。
 `github.com/tera-works/tera-synth-assets`（Git LFS）は Windows PC の `desktop/data` の写し:
 `library/user/gm/`（GM テスト音源 15 種）、`library/user/soniccell/`（Roland SonicCell の録音。PC で録音が進むにつれて
 増える。`catalog.csv` に各音色の説明）、`presets/user/`（「GM ...」「SC ...」のプリセット。サンプルのパスは `library/`
-からの相対パス）、`soundfonts/MuseScore_General.sf2`。このリポジトリの隣に置いて使う:
+からの相対パス）、`soundfonts/MuseScore_General.sf2`、`midi/`（ユーザーの MIDI ファイル 43 曲。Player 用、配布しない）。このリポジトリの隣に置いて使う:
 ```bash
 git lfs install
 git clone https://github.com/tera-works/tera-synth-assets ../tera-synth-assets   # 数百 MB、増え続ける
