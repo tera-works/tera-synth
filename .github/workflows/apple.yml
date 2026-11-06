@@ -2,9 +2,18 @@
 # Apple compile check). Engine tests run on macOS too.
 name: apple
 
+# macOS minutes count 10x on private repositories: run only when code the
+# Apple builds use changes (or by hand from the Actions tab).
 on:
   push:
+    paths: &apple_paths
+      - "engine/**"
+      - "desktop/**"
+      - "ios/**"
+      - "third_party/**"
+      - ".github/workflows/apple.yml"
   pull_request:
+    paths: *apple_paths
   workflow_dispatch:
 
 jobs:
