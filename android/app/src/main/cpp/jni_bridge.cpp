@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "audio_engine.h"
+#include "hsynth/dsp/fm.h"
 #include "hsynth/engine.h"
 #include "hsynth/fx/ir_load.h"
 #include "hsynth/gm_bank.h"
@@ -422,3 +423,16 @@ JNI(jintArray, nativeNoteMasks)(JNIEnv* env, jobject) {
 }
 
 JNI(void, nativeSetPartMix)(JNIEnv*, jobject, jint part, jint id, jfloat value) { gEngine->setPartMix(part, id, value); }
+
+// FM algorithm for the diagram: {numOps, carriers mask, feedback op, modulator mask of op 0..7}.
+JNI(jintArray, nativeFmAlgorithm)(JNIEnv* env, jobject, jint index) {
+    const FmAlgorithm& a = fmAlgorithm(std::max(0, std::min(kNumFmAlgorithms - 1, (int)index)));
+    jint v[3 + P::kFmOps];
+    v[0] = a.numOps;
+    v[1] = a.carriers;
+    v[2] = a.feedbackOp;
+    for (int i = 0; i < P::kFmOps; ++i) v[3 + i] = a.modulators[i];
+    jintArray r = env->NewIntArray(3 + P::kFmOps);
+    env->SetIntArrayRegion(r, 0, 3 + P::kFmOps, v);
+    return r;
+}

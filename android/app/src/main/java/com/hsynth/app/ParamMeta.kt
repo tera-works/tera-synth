@@ -79,6 +79,7 @@ object Params {
     private val listeners = mutableListOf<() -> Unit>()
 
     fun id(name: String): Int = byName[name]?.id ?: -1
+    fun metaOf(name: String): ParamMeta? = byName[name]
     fun get(name: String): Float = byName[name]?.let { NativeEngine.nativeGetParam(it.id) } ?: 0f
     fun set(name: String, v: Float) { byName[name]?.let { NativeEngine.setParam(it.id, v) } }
 

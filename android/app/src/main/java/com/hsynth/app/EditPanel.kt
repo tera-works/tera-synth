@@ -24,6 +24,9 @@ class EditPanel(private val a: MainActivity) {
     private var page = 0
     private var layer = 0
     private val controls = mutableListOf<ParamControl>()
+    private val graphs = mutableListOf<View>()
+    private var modMatrix: ModMatrixView? = null
+    private var fmOp = 0
 
     private data class Page(val title: String, val groups: List<String>)
 
@@ -74,11 +77,16 @@ class EditPanel(private val a: MainActivity) {
     }
 
     /** A framed panel with the controls of the given parameters. */
-    private fun panel(title: String, metas: List<ParamMeta>, tr: Boolean = true, extra: View? = null): Hw.Section {
+    private fun panel(title: String, metas: List<ParamMeta>, tr: Boolean = true, extra: View? = null, top: View? = null): Hw.Section {
         val s = Hw.Section(a, title, tr)
+        if (top != null) s.body.addView(top, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = Ui.dp(a, 8) })
         val flow = FlowLayout(a)
         for (m in metas) {
-            val c = ParamControl(a, m) { pc -> if (pc.meta.name.endsWith(".type")) ui { buildPage() } }
+            val c = ParamControl(a, m) { pc ->
+                if (pc.meta.name.endsWith(".type")) ui { buildPage() }
+                graphs.forEach { it.invalidate() }
+                if (pc.meta.name.endsWith(".fm.algo")) ui { buildPage() }
+            }
             controls += c
             flow.addView(c.view)
         }
@@ -97,6 +105,8 @@ class EditPanel(private val a: MainActivity) {
         layerButtons.forEachIndexed { i, b -> b.lit = i == layer }
         content.removeAllViews()
         controls.clear()
+        graphs.clear()
+        modMatrix = null
         (layerBox.parent as? android.view.ViewGroup)?.removeView(layerBox)
         if (p.title == "OSC") content.addView(layerBox, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = Ui.dp(a, 8) })
         when (p.title) {
@@ -105,13 +115,41 @@ class EditPanel(private val a: MainActivity) {
             else -> for (g in p.groups) {
                 val metas = group(g)
                 if (metas.isEmpty()) continue
-                val extra = if (g == "Mod Matrix") Ui.text(a, "out += source × via × amount   (via 'none' = 1)", 12f, Ui.DIM) else null
-                panel(g, metas, extra = extra)
+                when (g) {
+                    "Amp Env" -> panel(g, metas, top = graph(EnvGraphView(a, "amp")))
+                    "Mod Env" -> panel(g, metas, top = graph(EnvGraphView(a, "env2")))
+                    "Env 3" -> panel(g, metas, top = graph(EnvGraphView(a, "env3")))
+                    "Filter" -> panel(g, metas, top = graph(FilterCurveView(a)))
+                    "LFO" -> for (n in 1..3) panel("LFO $n", metas.filter { it.name.startsWith("lfo$n.") }, tr = false, top = graph(LfoView(a, n)))
+                    "Sequencer" -> panel(g, metas.filter { !Regex("seq\\.s\\d+\\..*").matches(it.name) }, top = graph(StepSeqView(a)))
+                    "MSEG" -> panel(g, metas.filter { !Regex("mseg\\.p\\d+\\..*").matches(it.name) }, top = graph(MsegView(a)))
+                    "Mod Matrix" -> {
+                        val s = Hw.Section(a, g)
+                        s.body.addView(Ui.text(a, "out += source × via × amount   (via 'none' = 1)", 12f, Ui.DIM),
+                            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = Ui.dp(a, 6) })
+                        val mm = ModMatrixView(a) { graphs.forEach { it.invalidate() } }
+                        modMatrix = mm
+                        s.body.addView(mm, LinearLayout.LayoutParams(-1, -2))
+                        content.addView(s, Hw.sectionLp(a))
+                    }
+                    else -> panel(g, metas)
+                }
             }
         }
     }
 
-    fun refreshValues() = controls.forEach { it.refresh() }
+    fun refreshValues() {
+        controls.forEach { it.refresh() }
+        graphs.forEach { it.invalidate() }
+        modMatrix?.refresh()
+    }
+
+    /** A graph that refreshes the page's knobs after it is dragged. */
+    private fun graph(g: GraphView): GraphView {
+        g.onEdited = { refreshValues() }
+        graphs += g
+        return g
+    }
 
     // ------------------------------------------------------------------ oscillators
 
@@ -127,6 +165,10 @@ class EditPanel(private val a: MainActivity) {
             content.addView(Ui.text(a, L10n.f("%s engine: %s", L10n.t(lname), type), 13f, Ui.DIM, tr = false))
             return
         }
+        if (type.equals("fm", ignoreCase = true)) {
+            buildFm(engine, "abc"[layer])
+            return
+        }
         val d = { v: Int -> Ui.dp(a, v) }
         val extra: View? = when (type.lowercase()) {
             "pcm" -> sampleRow(L10n.f("Samples: %s", NativeEngine.nativeSampleSetName(layer).ifEmpty { L10n.t("(none)") }),
@@ -139,6 +181,32 @@ class EditPanel(private val a: MainActivity) {
         }
         panel(engine, group(engine), extra = extra)
         content.setPadding(d(10), d(8), d(10), d(24))
+    }
+
+    /** FM: algorithm diagram + global controls, then one operator at a time. */
+    private fun buildFm(group: String, l: Char) {
+        val d = { v: Int -> Ui.dp(a, v) }
+        val metas = group(group)
+        val algo = FmAlgoView(a, l)
+        graph(algo)
+        algo.onSelect = { i -> fmOp = i; buildPage() }
+        val numOps = NativeEngine.nativeFmAlgorithm(Params.get("$l.fm.algo").roundToInt())[0]
+        fmOp = fmOp.coerceIn(0, numOps - 1)
+        algo.selected = fmOp
+        panel(group, metas.filter { !it.name.startsWith("$l.fm.op") }, tr = false, top = algo)
+
+        val ops = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+        for (i in 0 until 8) {
+            ops.addView(LedButton(a, "OP ${i + 1}", tr = false).apply {
+                lit = i == fmOp
+                alpha = if (i < numOps) 1f else 0.4f
+                textSize = 13f
+                setOnClickListener { fmOp = i; buildPage() }
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = d(4) })
+        }
+        content.addView(ops, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
+        val prefix = "$l.fm.op${fmOp + 1}"
+        panel("Operator ${fmOp + 1}", metas.filter { it.name.startsWith("$prefix.") }, tr = false, top = graph(EnvGraphView(a, prefix)))
     }
 
     private fun sampleRow(label: String, vararg buttons: Pair<String, () -> Unit>): View {

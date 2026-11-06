@@ -65,6 +65,7 @@ object NativeEngine {
     external fun nativeLooperCommand(cmd: Int)
     external fun nativeLooperStatus(): FloatArray
     external fun nativeFxChain(): IntArray
+    external fun nativeFmAlgorithm(index: Int): IntArray
 
     fun noteOn(id: Int, key: Int, velocity: Float) = nativeNoteOn(id, key, velocity)
     fun noteOff(id: Int, key: Int) = nativeNoteOff(id, key, 0.5f)
