@@ -48,6 +48,30 @@ xcrun devicectl device install app --device <ID> build/Release-iphoneos/HSynth.a
 - USB / Bluetooth MIDI キーボード（CoreMIDI。今は起動時に全ソースを開くだけで、抜き差しの自動検出はない）。
 - CI（GitHub Actions、`.github/workflows/apple.yml`）ではシミュレーター向けビルドは通っているが、**実機でもシミュレーターでも一度も動かしていない**。
 
+## 手持ちの音源と MIDI ファイルを iPhone で使う
+
+アプリの「書類」フォルダ（`Documents`）は、ファイル App と Finder（Mac に iPhone をつなぐ → Finder のサイドバーで iPhone →「ファイル」タブ → HSynth）から見えます。
+音源と MIDI ファイルはここへコピーして使います。**アプリ本体（バンドル）には入れません**（配布しないものなので）。
+
+| 置き場所（HSynth の書類の中） | 入れるもの |
+|---|---|
+| `library/user/` | サンプル。assets リポジトリの `library/user` の中身（`gm/`、`soniccell/`）をそのまま。プリセットが `user/gm/...` のように参照する |
+| `presets/user/` | assets リポジトリの `presets/user/*.json`（「GM ...」「SC ...」のプリセット） |
+| `midi/` | MIDI ファイル（.mid）。Player の「Open Songs」からも取り込める |
+
+```bash
+git lfs install
+git clone https://github.com/tera-works/tera-synth-assets ../tera-synth-assets   # 非公開。GM 285 MB、SonicCell は数 GB で増え続ける
+```
+Finder の HSynth のファイル欄に、`../tera-synth-assets/library/user` を `library` の中へ、`presets/user` を `presets` の中へドラッグする。
+`library/factory` はアプリ内蔵の音源へのリンクなので、消したり上書きしたりしない（起動のたびに作り直される）。
+
+MIDI ファイルは Windows PC の `C:\WorkSpace\MIDI\原本`（43 曲、4 MB）にしかありません。Mac への移し方はユーザーに確認すること
+（GitHub の公開リポジトリには絶対に置かない）。
+
+Player（iOS）: 曲を選ぶと、そのチャンネルの GM 音色を全プリセット（内蔵 + `presets/user`）から選んで 16 パートに読み込む
+（Android と同じ `gm_bank.h`）。SonicCell / GM のプリセットがあればそれが優先される。
+
 ## いまの状態（2026-11-06 時点）
 
 | 対象 | 状態 |
@@ -56,10 +80,10 @@ xcrun devicectl device install app --device <ID> build/Release-iphoneos/HSynth.a
 | Android（`android/`） | Galaxy S23 で動作確認済み。いちばん機能が揃っている（下記）。 |
 | Windows デスクトップ（`desktop/`） | ImGui の開発用ホスト。動作確認済み。 |
 | macOS デスクトップ | `desktop/` の CMake で HSynth.app が作れる（CI でビルド成功）。**実機未確認**。 |
-| iOS（`ios/`） | SwiftUI の初版。CI でシミュレーター向けビルド成功。**未実行**。 |
+| iOS（`ios/`） | SwiftUI の初版（Play / Edit / Player / Library）。iPhone は横画面固定（iPad は回転可）。CI でシミュレーター向けビルド成功。**未実行**。 |
 
 Android アプリにあって iOS にまだ無いもの（移植の参考は `android/app/src/main/java/com/hsynth/app/`）:
-- 画面: Multi（16 パート・スプリット / レイヤー・シーン）、Player（MIDI ファイル再生、`PlayerPanel.kt` / `ChannelTableView.kt`）、System（設定・メッセージ）。
+- 画面: Multi（16 パート・スプリット / レイヤー・シーン）、System（設定・メッセージ）。Player は iOS にも入った（`PlayerScreen.swift`。チャンネル表の音量ドラッグ、パン等のメーターは未対応）。
 - エディット: グラフ（`Graphs.kt`: エンベロープ、フィルター特性、LFO、FM アルゴリズム図、ステップシーケンサーのマス目、MSEG、モジュレーションマトリクス表）、FM のオペレーター別ページ、エフェクトチェーンの編集画面。
 - MIDI ラーン / MIDI 出力、アンドゥ / リドゥ / コンペア（`History.kt`）、録音（WAV）、オーディオ入力（ボコーダー / ルーパー）、サンプル（WAV / SFZ）の読み込み、プリセットのお気に入り。
 - 見た目: 実機シンセ風（LED リング付きノブ、LED + スライドスイッチ、液晶、Rajdhani / Share Tech Mono フォント）。iOS は `Controls.swift` に同じ配色の簡易版がある。

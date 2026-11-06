@@ -3,6 +3,7 @@ import SwiftUI
 /// Shared engine state for the views.
 final class SynthModel: ObservableObject {
     let engine: HSynthEngine
+    let player: PlayerModel
     @Published var presetName = "Init"
     @Published var presetIndex = -1
     @Published var voices = 0
@@ -16,6 +17,7 @@ final class SynthModel: ObservableObject {
         let factory = Bundle.main.resourcePath ?? ""
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
         engine = HSynthEngine(factoryDir: factory, userDir: docs)
+        player = PlayerModel(engine: engine)
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.voices = Int(self.engine.activeVoices)
@@ -29,6 +31,7 @@ final class SynthModel: ObservableObject {
     func stop() { engine.stopAudio() }
 
     func load(preset i: Int) {
+        engine.songPlay(false)  // a preset replaces the song's sounds
         guard engine.loadPreset(i) else { return }
         presetIndex = i
         presetName = engine.currentPresetName

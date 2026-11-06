@@ -68,6 +68,9 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // phones are played in landscape only; tablets (600 dp and wider) may rotate
+        if (resources.configuration.smallestScreenWidthDp < 600)
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("hsynth", Context.MODE_PRIVATE)
         Hw.init(this)

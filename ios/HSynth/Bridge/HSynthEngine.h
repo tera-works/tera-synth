@@ -46,6 +46,37 @@ NS_ASSUME_NONNULL_BEGIN
 - (float)paramDefault:(int)param;
 - (NSString*)formatParam:(int)param;
 
+// songs (Standard MIDI Files): GM sounds from every preset (factory + user, e.g. GM test / SonicCell)
+/// Loads the file and the sounds of its channels into the 16 parts (multi mode). nil on success, else the error.
+- (nullable NSString*)loadSong:(NSString*)path;
+@property(nonatomic, readonly) NSString* songName;
+@property(nonatomic, readonly) double songLength;
+@property(nonatomic, readonly) double songPosition;
+@property(nonatomic, readonly) BOOL songPlaying;
+/// Counts natural song ends (the player advances the playlist when it changes).
+@property(nonatomic, readonly) NSInteger songEndCount;
+- (void)songPlay:(BOOL)on;
+- (void)songSeek:(double)seconds;
+/// Tempo at a time (tempo map of the loaded song).
+- (double)songTempoAt:(double)seconds;
+/// Channel (= part) 0..15 used by the song; preset and GM names of its sound.
+- (BOOL)songChannelUsed:(int)ch;
+- (NSString*)songChannelPreset:(int)ch;
+- (NSString*)songChannelGm:(int)ch;
+/// Per part meters, packed: [level, volume, expression, pan, bend, mod, reverb, chorus, voices] x 16 (level resets on read).
+- (NSArray<NSNumber*>*)partMeters;
+/// Keys sounding per part: 16 x 4 words of 32 bits.
+- (NSArray<NSNumber*>*)noteMasks;
+/// Mix of a part: 0 volume, 1 pan, 2 mute.
+- (void)setPartMix:(int)part id:(int)mixId value:(float)value;
+- (float)partMix:(int)part id:(int)mixId;
+
+// folders
+/// Documents/library: user samples ("gm", "soniccell", ...); "factory" links to the bundle
+@property(nonatomic, readonly) NSString* libraryDir;
+/// Documents/midi
+@property(nonatomic, readonly) NSString* midiDir;
+
 // status
 @property(nonatomic, readonly) int activeVoices;
 @property(nonatomic, readonly) float cpuLoad;

@@ -10,7 +10,8 @@ struct ContentView: View {
             Group {
                 switch tab {
                 case 1: EditScreen()
-                case 2: LibraryScreen(tab: $tab)
+                case 2: PlayerScreen(player: model.player)
+                case 3: LibraryScreen(tab: $tab)
                 default: PlayScreen()
                 }
             }
@@ -33,7 +34,7 @@ struct ContentView: View {
             .frame(maxWidth: 260, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
             Spacer(minLength: 4)
-            ForEach(Array(["Play", "Edit", "Library"].enumerated()), id: \.offset) { i, t in
+            ForEach(Array(["Play", "Edit", "Player", "Library"].enumerated()), id: \.offset) { i, t in
                 HwButton(title: t, lit: tab == i) { tab = i }
             }
         }

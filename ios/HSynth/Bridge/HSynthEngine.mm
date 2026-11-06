@@ -9,6 +9,8 @@
 #include "audio_out.h"
 #include "hsynth/engine.h"
 #include "hsynth/fileio.h"
+#include "hsynth/gm_bank.h"
+#include "hsynth/smf.h"
 #include "hsynth/host_utils.h"
 #include "hsynth/params.h"
 #include "hsynth/preset.h"
@@ -44,14 +46,27 @@ float toNormalized(const ParamInfo& p, float v) {
     NSInteger _current;
     NSString* _currentName;
     BOOL _input;
+    std::string _libraryDir;              // Documents/library (factory -> bundle link + user samples)
+    std::string _songLoaded[kNumParts];   // preset file per part (no reload between songs)
+    std::vector<SongPart> _songParts;
+    std::vector<std::pair<double, double>> _tempos;
+    NSString* _songName;
 }
 
 - (instancetype)initWithFactoryDir:(NSString*)factoryDir userDir:(NSString*)userDir {
     if ((self = [super init])) {
         _factoryDir = str(factoryDir);
         _userDir = str(userDir);
-        [[NSFileManager defaultManager] createDirectoryAtPath:[userDir stringByAppendingPathComponent:@"presets"]
-                                  withIntermediateDirectories:YES attributes:nil error:nil];
+        NSFileManager* fm = [NSFileManager defaultManager];
+        for (NSString* d in @[@"presets", @"library", @"midi"])
+            [fm createDirectoryAtPath:[userDir stringByAppendingPathComponent:d] withIntermediateDirectories:YES attributes:nil error:nil];
+        // One library root for every preset: Documents/library/factory points into the app bundle (its path
+        // changes with each install, so the link is renewed at start); the user's samples sit next to it.
+        _libraryDir = _userDir + "/library";
+        NSString* link = ns(_libraryDir + "/factory");
+        [fm removeItemAtPath:link error:nil];
+        [fm createSymbolicLinkAtPath:link withDestinationPath:ns(_factoryDir + "/library/factory") error:nil];
+        _songName = @"";
         _engine = std::make_unique<Engine>();
         _engine->prepare(48000.0f);
         _engine->setMaxVoices(128);
@@ -149,7 +164,9 @@ float toNormalized(const ParamInfo& p, float v) {
         return NO;
     }
     std::vector<std::string> warnings;
-    applyPreset(*_engine, p, _factoryDir + "/library", warnings);
+    applyPreset(*_engine, p, _libraryDir, warnings);
+    _engine->setMultiTimbral(false);  // a single preset: leave the song's multi mode
+    _midi->setMultiTimbral(false);
     _engine->collectGarbage();
     _current = index;
     _currentName = ns(p.name);
@@ -157,7 +174,7 @@ float toNormalized(const ParamInfo& p, float v) {
 }
 
 - (BOOL)savePresetNamed:(NSString*)name {
-    Preset p = capturePreset(*_engine, str(name), _factoryDir + "/library");
+    Preset p = capturePreset(*_engine, str(name), _libraryDir);
     p.category = "User";
     p.author = "user";
     std::string safe;
@@ -217,6 +234,82 @@ float toNormalized(const ParamInfo& p, float v) {
     }
     return [ns(buf) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 }
+
+// ---------------------------------------------------------------- songs
+
+- (NSString*)libraryDir { return ns(_libraryDir); }
+- (NSString*)midiDir { return ns(_userDir + "/midi"); }
+
+- (nullable NSString*)loadSong:(NSString*)path {
+    auto song = std::make_unique<Song>();
+    std::string err;
+    if (!loadSmf(str(path), *song, err)) return ns(err);
+    [self rescanPresets];      // samples / presets copied in since the last scan
+    GmBank bank;
+    bank.build(_index.all());  // factory + user presets (GM test, SonicCell, ...)
+    _engine->songPlay(false);
+    std::vector<std::string> report;
+    _songParts.clear();
+    prepareSong(*_engine, *song, bank, _libraryDir, _songLoaded, report, &_songParts);
+    _midi->setMultiTimbral(true);
+    _tempos.clear();
+    for (const auto& t : song->tempos) _tempos.push_back({t.time, t.bpm});
+    if (_tempos.empty()) _tempos.push_back({0.0, song->initialTempo});
+    _songName = ns(song->name);
+    _engine->setSong(std::move(song));
+    _engine->songSeek(0.0);
+    return nil;
+}
+- (NSString*)songName { return _songName; }
+- (double)songLength { return _engine->songLength(); }
+- (double)songPosition { return _engine->songPosition(); }
+- (BOOL)songPlaying { return _engine->songPlaying(); }
+- (NSInteger)songEndCount { return (NSInteger)_engine->songEndCount(); }
+- (void)songPlay:(BOOL)on { _engine->songPlay(on); }
+- (void)songSeek:(double)seconds { _engine->songSeek(seconds); }
+- (double)songTempoAt:(double)t {
+    double b = _tempos.empty() ? 120.0 : _tempos.front().second;
+    for (const auto& x : _tempos) {
+        if (x.first > t) break;
+        b = x.second;
+    }
+    return b;
+}
+- (const SongPart*)songPart:(int)ch {
+    for (const auto& p : _songParts)
+        if (p.channel == ch) return &p;
+    return nullptr;
+}
+- (BOOL)songChannelUsed:(int)ch { return [self songPart:ch] != nullptr; }
+- (NSString*)songChannelPreset:(int)ch {
+    const SongPart* p = [self songPart:ch];
+    return p ? ns(p->presetName) : @"";
+}
+- (NSString*)songChannelGm:(int)ch {
+    const SongPart* p = [self songPart:ch];
+    return p ? (p->drum ? @"Drums" : ns(p->gmName)) : @"";
+}
+- (NSArray<NSNumber*>*)partMeters {
+    Engine::PartMeter m[kNumParts];
+    _engine->partMeters(m);
+    NSMutableArray* a = [NSMutableArray arrayWithCapacity:kNumParts * 9];
+    for (int k = 0; k < kNumParts; ++k) {
+        const float v[9] = {m[k].level, m[k].volume, m[k].expression, m[k].pan, m[k].bend,
+                            m[k].mod, m[k].reverb, m[k].chorus, (float)m[k].voices};
+        for (float x : v) [a addObject:@(x)];
+    }
+    return a;
+}
+- (NSArray<NSNumber*>*)noteMasks {
+    Engine::PartMeter m[kNumParts];
+    _engine->partMeters(m);
+    NSMutableArray* a = [NSMutableArray arrayWithCapacity:kNumParts * 4];
+    for (int k = 0; k < kNumParts; ++k)
+        for (int w = 0; w < 4; ++w) [a addObject:@(m[k].notes[w])];
+    return a;
+}
+- (void)setPartMix:(int)part id:(int)mixId value:(float)value { _engine->setPartMix(part, mixId, value); }
+- (float)partMix:(int)part id:(int)mixId { return _engine->getPartMix(part, mixId); }
 
 // ---------------------------------------------------------------- status
 

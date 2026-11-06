@@ -61,6 +61,10 @@ targets:
         UIBackgroundModes: [audio]
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown]
         NSMicrophoneUsageDescription: "The microphone feeds the vocoder and the looper."
+        # Documents (library / presets / midi) is visible in the Files app and in Finder (iPhone > Files),
+        # so the user's samples and MIDI files are copied in there and never bundled
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
