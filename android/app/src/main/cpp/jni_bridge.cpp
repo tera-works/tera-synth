@@ -13,6 +13,9 @@
 #include "audio_engine.h"
 #include "hsynth/engine.h"
 #include "hsynth/fx/ir_load.h"
+#include "hsynth/gm_bank.h"
+#include "hsynth/preset_index.h"
+#include "hsynth/smf.h"
 #include "hsynth/host_utils.h"
 #include "hsynth/json.h"
 #include "hsynth/midi.h"
@@ -62,6 +65,7 @@ JNI(void, nativeCreate)(JNIEnv*, jobject) {
     if (gEngine) return;
     gEngine = std::make_unique<Engine>();
     gEngine->prepare(48000.0f);
+    gEngine->setRenderThreads(0);  // auto: voices spread over about half the cores
     gAudio = std::make_unique<AudioEngine>(*gEngine);
 }
 
@@ -130,6 +134,8 @@ JNI(jfloatArray, nativeGetAllParams)(JNIEnv* env, jobject) {
 
 JNI(jstring, nativeParamMetadata)(JNIEnv* env, jobject) { return jstr(env, paramMetadataJson()); }
 
+void songPartForgotten(int part);
+
 JNI(jstring, nativeLoadPreset)(JNIEnv* env, jobject, jstring path, jstring libRoot) {
     Json r = Json::object();
     Preset p;
@@ -141,6 +147,7 @@ JNI(jstring, nativeLoadPreset)(JNIEnv* env, jobject, jstring path, jstring libRo
     }
     std::vector<std::string> warnings;
     applyPreset(*gEngine, p, str(env, libRoot), warnings);
+    songPartForgotten(0);  // part 1 no longer holds the song's sound
     r.set("ok", true);
     r.set("name", p.name);
     r.set("category", p.category);
@@ -236,6 +243,15 @@ JNI(jfloatArray, nativeGetStats)(JNIEnv* env, jobject) {
     return arr;
 }
 
+// Slowest block since the last peak reset, per phase (see Engine::peakProfile).
+JNI(jfloatArray, nativePeakProfile)(JNIEnv* env, jobject) {
+    float v[Engine::kProfPhases];
+    gEngine->peakProfile(v);
+    jfloatArray a = env->NewFloatArray(Engine::kProfPhases);
+    env->SetFloatArrayRegion(a, 0, Engine::kProfPhases, v);
+    return a;
+}
+
 JNI(void, nativeResetPeaks)(JNIEnv*, jobject) {
     gEngine->resetPeakStats();
     if (gAudio) gAudio->resetPeaks();
@@ -280,3 +296,129 @@ JNI(jintArray, nativeFxChain)(JNIEnv* env, jobject) {
     env->SetIntArrayRegion(a, 0, n, chain);
     return a;
 }
+
+// ------------------------------------------------------------ songs (MIDI files)
+
+namespace {
+std::mutex gSongMutex;
+std::string gSongLoaded[kNumParts];  // preset file per part (skips reloading between songs)
+}  // namespace
+
+void songPartForgotten(int part) {
+    std::lock_guard<std::mutex> lock(gSongMutex);
+    if (part >= 0 && part < kNumParts) gSongLoaded[part].clear();
+}
+
+// Loads a Standard MIDI File, picks GM sounds from the preset folders
+// (";"-separated) and loads them into the parts. Blocking: call from the
+// loader thread. Returns JSON {ok, name, length, report[] | error}.
+JNI(jstring, nativeSongLoad)(JNIEnv* env, jobject, jstring path, jstring libRoot, jstring presetDirs) {
+    std::lock_guard<std::mutex> lock(gSongMutex);
+    Json r = Json::object();
+    auto song = std::make_unique<Song>();
+    std::string err;
+    if (!loadSmf(str(env, path), *song, err)) {
+        r.set("ok", false);
+        r.set("error", err);
+        return jstr(env, r.dump(0));
+    }
+    std::vector<std::pair<std::string, bool>> folders;
+    const std::string dirs = str(env, presetDirs);
+    for (size_t a = 0; a <= dirs.size();) {
+        size_t b = dirs.find(';', a);
+        if (b == std::string::npos) b = dirs.size();
+        if (b > a) folders.push_back({dirs.substr(a, b - a), false});
+        a = b + 1;
+    }
+    PresetIndex idx;
+    idx.setFolders(folders);
+    idx.rescan();
+    GmBank bank;
+    bank.build(idx.all());
+    gEngine->songPlay(false);
+    std::vector<std::string> report;
+    std::vector<SongPart> parts;
+    prepareSong(*gEngine, *song, bank, str(env, libRoot), gSongLoaded, report, &parts);
+    gMidi.setMultiTimbral(true);
+    r.set("ok", true);
+    r.set("name", song->name);
+    r.set("length", song->length);
+    r.set("tempo", song->initialTempo);
+    r.set("report", warningsJson(report));
+    Json ch = Json::array();
+    for (const SongPart& p : parts) {
+        Json o = Json::object();
+        o.set("ch", p.channel);
+        o.set("drum", p.drum);
+        o.set("gm", p.gmName);
+        o.set("preset", p.presetName);
+        ch.push(o);
+    }
+    r.set("channels", ch);
+    Json tempos = Json::array();
+    for (const auto& t : song->tempos) {
+        Json o = Json::array();
+        o.push(t.time);
+        o.push(t.bpm);
+        tempos.push(o);
+    }
+    r.set("tempos", tempos);
+    gEngine->setSong(std::move(song));
+    return jstr(env, r.dump(0));
+}
+
+JNI(void, nativeSongPlay)(JNIEnv*, jobject, jboolean on) { gEngine->songPlay(on); }
+JNI(void, nativeSongSeek)(JNIEnv*, jobject, jdouble seconds) { gEngine->songSeek(seconds); }
+// {position s, length s, playing 0/1}
+JNI(jdoubleArray, nativeSongState)(JNIEnv* env, jobject) {
+    const double v[3] = {gEngine->songPosition(), gEngine->songLength(), gEngine->songPlaying() ? 1.0 : 0.0};
+    jdoubleArray a = env->NewDoubleArray(3);
+    env->SetDoubleArrayRegion(a, 0, 3, v);
+    return a;
+}
+
+// Player screen state: {pos, len, playing, endCount, masterVolume} then per
+// part (16 x 12): level, cc volume, expression, pan, bend, mod, reverb,
+// chorus, voices, mix volume, mute, mix pan.
+JNI(jfloatArray, nativePlayerState)(JNIEnv* env, jobject) {
+    static float v[5 + kNumParts * 12];
+    Engine::PartMeter m[kNumParts];
+    gEngine->partMeters(m);
+    v[0] = (float)gEngine->songPosition();
+    v[1] = (float)gEngine->songLength();
+    v[2] = gEngine->songPlaying() ? 1.0f : 0.0f;
+    v[3] = (float)gEngine->songEndCount();
+    v[4] = gEngine->getParam(P::MasterVolume);
+    for (int k = 0; k < kNumParts; ++k) {
+        float* o = v + 5 + k * 12;
+        o[0] = m[k].level;
+        o[1] = m[k].volume;
+        o[2] = m[k].expression;
+        o[3] = m[k].pan;
+        o[4] = m[k].bend;
+        o[5] = m[k].mod;
+        o[6] = m[k].reverb;
+        o[7] = m[k].chorus;
+        o[8] = (float)m[k].voices;
+        o[9] = gEngine->getPartMix(k, Mix::Volume);
+        o[10] = gEngine->getPartMix(k, Mix::Mute);
+        o[11] = gEngine->getPartMix(k, Mix::Pan);
+    }
+    jfloatArray a = env->NewFloatArray(5 + kNumParts * 12);
+    env->SetFloatArrayRegion(a, 0, 5 + kNumParts * 12, v);
+    return a;
+}
+
+// Keys sounding per part: 16 x 4 words (bit k of word k/32).
+JNI(jintArray, nativeNoteMasks)(JNIEnv* env, jobject) {
+    Engine::PartMeter m[kNumParts];
+    gEngine->partMeters(m);  // (the level peaks are read by nativePlayerState first)
+    jint v[kNumParts * 4];
+    for (int k = 0; k < kNumParts; ++k)
+        for (int w = 0; w < 4; ++w) v[k * 4 + w] = (jint)m[k].notes[w];
+    jintArray a = env->NewIntArray(kNumParts * 4);
+    env->SetIntArrayRegion(a, 0, kNumParts * 4, v);
+    return a;
+}
+
+JNI(void, nativeSetPartMix)(JNIEnv*, jobject, jint part, jint id, jfloat value) { gEngine->setPartMix(part, id, value); }

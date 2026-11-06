@@ -56,6 +56,7 @@ void DelayFx::reset() {
     revPos_ = 0;
     tail_ = 0;
     duckG_ = 1;
+    timeInit_ = false;  // the next update jumps to the current time instead of gliding
 }
 void DelayFx::update(const float* p, const FxContext& c) {
     on_ = p[delay::On] > 0.5f;

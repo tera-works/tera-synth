@@ -17,8 +17,10 @@ constexpr float kTwoPi = 2.0f * kPi;
 constexpr int kControlBlock = 16;
 
 // Hard upper bounds. All buffers are allocated for these sizes in prepare().
-constexpr int kMaxVoices = 64;          // user-selectable polyphony limit (16/32/64)
-constexpr int kVoicePoolExtra = 8;      // extra voices used to fade out stolen notes
+constexpr int kMaxVoices = 256;         // upper bound of the user-selectable polyphony
+constexpr int kDefaultVoices = 128;     // default polyphony (flagship-class)
+constexpr int kLowPowerVoices = 64;     // suggested for low-power devices (Quality Low)
+constexpr int kVoicePoolExtra = 16;     // extra voices used to fade out stolen notes
 constexpr int kMaxBlockSize = 1024;     // engine splits larger host buffers
 constexpr int kNumLayers = 3;           // layer slots per voice (A/B/C)
 

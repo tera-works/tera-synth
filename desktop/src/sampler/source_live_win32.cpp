@@ -154,7 +154,7 @@ public:
         return false;
     }
 
-    int restarts() const { return restarts_; }
+    int restarts() const override { return restarts_; }
 
     bool recordOnce(const NoteRequest& req, Recording& out, std::string& error) {
         sleepSec(0.12);

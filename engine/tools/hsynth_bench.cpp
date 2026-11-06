@@ -1,8 +1,11 @@
 // Micro benchmark: CPU cost per voice for each layer type / feature.
-// usage: hsynth_bench [voices=32] [seconds=3]
+// usage: hsynth_bench [voices=32] [seconds=3] [render threads=1, 0 = auto] [name filter]
+// With several render threads, "load" is the wall time of the audio thread
+// (what decides drop-outs), not the total CPU time.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -11,14 +14,20 @@
 
 using namespace hsynth;
 
+static int g_threads = 1;
+static const char* g_filter = nullptr;
+static bool skip(const char* name) { return g_filter && !std::strstr(name, g_filter); }
+
 static double bench(const char* name, int voices, double seconds, const std::function<void(Engine&)>& setup) {
+    if (skip(name)) return 0.0;
     Engine e;
     e.prepare(48000);
-    e.setMaxVoices(64);
+    e.setRenderThreads(g_threads);
+    e.setMaxVoices(kMaxVoices);
     e.setParam(P::AmpSustain, 1.0f);
     e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
     setup(e);
-    for (int i = 0; i < voices; ++i) e.sendEvent(Event::noteOn((uint32_t)i + 1, 36 + i, 0.7f));
+    for (int i = 0; i < voices; ++i) e.sendEvent(Event::noteOn((uint32_t)i + 1, 36 + (i % 64), 0.7f));
     std::vector<float> L(128), R(128);
     e.process(L.data(), R.data(), 128);
     const int blocks = (int)(48000 * seconds / 128);
@@ -34,9 +43,11 @@ static double bench(const char* name, int voices, double seconds, const std::fun
 // Multi-timbral: `parts` parts with `perPart` voices each, one MIDI channel per
 // part, every part with its own copy of the VA saw x2 / LP24 patch.
 static double benchMulti(const char* name, int parts, int perPart, double seconds, bool inserts = false) {
+    if (skip(name)) return 0.0;
     Engine e;
     e.prepare(48000);
-    e.setMaxVoices(64);
+    e.setRenderThreads(g_threads);
+    e.setMaxVoices(kMaxVoices);
     e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
     e.setMultiTimbral(true);
     for (int k = 0; k < parts; ++k) {
@@ -96,7 +107,13 @@ static void pcmLayer(Engine& e, int root) {
 int main(int argc, char** argv) {
     const int voices = argc > 1 ? std::atoi(argv[1]) : 32;
     const double seconds = argc > 2 ? std::atof(argv[2]) : 3.0;
-    std::printf("%d voices, %.1f s audio @48k, block 128\n", voices, seconds);
+    if (argc > 3) g_threads = std::atoi(argv[3]);
+    if (argc > 4) g_filter = argv[4];
+    {
+        Engine probe;
+        probe.setRenderThreads(g_threads);
+        std::printf("%d voices, %.1f s audio @48k, block 128, %d render thread(s)\n", voices, seconds, probe.renderThreads());
+    }
     bench("empty (all layers off)", voices, seconds, [](Engine& e) { e.setParam(P::layer(0, P::LType), 0); });
     bench("VA saw x2, filter off", voices, seconds, [](Engine& e) { e.setParam(P::FilterType, 0); });
     bench("VA saw x2, LP24", voices, seconds, [](Engine&) {});
@@ -126,6 +143,17 @@ int main(int argc, char** argv) {
         e.setParam(P::FilterType, 0);
         e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
         e.setParam(P::layer(0, P::FmAlgo), 8.0f);
+    });
+    bench("FM 8-op (7>1 fan-in), filter off", voices, seconds, [](Engine& e) {
+        e.setParam(P::FilterType, 0);
+        e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
+        e.setParam(P::layer(0, P::FmAlgo), 32.0f);  // "33: 8op (8,7,6,5,4,3,2)>1"
+    });
+    bench("FM 8-op, non-sine waves", voices, seconds, [](Engine& e) {
+        e.setParam(P::FilterType, 0);
+        e.setParam(P::layer(0, P::LType), (float)LayerType::FM);
+        e.setParam(P::layer(0, P::FmAlgo), 16.0f);  // "17: 8op 8>7>6>5>4>3>2>1"
+        for (int op = 0; op < P::kFmOps; ++op) e.setParam(P::fmOp(0, op, P::OpWave), (float)(1 + op % 7));
     });
     bench("VA+FM+VA, LP24", voices, seconds, [](Engine& e) {
         e.setParam(P::layer(1, P::LType), (float)LayerType::FM);
@@ -160,6 +188,40 @@ int main(int argc, char** argv) {
     }
     // multi-timbral: 16 parts x 4 voices vs. the same 64 voices in single-part mode
     bench("single part, 64 voices", 64, seconds, [](Engine&) {});
+    // default polyphony (128): typical and heavy patches
+    std::printf("-- 128 voices (default polyphony)\n");
+    bench("128 x VA saw x2, LP24", 128, seconds, [](Engine&) {});
+    bench("128 x PCM (cubic, at root)", 128, seconds, [](Engine& e) {
+        e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
+        std::vector<float> s(48000 * 40);  // long enough for notes transposed 3 octaves up
+        for (size_t i = 0; i < s.size(); ++i) s[i] = std::sin(6.2831853f * 220.0f * (float)i / 48000.0f) * 0.5f;
+        auto set = std::make_unique<SampleSet>();
+        auto smp = std::make_unique<Sample>();
+        smp->channels = 1;
+        smp->sampleRate = 48000;
+        smp->frames = (int64_t)s.size();
+        smp->data[0] = s;
+        smp->data[0].resize(s.size() + 64, 0.0f);
+        Region r;
+        r.sample = smp.get();
+        r.keycenter = 60;
+        set->samples.push_back(std::move(smp));
+        set->regions.push_back(r);
+        e.setSampleSet(0, std::move(set));
+    });
+    bench("128 x VA+FM+VA, LP24", 128, seconds, [](Engine& e) {
+        e.setParam(P::layer(1, P::LType), (float)LayerType::FM);
+        e.setParam(P::layer(2, P::LType), (float)LayerType::VA);
+    });
+    bench("128 x VA + 12-slot rack (Normal)", 128, seconds, [](Engine& e) {
+        const int chain[12] = {fx::Comp, fx::Drive, fx::Amp, fx::Cab, fx::Peq, fx::Chorus, fx::Phaser, fx::Pitch,
+                               fx::Delay, fx::Reverb, fx::Convo, fx::Limiter};
+        for (int s = 0; s < 12; ++s) {
+            e.setParam(P::fxSlot(s), (float)chain[s]);
+            e.setParam(P::fxp(chain[s], 0), 1.0f);
+        }
+    });
+    benchMulti("multi 16 parts x 8 voices (128)", 16, 8, seconds, true);
     benchMulti("multi 16 parts x 4 voices", 16, 4, seconds);
     benchMulti("multi 16x4 + 2 inserts/part", 16, 4, seconds, true);
     return 0;

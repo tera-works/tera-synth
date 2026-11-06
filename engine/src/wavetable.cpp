@@ -1,4 +1,5 @@
 #include "hsynth/dsp/wavetable.h"
+#include "hsynth/dsp/simd.h"
 
 #include <cmath>
 #include <cstdio>
@@ -335,6 +336,31 @@ inline float readTable(const float* t, int size, float phase) {
     const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
     return ((c3 * f + c2) * f + c1) * f + x0;
 }
+
+// readTable() for four phases at once (four unison voices): the table reads
+// are scalar (no gather on NEON), the Hermite interpolation is vectorised.
+inline simd::f4 readTable4(const float* t, int size, simd::f4 phase) {
+    using namespace simd;
+    const f4 idx = phase * set1((float)size);
+    const i4 ii = truncInt(idx);
+    const f4 f = idx - toFloat(ii);
+    alignas(16) int32_t iv[4];
+    store(iv, ii);
+    const int m = size - 1;
+    alignas(16) float xm1[4], x0[4], x1[4], x2[4];
+    for (int k = 0; k < 4; ++k) {
+        const int i = iv[k] & m;
+        xm1[k] = t[(i - 1) & m];
+        x0[k] = t[i];
+        x1[k] = t[(i + 1) & m];
+        x2[k] = t[(i + 2) & m];
+    }
+    const f4 a = load(xm1), b = load(x0), c = load(x1), d = load(x2);
+    const f4 c1 = set1(0.5f) * (c - a);
+    const f4 c2 = a - set1(2.5f) * b + set1(2.0f) * c - set1(0.5f) * d;
+    const f4 c3 = set1(0.5f) * (d - a) + set1(1.5f) * (b - c);
+    return ((c3 * f + c2) * f + c1) * f + b;
+}
 }  // namespace
 
 bool WtOsc::render(const Wavetable& wt, float pos, float dt, WtWarp warp, float warpAmt, int unison, float detuneCents,
@@ -368,6 +394,50 @@ bool WtOsc::render(const Wavetable& wt, float pos, float dt, WtWarp warp, float 
     std::fill(R, R + n, 0.0f);
     const bool stereo = U > 1 && spread > 0.0f;
     const float norm = 1.0f / std::sqrt((float)U);
+    if (U >= 3) {
+        // unison: four voices per SIMD vector (unused lanes have zero gain)
+        using namespace simd;
+        for (int v0 = 0; v0 < U; v0 += 4) {
+            alignas(16) float ph4[4] = {}, dt4[4] = {}, gl4[4] = {}, gr4[4] = {};
+            for (int j = 0; j < 4 && v0 + j < U; ++j) {
+                const int v = v0 + j;
+                const float off = ((float)v - 0.5f * (float)(U - 1)) / (0.5f * (float)(U - 1));
+                const float pan = off * spread;
+                ph4[j] = phase_[v];
+                dt4[j] = std::min(0.49f, dt * fastExp2(off * detuneCents / 1200.0f));
+                gl4[j] = norm * std::min(1.0f, 1.0f - pan);
+                gr4[j] = norm * std::min(1.0f, 1.0f + pan);
+            }
+            f4 ph = load(ph4);
+            const f4 vdt = load(dt4), gl = load(gl4), gr = load(gr4), one = set1(1.0f);
+            const f4 vw0 = set1(w0), vw1 = set1(w1), vff = set1(ff);
+            for (int i = 0; i < n; ++i) {
+                ph = ph + vdt;
+                ph = subIfGe(ph, ph, one);
+                f4 p = ph;
+                if (warp != WtWarp::None) {
+                    alignas(16) float t[4];
+                    store(t, ph);
+                    for (float& x : t) x = warpPhase(x, warp, warpAmt);
+                    p = load(t);
+                }
+                f4 sv = set1(0.0f);
+                if (w0 > 0.0f) {
+                    const f4 ra = readTable4(a0, sa, p);
+                    sv = vw0 * (ff > 0.0f ? ra + vff * (readTable4(a1, sa, p) - ra) : ra);
+                }
+                if (w1 > 0.0f) {
+                    const f4 rb = readTable4(b0, sb, p);
+                    sv = sv + vw1 * (ff > 0.0f ? rb + vff * (readTable4(b1, sb, p) - rb) : rb);
+                }
+                L[i] += hsum(sv * gl);
+                R[i] += hsum(sv * gr);
+            }
+            store(ph4, ph);
+            for (int j = 0; j < 4 && v0 + j < U; ++j) phase_[v0 + j] = ph4[j];
+        }
+        return stereo;
+    }
     for (int v = 0; v < U; ++v) {
         const float off = U > 1 ? ((float)v - 0.5f * (float)(U - 1)) / (0.5f * (float)(U - 1)) : 0.0f;  // -1..1
         const float vdt = std::min(0.49f, dt * fastExp2(off * detuneCents / 1200.0f));

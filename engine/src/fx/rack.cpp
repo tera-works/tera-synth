@@ -40,7 +40,7 @@ std::unique_ptr<FxBlock> createBlock(int type) {
         case Stutter: return std::make_unique<StutterFx>();
         case Stereo: return std::make_unique<StereoFx>();
         case Vocoder: return std::make_unique<VocoderFx>();
-        default: return nullptr;
+        default: return createExtraBlock(type);
     }
 }
 
@@ -370,6 +370,31 @@ void FxRack::runChain(float* L, float* R, int n) {
 
 void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float* inL, const float* inR) {
     constexpr int kSub = 32;
+    // Idle: skip the effect chain while the input is silent and the output has
+    // been silent for 4 s (reverb / delay tails ended; blocks that make sound
+    // on their own - lo-fi hiss, frozen reverb, looper - never go silent). The
+    // beat keeps running for tempo-synced effects and the sequencers.
+    float inPk = 0.0f;
+    for (int i = 0; i < n; ++i) inPk = std::max(inPk, std::max(std::fabs(L[i]), std::fabs(R[i])));
+    if (inL && inR)
+        for (int i = 0; i < n; ++i) inPk = std::max(inPk, std::max(std::fabs(inL[i]), std::fabs(inR[i])));
+    const bool silentIn = inPk < 1e-7f;
+    if (silentIn && idle_ && looper_.status().state != LooperState::Playing && looper_.status().state != LooperState::Overdubbing) {
+        beat_ += (double)tempo_ / 60.0 * (double)n / (double)sr_;
+        env_ = 0.0f;
+        held_ = clampf(held_ - (float)n / (0.02f * sr_), 0.0f, 1.0f);
+        return;
+    }
+    if (idle_) {
+        // waking up: every tail is silent, so start the chain from a clean
+        // state (time glides / LFOs would otherwise resume from where they
+        // stopped, e.g. a tempo-synced delay after the tempo changed)
+        for (int i = 0; i < chainLen_; ++i) {
+            blocks_[chain_[i]]->reset();
+            dirty_[chain_[i]] = true;
+        }
+        idle_ = false;
+    }
     const float envRel = std::exp(-(float)kSub / (0.15f * sr_));
     const float heldStep = (float)kSub / (0.02f * sr_);
     for (int off = 0; off < n; off += kSub) {
@@ -383,6 +408,7 @@ void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float*
         env_ = e > env_ ? e : e + (env_ - e) * envRel;
         held_ = clampf(held_ + (g.notesHeld ? heldStep : -heldStep), 0.0f, 1.0f);
         ctx_.notesHeld = g.notesHeld;
+        ctx_.sustain = g.sustain;
         ctx_.beat = beat_;
         ctx_.inL = inL ? inL + off : nullptr;
         ctx_.inR = inR ? inR + off : nullptr;
@@ -396,6 +422,16 @@ void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float*
         beat_ += (double)tempo_ / 60.0 * (double)m / (double)sr_;
     }
     looper_.process(L, R, n, looperLevel_);
+    float outPk = 0.0f;
+    for (int i = 0; i < n; ++i) outPk = std::max(outPk, std::max(std::fabs(L[i]), std::fabs(R[i])));
+    if (silentIn && outPk < 1e-7f) {
+        silentFrames_ += n;
+        // longer than any gap a tail can have before it sounds again (delay /
+        // multi-tap up to 2 s, granular reaching ~1.5 s into the past)
+        if (silentFrames_ > (int64_t)(4.0f * sr_)) idle_ = true;
+    } else {
+        silentFrames_ = 0;
+    }
 }
 
 }  // namespace fx

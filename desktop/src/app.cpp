@@ -75,6 +75,9 @@ const std::vector<EditPage> kPages = {
     {"FX", false, {}},  // drawn by drawFx(): chain editor + block panels
     {"FX Mod", false, {"FX Mod"}},
     {"Mod", false, {"Mod Matrix"}},
+    {"Organ", true, {"%L / Organ"}},
+    {"MSEG", false, {"MSEG"}},
+    {"Macros / Sends", false, {"Macros", "Sends", "Send FX"}},
 };
 
 }  // namespace
@@ -82,6 +85,8 @@ const std::vector<EditPage> kPages = {
 App::App(fs::path dataDir, fs::path factoryDir)
     : audio_(engine_), midi_(engine_), lib_(std::move(dataDir), std::move(factoryDir)) {
     loader_ = std::thread([this] { loaderLoop(); });
+    midi_.setLearn(&learn_);
+    for (auto& n : partNames_) n = "Init";
 }
 
 App::~App() { shutdown(); }
@@ -98,6 +103,7 @@ void App::shutdown() {
     midi_.closeAll();
     audio_.stop();
     saveSettings();
+    saveMidiMap();
 }
 
 // ------------------------------------------------------------------ threads
@@ -151,7 +157,9 @@ void App::loadSettings() {
     num("sampleRate", s_.sampleRate);
     num("periodFrames", s_.periodFrames);
     num("voices", s_.voices);
+    num("renderThreads", s_.renderThreads);
     num("quality", s_.quality);
+    num("streamMode", s_.streamMode);
     num("firstNote", s_.firstNote);
     num("whiteKeys", s_.whiteKeys);
     num("pcOctave", s_.pcOctave);
@@ -163,6 +171,10 @@ void App::loadSettings() {
     if (auto x = j.find("deviceName"); x && x->isString()) s_.deviceName = x->string();
     if (auto x = j.find("audioInput")) s_.audioInput = x->boolean();
     if (auto x = j.find("inputName"); x && x->isString()) s_.inputName = x->string();
+    if (auto x = j.find("midiOutName"); x && x->isString()) s_.midiOutName = x->string();
+    if (auto x = j.find("midiOutClock")) s_.midiOutClock = x->boolean();
+    if (auto x = j.find("midiOutEcho")) s_.midiOutEcho = x->boolean();
+    num("midiOutChannel", s_.midiOutChannel);
     if (auto x = j.find("lastPreset"); x && x->isString()) s_.lastPreset = x->string();
 }
 
@@ -174,7 +186,9 @@ void App::saveSettings() {
     j.set("periodFrames", s_.periodFrames);
     j.set("exclusive", s_.exclusive);
     j.set("voices", s_.voices);
+    j.set("renderThreads", s_.renderThreads);
     j.set("quality", s_.quality);
+    j.set("streamMode", s_.streamMode);
     j.set("mpe", s_.mpe);
     j.set("firstNote", s_.firstNote);
     j.set("whiteKeys", s_.whiteKeys);
@@ -185,6 +199,10 @@ void App::saveSettings() {
     j.set("uiScale", (double)s_.uiScale);
     j.set("audioInput", s_.audioInput);
     j.set("inputName", s_.inputName);
+    j.set("midiOutName", s_.midiOutName);
+    j.set("midiOutClock", s_.midiOutClock);
+    j.set("midiOutEcho", s_.midiOutEcho);
+    j.set("midiOutChannel", s_.midiOutChannel);
     std::ofstream out(lib_.dataDir() / "settings.json", std::ios::binary);
     out << j.dump(2);
 }
@@ -199,9 +217,17 @@ void App::init(float dpiScale) {
     log("HSynth desktop - data folder: " + pathToUtf8(lib_.dataDir()));
     const std::string err = lib_.syncFactory();
     if (!err.empty()) log(err, 2);
+    applyStreamingSettings();
     refreshLists();
+    refreshScenes();
+    {
+        std::string e;
+        if (fs::exists(lib_.dataDir() / "midi_map.json") && !learn_.load(pathToUtf8(lib_.dataDir() / "midi_map.json"), e))
+            log("MIDI map: " + e, 1);
+    }
 
     engine_.setMaxVoices(s_.voices);
+    engine_.setRenderThreads(s_.renderThreads);
     engine_.setQuality((Quality)s_.quality);
     devices_ = audio_.listDevices();
     inputDevices_ = audio_.listInputDevices();
@@ -216,6 +242,15 @@ void App::init(float dpiScale) {
     midi_.setMpe(s_.mpe);
     midiPorts_ = midi_.openAll();
     log(midiPorts_.empty() ? "no MIDI input ports" : "MIDI inputs: " + std::to_string(midiPorts_.size()));
+    if (!s_.midiOutName.empty()) {
+        std::string e;
+        if (midiOut_.open(s_.midiOutName, e)) {
+            log("MIDI output: " + s_.midiOutName);
+            if (s_.midiOutClock) midiOut_.setClock(true, [this] { return engine_.getParam(P::fxChain(P::FxTempo)); });
+        } else {
+            log(e, 1);
+        }
+    }
 
     fs::path start = utf8ToPath(s_.lastPreset);
     if (s_.lastPreset.empty() || !fs::exists(start)) start = presets_.empty() ? fs::path() : presets_.front().file;
@@ -244,11 +279,16 @@ void App::startAudio() {
 void App::refreshLists() {
     presets_ = lib_.presets();
     samples_ = lib_.sampleSources();
+    rescanBrowser();
 }
 
 // ------------------------------------------------------------------ actions
 
 void App::loadPreset(const fs::path& file) {
+    if (engine_.multiTimbral()) {
+        loadPresetInto(file, engine_.selectedPart());
+        return;
+    }
     log("loading preset " + pathToUtf8(file.filename()) + " ...");
     const std::string root = pathToUtf8(lib_.libraryRoot());
     runAsync([this, file, root] {
@@ -262,7 +302,10 @@ void App::loadPreset(const fs::path& file) {
             for (auto& w : warnings) log("  " + w, 1);
             currentPreset_ = file;
             currentPresetName_ = p.name;
+            partNames_[0] = p.name;
             presetComment_ = p.comment;
+            loadedSnap_ = captureState();
+            comparing_ = false;
             s_.lastPreset = pathToUtf8(file);
             log("preset \"" + p.name + "\" loaded");
         });
@@ -280,7 +323,8 @@ void App::stepPreset(int delta) {
 
 void App::savePreset(const std::string& name) {
     const fs::path file = lib_.userPresetFile(name);
-    Preset p = capturePreset(engine_, name, pathToUtf8(lib_.libraryRoot()));
+    Preset p = engine_.multiTimbral() ? capturePartPreset(engine_, editPart(), name, pathToUtf8(lib_.libraryRoot()))
+                                      : capturePreset(engine_, name, pathToUtf8(lib_.libraryRoot()));
     p.category = "User";
     p.author = "user";
     std::string err;
@@ -297,13 +341,14 @@ void App::savePreset(const std::string& name) {
 
 void App::loadSamples(int layer, const fs::path& file) {
     log(std::string("loading ") + pathToUtf8(file.filename()) + " into layer " + (char)('A' + layer) + " ...");
-    runAsync([this, layer, file] {
+    const int part = editPart();
+    runAsync([this, layer, file, part] {
         const auto t0 = std::chrono::steady_clock::now();
         std::string err;
         std::vector<std::string> warnings;
-        const bool ok = loadLayerSamples(engine_, layer, pathToUtf8(file), err, warnings);
+        const bool ok = loadPartSamples(engine_, part, layer, pathToUtf8(file), err, warnings);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        if (ok) engine_.setParam(P::layer(layer, P::LType), (float)LayerType::PCM);
+        if (ok) engine_.setPartParam(part, P::layer(layer, P::LType), (float)LayerType::PCM);
         post([this, ok, err, warnings, layer, file, ms] {
             if (ok) log(std::string("layer ") + (char)('A' + layer) + ": " + pathToUtf8(file.filename()) + " loaded in " +
                         std::to_string((int)ms) + " ms");
@@ -315,7 +360,8 @@ void App::loadSamples(int layer, const fs::path& file) {
 
 void App::loadWavetable(int layer, const fs::path& file) {
     log(std::string("loading wavetable ") + pathToUtf8(file.filename()) + " into layer " + (char)('A' + layer) + " ...");
-    runAsync([this, layer, file] {
+    const int part = editPart();
+    runAsync([this, layer, file, part] {
         std::string err;
         fs::path src;
         try {
@@ -323,10 +369,10 @@ void App::loadWavetable(int layer, const fs::path& file) {
         } catch (const std::exception& e) {
             err = e.what();
         }
-        bool ok = err.empty() && loadLayerWavetable(engine_, layer, pathToUtf8(src), err);
+        bool ok = err.empty() && loadPartWavetable(engine_, part, layer, pathToUtf8(src), err);
         if (ok) {
-            engine_.setParam(P::layer(layer, P::LType), (float)LayerType::WT);
-            engine_.setParam(P::layer(layer, P::WtTable), (float)builtinWavetableCount());  // "user"
+            engine_.setPartParam(part, P::layer(layer, P::LType), (float)LayerType::WT);
+            engine_.setPartParam(part, P::layer(layer, P::WtTable), (float)builtinWavetableCount());  // "user"
         }
         post([this, ok, err, file, layer] {
             if (ok) log(std::string("layer ") + (char)('A' + layer) + ": wavetable " + pathToUtf8(file.filename()) + " loaded");
@@ -419,6 +465,13 @@ void App::frame() {
     }
 
     handlePcKeyboard();
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && !io.WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
+        }
+    }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -431,6 +484,9 @@ void App::frame() {
         auto flag = [&](int i) { return forceTab_ == i ? ImGuiTabItemFlags_SetSelected : 0; };
         if (ImGui::BeginTabItem("Play", nullptr, flag(0))) { drawPlay(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Edit", nullptr, flag(1))) { drawEdit(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Browser", nullptr, flag(4))) { drawBrowser(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Multi", nullptr, flag(5))) { drawMulti(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Seq", nullptr, flag(6))) { drawSeq(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Library", nullptr, flag(2))) { drawLibrary(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Monitor", nullptr, flag(3))) { drawMonitor(); ImGui::EndTabItem(); }
         forceTab_ = -1;
@@ -503,8 +559,72 @@ void App::autotestStep() {
                                  if (auto p = findPreset("shimmer"); !p.empty()) loadPreset(p); ++autotestStage_; } break;
         case 17: if (t > 13.6 && !busy_) { chord(true, 60); ++autotestStage_; } break;
         case 18: if (t > 14.6) { shot("7_fx_looper_shimmer.bmp"); chord(false, 60); ++autotestStage_; } break;
-        case 19:
+        case 19: if (t > 15.2) { forceTab_ = 4; std::snprintf(browserSearch_, sizeof browserSearch_, "#fm"); browserDirty_ = true; ++autotestStage_; } break;
+        case 20:
             if (t > 16.0) {
+                shot("8_browser.bmp");
+                // multi: part 1 below C4, part 2 (FM e-piano, same MIDI channel) from C4 up = keyboard split
+                setMultiMode(true);
+                engine_.setPartMix(0, Mix::KeyHigh, 59.0f);
+                engine_.setPartMix(1, Mix::Channel, 1.0f);
+                engine_.setPartMix(1, Mix::KeyLow, 60.0f);
+                if (auto p = findPreset("fm6_epiano"); !p.empty()) loadPresetInto(p, 1);
+                forceTab_ = 5;
+                ++autotestStage_;
+            }
+            break;
+        case 21:
+            if (t > 17.0 && !busy_) {
+                const int keys[] = {43, 47, 50, 64, 67, 71};
+                for (int k : keys) {
+                    Event e = Event::noteOn(0x500000u + (uint32_t)k, k, 0.8f);
+                    e.channel = 0;
+                    engine_.sendEvent(e);
+                }
+                ++autotestStage_;
+            }
+            break;
+        case 22:
+            if (t > 17.8) {
+                shot("9_multi_split.bmp");
+                log("multi split: part 1 " + std::to_string(engine_.partActiveVoices(0)) + " voices, part 2 " +
+                    std::to_string(engine_.partActiveVoices(1)) + " voices");
+                const int keys[] = {43, 47, 50, 64, 67, 71};
+                for (int k : keys) {
+                    Event e = Event::noteOff(0x500000u + (uint32_t)k, k);
+                    e.channel = 0;
+                    engine_.sendEvent(e);
+                }
+                ++autotestStage_;
+            }
+            break;
+        case 23:
+            if (t > 18.6) {
+                // step sequencer on part 1 (selected), free mode with the transport
+                engine_.selectPart(0);
+                engine_.setPartParam(0, P::SeqOn, 1.0f);
+                engine_.setPartParam(0, P::SeqSteps, 8.0f);
+                for (int s = 0; s < 8; ++s) {
+                    engine_.setPartParam(0, P::seqStep(s, P::SeqVel), s % 2 ? 0.6f : 0.9f);
+                    engine_.setPartParam(0, P::seqStep(s, P::SeqNote), (float)(48 + (s * 5) % 12));
+                }
+                setTransport(true);
+                forceTab_ = 6;
+                ++autotestStage_;
+            }
+            break;
+        case 24:
+            if (t > 20.0) {
+                shot("10_seq.bmp");
+                log("sequencer: step " + std::to_string(engine_.seqPosition(0)) + ", voices " +
+                    std::to_string(engine_.stats().activeVoices));
+                setTransport(false);
+                engine_.setPartParam(0, P::SeqOn, 0.0f);
+                ++autotestStage_;
+            }
+            break;
+        case 25:
+            if (t > 21.0) {
                 std::vector<float> inter;
                 const size_t frames = audio_.stopRecording(inter);
                 std::vector<float> l(frames), r(frames);
@@ -566,6 +686,31 @@ void App::drawTopBar() {
     ImGui::SetNextItemWidth(160 * dpiScale_);
     if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) engine_.setParam(P::MasterVolume, vol);
     ImGui::SameLine();
+    {
+        const bool playing = engine_.transportPlaying();
+        if (playing) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.55f, 0.3f, 1.0f));
+        if (ImGui::Button(playing ? "Stop##transport" : "Play##transport")) setTransport(!playing);
+        if (playing) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("transport: step sequencers (free mode), MIDI clock out");
+        ImGui::SameLine();
+        float tempo = engine_.getParam(P::fxChain(P::FxTempo));
+        ImGui::SetNextItemWidth(90 * dpiScale_);
+        if (ImGui::DragFloat("##tempo", &tempo, 0.2f, 20, 300, "%.1f bpm")) engine_.setParam(P::fxChain(P::FxTempo), tempo);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(undo_.empty());
+        if (ImGui::Button("Undo")) undo();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(redo_.empty());
+        if (ImGui::Button("Redo")) redo();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (comparing_) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.45f, 0.1f, 1.0f));
+        if (ImGui::Button(comparing_ ? "Compare: saved" : "Compare")) toggleCompare();
+        if (comparing_) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("switch between your edit and the preset as loaded");
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Panic")) {
         engine_.sendEvent(Event::control(EventType::AllSoundOff, 0));
         for (auto& h : held_) h = 0;
@@ -577,7 +722,15 @@ void App::drawTopBar() {
     ImGui::TextColored(hot ? kWarn : kDim, "  voices %d/%d   DSP %.0f%% (peak %.0f%%)   late cb %d   %s %d Hz / %d   %s",
                        es.activeVoices, engine_.maxVoices(), es.cpuLoad * 100, es.cpuLoadPeak * 100, as.lateCallbacks,
                        as.running ? "audio" : "AUDIO OFF", as.sampleRate, as.periodFrames, busy_ ? "loading..." : "");
-    if (!presetComment_.empty()) ImGui::TextColored(kDim, "%s", presetComment_.c_str());
+    if (engine_.multiTimbral()) {
+        ImGui::TextColored(kAccent, "Multi: presets load into part %d", engine_.selectedPart() + 1);
+        if (currentScene_ >= 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(kDim, "   scene %d  %s", currentScene_ + 1, scenes_[currentScene_].name.c_str());
+        }
+    } else if (!presetComment_.empty()) {
+        ImGui::TextColored(kDim, "%s", presetComment_.c_str());
+    }
 }
 
 // ------------------------------------------------------------------ play
@@ -592,12 +745,12 @@ void App::handlePcKeyboard() {
             pcHeld_[i] = true;
             pcHeldKey_[i] = note;
             held_[note]++;
-            engine_.sendEvent(Event::noteOn(0x300000u + (uint32_t)i, note, s_.pcVelocity));
+            noteEvent(true, 0x300000u + (uint32_t)i, note, s_.pcVelocity);
         }
         if (pcHeld_[i] && !ImGui::IsKeyDown(k.key)) {
             pcHeld_[i] = false;
             held_[pcHeldKey_[i]] = std::max(0, held_[pcHeldKey_[i]] - 1);
-            engine_.sendEvent(Event::noteOff(0x300000u + (uint32_t)i, pcHeldKey_[i]));
+            noteEvent(false, 0x300000u + (uint32_t)i, pcHeldKey_[i], 0.5f);
         }
     }
     if (typing || io.KeyCtrl) return;
@@ -617,6 +770,8 @@ void App::handlePcKeyboard() {
 
 void App::drawPlay() {
     const float d = dpiScale_;
+    drawSceneBar();
+    drawMacros();
     if (ImGui::Button("Oct -")) s_.firstNote = std::max(12, s_.firstNote - 12);
     ImGui::SameLine();
     if (ImGui::Button("Oct +")) s_.firstNote = std::min(96, s_.firstNote + 12);
@@ -676,12 +831,12 @@ void App::drawKeyboard(float width, float height) {
         mouseDownX_ = m.x;
         lastTimbre_ = -1;
         held_[note]++;
-        engine_.sendEvent(Event::noteOn(mouseNoteId_, note, vel));
+        noteEvent(true, mouseNoteId_, note, vel);
     };
     auto stopNote = [&] {
         if (mouseNote_ < 0) return;
         held_[mouseNote_] = std::max(0, held_[mouseNote_] - 1);
-        engine_.sendEvent(Event::noteOff(mouseNoteId_, mouseNote_));
+        noteEvent(false, mouseNoteId_, mouseNote_, 0.5f);
         mouseNote_ = -1;
     };
     if (ImGui::IsItemActivated()) startNote(noteAt(m.x, m.y));
@@ -731,7 +886,7 @@ void App::drawKeyboard(float width, float height) {
 
 void App::drawParam(const ParamInfo& info, int id) {
     ImGui::PushID(id);
-    float v = engine_.getParam(id);
+    float v = getP(id);
     bool changed = false;
     ImGui::SetNextItemWidth(std::min(520.0f * dpiScale_, ImGui::GetContentRegionAvail().x - 200 * dpiScale_));
     switch (info.kind) {
@@ -763,9 +918,8 @@ void App::drawParam(const ParamInfo& info, int id) {
             break;
         }
     }
-    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) { v = info.def; changed = true; }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nright-click: reset to default, ctrl+click: type a value", info.name.c_str());
-    if (changed) engine_.setParam(id, v);
+    if (paramContextMenu(info, id, v)) changed = true;
+    if (changed) setP(id, v);
     ImGui::PopID();
 }
 
@@ -792,8 +946,12 @@ void App::drawEdit() {
             const std::string b = std::string(1, (char)('A' + l));
             if (ImGui::RadioButton(b.c_str(), editLayer_ == l)) editLayer_ = l;
         }
+        if (engine_.multiTimbral()) {
+            ImGui::SameLine();
+            ImGui::TextColored(kAccent, "   editing part %d (%s)", editPart() + 1, partNames_[editPart()].c_str());
+        }
         const int typeId = P::layer(editLayer_, P::LType);
-        const int type = (int)std::lround(engine_.getParam(typeId));
+        const int type = (int)std::lround(getP(typeId));
         const std::string expected = page.title;
         const std::string typeName = table[(size_t)typeId].options[(size_t)type];
         std::string want = expected;
@@ -804,7 +962,7 @@ void App::drawEdit() {
             ImGui::TextColored(kWarn, "layer is '%s' - switch Type to '%s' to hear these", typeName.c_str(), want.c_str());
         }
         if (expected == "WT") {
-            const std::string name = engine_.sampleSetName(editLayer_);
+            const std::string name = engine_.partSampleSetName(editPart(), editLayer_);
             ImGui::Text("User table: %s", name.empty() ? "(none - built-in tables only)" : name.c_str());
             ImGui::SameLine();
             if (ImGui::Button("Load .wav...")) {
@@ -812,16 +970,16 @@ void App::drawEdit() {
                 if (!files.empty()) loadWavetable(editLayer_, utf8ToPath(files.front()));
             }
             ImGui::SameLine();
-            if (ImGui::Button("Unload##wt")) { engine_.setSampleSet(editLayer_, nullptr); engine_.collectGarbage(); }
+            if (ImGui::Button("Unload##wt")) { engine_.setPartSampleSet(editPart(), editLayer_, nullptr); engine_.collectGarbage(); }
             ImGui::TextColored(kDim, "Serum-style 2048-sample frames (up to 256) or one single cycle of any length; select Table 'user'");
         }
         if (expected == "PCM") {
-            const std::string name = engine_.sampleSetName(editLayer_);
+            const std::string name = engine_.partSampleSetName(editPart(), editLayer_);
             ImGui::Text("Samples: %s", name.empty() ? "(none)" : name.c_str());
             ImGui::SameLine();
             if (ImGui::Button("Choose...")) ImGui::OpenPopup("choose_samples");
             ImGui::SameLine();
-            if (ImGui::Button("Unload")) { engine_.setSampleSet(editLayer_, nullptr); engine_.collectGarbage(); }
+            if (ImGui::Button("Unload")) { engine_.setPartSampleSet(editPart(), editLayer_, nullptr); engine_.collectGarbage(); }
             if (ImGui::BeginPopup("choose_samples")) {
                 for (auto& e : samples_)
                     if (ImGui::Selectable(e.title.c_str())) loadSamples(editLayer_, e.file);
@@ -1130,8 +1288,12 @@ void App::drawMonitor() {
                        "late cb     %d   (callback interval > 2.5 periods: likely dropout)", as.lateCallbacks);
     ImGui::Text("engine DSP  load %.1f %%  peak %.1f %%   render avg %.0f us  max %.0f us", es.cpuLoad * 100, es.cpuLoadPeak * 100,
                 es.renderUsAvg, es.renderUsPeak);
-    ImGui::Text("voices      %d active  peak %d  limit %d", es.activeVoices, es.peakVoices, engine_.maxVoices());
+    ImGui::Text("voices      %d active  peak %d  limit %d   render threads %d", es.activeVoices, es.peakVoices,
+                engine_.maxVoices(), engine_.renderThreads());
     ImGui::Text("output      peak %.2f   dropped events %u", es.outputPeak, es.droppedEvents);
+    ImGui::TextColored(es.streamUnderruns ? kWarn : ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                       "disk        %d streaming players   %u underruns   %.1f MB read", es.streamVoices, es.streamUnderruns,
+                       (double)es.streamBytesRead / 1048576.0);
     if (ImGui::Button("Reset peaks")) { engine_.resetPeakStats(); audio_.resetPeaks(); }
 
     ImGui::Spacing();
@@ -1180,16 +1342,47 @@ void App::drawMonitor() {
 
     ImGui::Spacing();
     ImGui::TextColored(kAccent, "Engine");
-    static const int voiceOpts[] = {16, 32, 64};
+    static const int voiceOpts[] = {32, 64, 128, 256};
     ImGui::SetNextItemWidth(160 * d);
     if (ImGui::BeginCombo("Polyphony", std::to_string(s_.voices).c_str())) {
         for (int v : voiceOpts)
             if (ImGui::Selectable(std::to_string(v).c_str(), v == s_.voices)) { s_.voices = v; engine_.setMaxVoices(v); }
         ImGui::EndCombo();
     }
+    {
+        // voices are spread over this many cores (the audio thread + helpers)
+        static const int threadOpts[] = {0, 1, 2, 3, 4, 6, 8};
+        auto label = [](int t) {
+            return t == 0 ? "Auto (" + std::to_string(autoRenderThreads()) + ")" : std::to_string(t);
+        };
+        ImGui::SetNextItemWidth(160 * d);
+        if (ImGui::BeginCombo("Render threads", label(s_.renderThreads).c_str())) {
+            for (int t : threadOpts)
+                if (ImGui::Selectable(label(t).c_str(), t == s_.renderThreads)) {
+                    s_.renderThreads = t;
+                    engine_.setRenderThreads(t);
+                }
+            ImGui::EndCombo();
+        }
+    }
     static const char* qual[] = {"Low (SBC / power saving)", "Normal", "High"};
     ImGui::SetNextItemWidth(260 * d);
-    if (ImGui::Combo("DSP quality", &s_.quality, qual, 3)) engine_.setQuality((Quality)s_.quality);
+    if (ImGui::Combo("DSP quality", &s_.quality, qual, 3)) {
+        engine_.setQuality((Quality)s_.quality);
+        // low-power setting: also keep the polyphony at the low-power size
+        if (s_.quality == (int)Quality::Low && s_.voices > kLowPowerVoices) {
+            s_.voices = kLowPowerVoices;
+            engine_.setMaxVoices(s_.voices);
+        }
+    }
+    {
+        static const char* modes[] = {"Off (everything in memory)", "Auto (sets > 32 MB)", "Always (long unlooped samples)"};
+        ImGui::SetNextItemWidth(260 * d);
+        if (ImGui::Combo("Disk streaming", &s_.streamMode, modes, 3)) applyStreamingSettings();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Large sample sets keep only the first 0.34 s of each sample in memory and read the rest\n"
+                              "from disk while playing. Applies to sample sets loaded afterwards.");
+    }
     ImGui::SetNextItemWidth(160 * d);
     float scale = s_.uiScale > 0 ? s_.uiScale : dpiScale_;
     if (ImGui::SliderFloat("UI scale (restart)", &scale, 0.75f, 3.0f, "%.2f")) s_.uiScale = scale;
@@ -1202,6 +1395,8 @@ void App::drawMonitor() {
     if (midiPorts_.empty()) ImGui::TextColored(kDim, "no MIDI input ports");
     for (auto& p : midiPorts_) ImGui::BulletText("%s", p.c_str());
     ImGui::Text("events %d   last %s", midi_.eventCount(), midi_.lastMessage().c_str());
+    drawMidiOut();
+    drawMidiMap();
     ImGui::EndChild();
 
     ImGui::SameLine();

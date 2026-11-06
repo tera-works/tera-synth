@@ -13,8 +13,8 @@
 
 namespace hsynth {
 
-enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Count };
-enum class VaWave : int { Saw = 0, Square, Pulse, Triangle, Sine, Count };
+enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Organ, Count };
+enum class VaWave : int { Saw = 0, Square, Pulse, Triangle, Sine, SuperSaw, Count };
 enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Ladder, CombPlus, CombMinus, Formant, Count };
 // Voice FX: per-voice insert after the filter, before the amp envelope.
 enum class VfxType : int { Off = 0, Saturate, Fold, Crush, Ring, Count };
@@ -47,6 +47,17 @@ enum class ModSource : int {
     Lfo3,           // second per-voice LFO
     Env3,           // third envelope (per voice)
     Constant,       // 1.0 (offsets, or scaled by "via")
+    ReleaseVelocity,  // note-off velocity (MPE "lift"); 0.5 until the key is released
+    NoteTimbreBi,   // per-note timbre as -1..1 around the centre (CC74 = 64)
+    Macro1,         // part macro knobs (macro.1..4), 0..1
+    Macro2,
+    Macro3,
+    Macro4,
+    Motion1,        // part motion lanes (tempo-synced step values), -1..1
+    Motion2,
+    Motion3,
+    Motion4,
+    Mseg,           // per-voice multi-segment envelope, 0..1
     Count
 };
 
@@ -90,6 +101,23 @@ enum class ModDest : int {
     Lfo3Rate,       // +-4 octaves
     FmOp5Level,
     FmOp6Level,
+    FmOp7Level,
+    FmOp8Level,
+    FmModPitch,     // pitch of all FM modulator operators, +-24 semitones (spectrum shift)
+    VaOsc2Pitch,    // VA oscillator 2 pitch, +-24 semitones
+    VaDetune,       // VA oscillator 2 detune, +-50 cents
+    FilterEnvAmt,   // filter envelope amount, +-1
+    Env2Time,       // all mod-envelope times, x8^amount
+    Env3Time,       // all env3 times, x8^amount
+    Lfo1Depth,      // LFO1 as a source, x(1 + amount): e.g. pressure -> vibrato depth
+    Lfo3Depth,
+    Mod1Amt,        // amount of mod slots 1-4, x(1 + amount)
+    Mod2Amt,
+    Mod3Amt,
+    Mod4Amt,
+    WtDetune,       // wavetable unison detune, x(1 + amount)
+    WtSpread,       // wavetable unison stereo spread, +-1
+    VfxRatio,       // ring modulator ratio, x4^amount
     Count
 };
 
@@ -172,17 +200,57 @@ enum Global : int {
     ArpGate,        // note length as a fraction of the step
     ArpSwing,       // delay of every second step, fraction of a step 0..0.5
     ArpLatch,       // keep playing after the keys are released (until a new chord)
+    Macro1,         // macro knobs: mod sources macro1..4 (one knob -> several destinations)
+    Macro2,
+    Macro3,
+    Macro4,
+    SendA,          // post-insert send to the reverb bus (send / return, see engine.h)
+    SendB,          // ... to the delay bus
+    MsegPoints,     // multi-segment envelope: points used (2..8)
+    MsegLoop,       // loop start point while the key is held (0 = no loop)
+    MsegBeats,      // times in beats (tempo) instead of seconds
+    MsegBase,       // 8 points x MsegPointCount (time, level, curve)
+    MsegLast = MsegBase + 8 * 3 - 1,
+    MotionBase,     // 4 motion lanes x MotionLaneCount (rate, steps, smooth, 16 values)
+    MotionLast = MotionBase + 4 * 19 - 1,
+    SeqOn,          // step sequencer (per part)
+    SeqMode,        // free (runs with the transport) / key (runs while a key is held, transposed from C4)
+    SeqRate,        // step length: option k = fx::SyncDiv k + 1 (like arp.rate)
+    SeqSteps,       // 1..32
+    SeqGate,        // gate scale 0.05..1
+    SeqSwing,       // 0..0.5 of a step on every second step
+    SeqTranspose,   // -24..24 semitones
+    SeqStepBase,    // 32 steps x SeqStepCount (note, velocity (0 = rest), length in steps)
+    SeqStepLast = SeqStepBase + 32 * 3 - 1,
     GlobalCount
 };
+
+constexpr int kMsegPoints = 8;
+enum MsegPointParam : int { MsegTime = 0, MsegLevel, MsegCurve, MsegPointCount };
+constexpr int kMotionLanes = 4, kMotionSteps = 16;
+enum MotionParam : int { MotionRate = 0, MotionSteps, MotionSmooth, MotionValue1, MotionLaneCount = MotionValue1 + kMotionSteps };
+constexpr int kSeqSteps = 32;
+enum SeqStepParam : int { SeqNote = 0, SeqVel, SeqLen, SeqStepCount };
+constexpr int msegPt(int i, int f) { return MsegBase + i * MsegPointCount + f; }
+constexpr int motion(int lane, int f) { return MotionBase + lane * MotionLaneCount + f; }
+constexpr int seqStep(int i, int f) { return SeqStepBase + i * SeqStepCount + f; }
 
 constexpr int kModSlots = 16;
 enum ModSlotParam : int { ModSrc = 0, ModVia, ModDst, ModAmt, ModSlotCount };
 constexpr int kModBase = GlobalCount;
 
 // FM: the operator count is a compile-time constant; algorithms are data
-// tables (see dsp/fm.h) so 6/8-operator variants only need new tables.
-constexpr int kFmOps = 6;  // algorithms 1-8 use ops 1-4, 9-16 all six
-enum FmOpParam : int { OpRatio = 0, OpDetune, OpLevel, OpAttack, OpDecay, OpSustain, OpRelease, OpVelSens, FmOpCount };
+// tables (see dsp/fm.h).
+constexpr int kFmOps = 8;  // algorithms 1-8 use ops 1-4, 9-16 ops 1-6, 17-88 all eight
+enum FmOpParam : int {
+    OpRatio = 0, OpDetune, OpLevel, OpAttack, OpDecay, OpSustain, OpRelease, OpVelSens,
+    OpWave,      // FmWave
+    OpFixed,     // fixed frequency in Hz (0 = follow the key with Ratio)
+    OpKeyScale,  // keyboard level scaling, dB per octave from C4
+    OpRateScale, // envelope rate scaling: times x 2^(-amount * octaves above C4)
+    OpAms,       // amplitude modulation by the voice's LFO1, 0..1
+    FmOpCount
+};
 
 enum LayerParam : int {
     LType = 0,
@@ -198,9 +266,17 @@ enum LayerParam : int {
     VaDetune,
     VaMix,
     VaNoise,
+    VaSync,         // osc 2 hard-synced to osc 1
+    VaXmod,         // osc 1 -> osc 2 frequency modulation 0..1
+    VaSub,          // sub oscillator level 0..1
+    VaSubWave,      // sub: square -1 oct / sine -1 oct / square -2 oct
+    VaSsDetune,     // supersaw detune 0..1
+    VaSsMix,        // supersaw side oscillators 0..1
     FmAlgo,
     FmFeedback,
     FmIndex,
+    FmPegAmt,       // FM pitch envelope: start offset (semitones), decays to 0
+    FmPegTime,      // ... decay time
     FmOpBase,
     PcmStart = FmOpBase + kFmOps * FmOpCount,
     PcmVelTrack,
@@ -212,6 +288,13 @@ enum LayerParam : int {
     WtUnison,
     WtDetune,
     WtSpread,
+    OrgDrawbar1,    // tonewheel organ: 9 drawbars 16' 5 1/3' 8' 4' 2 2/3' 2' 1 3/5' 1 1/3' 1' (0..8)
+    OrgDrawbarLast = OrgDrawbar1 + 8,
+    OrgPerc,        // percussion off / 2nd / 3rd harmonic
+    OrgPercDecay,   // fast / slow
+    OrgPercLevel,
+    OrgClick,       // key click level
+    OrgLeak,        // tonewheel leakage
     LayerParamCount
 };
 
@@ -219,7 +302,13 @@ constexpr int kLayerBase = kModBase + kModSlots * ModSlotCount;
 
 // Effect rack (see fx/fx_params.h): chain settings, FX modulation slots, then
 // the parameters of every effect block.
-enum FxChainParam : int { FxTempo = 0, FxRetrig, FxMacro1, FxMacro2, LooperLevel, FxClockSync, FxSlot1, FxChainCount = FxSlot1 + fx::kFxSlots };
+enum FxChainParam : int {
+    FxTempo = 0, FxRetrig, FxMacro1, FxMacro2, LooperLevel, FxClockSync,
+    // send / return buses: A = reverb, B = delay (fed by the parts' send.a / send.b)
+    SendAType, SendASize, SendADecay, SendAPreDelay, SendADamp, SendALevel,
+    SendBSync, SendBTime, SendBFeedback, SendBTone, SendBLevel,
+    FxSlot1, FxChainCount = FxSlot1 + fx::kFxSlots
+};
 enum FxModParam : int { FxModSrc = 0, FxModDst, FxModAmt, FxModCount };
 // Part insert effects: slot params (enum: 0 = none, k = kInsertBlockList[k-1])
 // followed by the parameters of every insert block.

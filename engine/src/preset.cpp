@@ -74,6 +74,11 @@ Json presetToValue(const Preset& p, ParamFilter filter) {
     if (!p.category.empty()) root.set("category", p.category);
     if (!p.author.empty()) root.set("author", p.author);
     if (!p.comment.empty()) root.set("comment", p.comment);
+    if (!p.tags.empty()) {
+        Json tags = Json::array();
+        for (const auto& t : p.tags) tags.push(t);
+        root.set("tags", tags);
+    }
     Json samples = Json::object();
     for (int l = 0; l < kNumLayers; ++l) samples.set(kLayerKeys[l], p.samples[l]);
     root.set("samples", samples);
@@ -111,6 +116,9 @@ bool presetFromValue(const Json& root, Preset& out, std::string& error) {
     if (auto n = root.find("category"); n && n->isString()) p.category = n->string();
     if (auto n = root.find("author"); n && n->isString()) p.author = n->string();
     if (auto n = root.find("comment"); n && n->isString()) p.comment = n->string();
+    if (auto t = root.find("tags"); t && t->isArray())
+        for (size_t i = 0; i < t->size(); ++i)
+            if (t->at(i).isString() && !t->at(i).string().empty()) p.tags.push_back(t->at(i).string());
     if (auto s = root.find("samples"); s && s->isObject()) {
         for (int l = 0; l < kNumLayers; ++l)
             if (auto v = s->find(kLayerKeys[l]); v && v->isString()) p.samples[l] = v->string();

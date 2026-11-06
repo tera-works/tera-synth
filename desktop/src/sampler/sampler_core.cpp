@@ -360,6 +360,7 @@ bool sampleInstrument(Source& src, const InstrumentSpec& spec, const Options& op
 
     std::vector<Take> takes;
     int loops = 0, clipped = 0;
+    const int restartsAtStart = src.restarts();
     for (int attempt = 0;; ++attempt) {
         if (!src.selectProgram(spec.bank, spec.program, spec.drum, error)) return false;
         takes.clear();
@@ -398,8 +399,15 @@ bool sampleInstrument(Source& src, const InstrumentSpec& spec, const Options& op
                 }
                 trim(t.rec, opt.silenceDb, sr);
                 t.peak = peakOf(t.rec);
-                if (t.peak < std::max(src.noisePeak() * 4.0f, 1e-5f) || t.rec.left.size() < 64)
-                    continue;  // silent note (outside the patch's key range)
+                if (t.peak < std::max(src.noisePeak() * 4.0f, 1e-5f) || t.rec.left.size() < 64) {
+                    // normally a note outside the patch's key range; after the capture had to be
+                    // reopened it more likely means the device stopped working
+                    if (src.restarts() != restartsAtStart) {
+                        error = kDeviceLostError;
+                        return false;
+                    }
+                    continue;
+                }
                 t.stereo = opt.keepStereo && !isMono(t.rec);
                 if (!t.stereo) t.rec.right.clear();
                 const bool tryLoop = !spec.oneShot && spec.loop != InstrumentSpec::Loop::Off;

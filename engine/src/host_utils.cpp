@@ -193,6 +193,7 @@ void renderOffline(Engine& engine, const RenderJob& job, std::vector<float>& lef
     left.assign((size_t)total, 0.0f);
     right.assign((size_t)total, 0.0f);
     size_t next = 0;
+    engine.setOfflineRender(true);
     for (int64_t pos = 0; pos < total; pos += job.blockSize) {
         const double t = (double)(pos + job.blockSize) / job.sampleRate;
         while (next < job.events.size() && job.events[next].time < t) engine.sendEvent(job.events[next++].event);
@@ -200,6 +201,7 @@ void renderOffline(Engine& engine, const RenderJob& job, std::vector<float>& lef
         engine.process(left.data() + pos, right.data() + pos, n);
         engine.collectGarbage();
     }
+    engine.setOfflineRender(false);
 }
 
 }  // namespace hsynth

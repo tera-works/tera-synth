@@ -15,6 +15,14 @@ object NativeEngine {
     object Control { const val PITCH_BEND = 0; const val MOD_WHEEL = 1; const val CHANNEL_PRESSURE = 2; const val SUSTAIN = 3; const val CC = 4; const val ALL_NOTES_OFF = 5; const val ALL_SOUND_OFF = 6 }
 
     external fun nativeCreate()
+    // songs (Standard MIDI Files): load = JSON {ok, name, length, report[] | error}; state = {pos, len, playing}
+    external fun nativeSongLoad(path: String, libraryRoot: String, presetDirs: String): String
+    external fun nativeSongPlay(on: Boolean)
+    external fun nativeSongSeek(seconds: Double)
+    external fun nativeSongState(): DoubleArray
+    external fun nativePlayerState(): FloatArray
+    external fun nativeNoteMasks(): IntArray
+    external fun nativeSetPartMix(part: Int, id: Int, value: Float)
     external fun nativeStart(deviceId: Int, exclusive: Boolean, bufferBursts: Int): Boolean
     external fun nativeStop()
 
@@ -46,6 +54,7 @@ object NativeEngine {
     external fun nativeSetQuality(q: Int)
     external fun nativeGetStats(): FloatArray
     external fun nativeResetPeaks()
+    external fun nativePeakProfile(): FloatArray
     external fun nativeCollectGarbage()
 
     // effect rack

@@ -57,6 +57,8 @@ static Bytes mutate(Bytes d, bool text) {
 static Bytes readFile(const std::string& p) { std::ifstream f(p, std::ios::binary); return Bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); }
 static void writeFile(const std::string& p, const Bytes& d) { std::ofstream f(p, std::ios::binary); f.write((const char*)d.data(), (std::streamsize)d.size()); }
 
+static const char kStreamSfz[] = "<region> sample=s.wav lokey=55 hikey=65 pitch_keycenter=60\n";
+
 int main(int argc, char** argv) {
     const std::string target = argv[1];
     const long iters = std::atol(argv[2]);
@@ -94,6 +96,19 @@ int main(int argc, char** argv) {
             if (set) { ++ok; Engine e; e.prepare(48000); e.setParam(P::layer(0, P::LType), 3); e.setSampleSet(0, std::move(set));
                 std::vector<float> L(256), R(256); for (int k : {20, 60, 100}) e.sendEvent(Event::noteOn((uint32_t)k, k, 0.7f));
                 for (int b = 0; b < 4; ++b) e.process(L.data(), R.data(), 256); for (int k : {20, 60, 100}) e.sendEvent(Event::noteOff((uint32_t)k, k)); e.process(L.data(), R.data(), 256); }
+        } else if (target == "stream") {
+            // WAV header / data parsing of the disk-streaming loader (streaming.h) and streamed playback
+            writeFile(dir + "/s.wav", d);
+            writeFile(dir + "/s.sfz", Bytes(std::begin(kStreamSfz), std::end(kStreamSfz) - 1));
+            SampleLoadOptions o;
+            o.mode = StreamMode::Always;
+            o.preloadFrames = 4096;
+            setSampleLoadOptions(o);
+            auto set = loadSfzSampleSet(dir + "/s.sfz", err);
+            if (set) { ++ok; Engine e; e.prepare(48000); e.setParam(P::layer(0, P::LType), 3); e.setSampleSet(0, std::move(set));
+                e.setOfflineRender(true);
+                std::vector<float> L(512), R(512); for (int k : {55, 60, 65}) e.sendEvent(Event::noteOn((uint32_t)k, k, 0.7f));
+                for (int b = 0; b < 40; ++b) e.process(L.data(), R.data(), 512); }
         } else if (target == "wavetable") { writeFile(dir + "/f.wav", d); ok += loadWavetableFile(dir + "/f.wav", err) != nullptr; }
         else if (target == "ir") { writeFile(dir + "/f.wav", d); ok += fx::loadImpulseResponse(dir + "/f.wav", 48000, (int)rnd(2), err) != nullptr; }
     }

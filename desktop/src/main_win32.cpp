@@ -3,7 +3,8 @@
 // usage: hsynth_desktop [--data DIR] [--factory DIR] [--autotest OUTDIR]
 //   --data      user data folder (library, presets, settings)   default: desktop/data
 //   --factory   factory content (presets + library/factory)     default: android/app/src/main/assets
-//   --autotest  run a scripted UI/audio smoke test, write screenshots, a WAV and report.txt to OUTDIR, then exit
+//   --autotest  run a scripted UI/audio smoke test, write screenshots, a WAV and report.txt to OUTDIR, then exit.
+//               Plays through the speakers; add --mute to keep them silent (the engine still runs and is recorded).
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -207,6 +208,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     ImGui_ImplOpenGL3_Init();
 
     float scale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
+    // --mute: the audio device runs (timing is measured) but gets zeros
+    {
+        bool mute = false;
+        for (int i = 1; i < argc; ++i) mute = mute || std::wstring(argv[i]) == L"--mute";
+        app.setAudioMuted(mute);
+    }
     app.init(scale);
     if (app.uiScaleOverride() > 0) scale = app.uiScaleOverride();
     app.setDpiScale(scale);

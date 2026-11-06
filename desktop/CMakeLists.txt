@@ -33,6 +33,9 @@ if(WIN32)
     add_executable(hsynth_desktop WIN32
         src/main_win32.cpp
         src/app.cpp
+        src/app_browser.cpp
+        src/app_perform.cpp
+        src/midi_out_win32.cpp
         src/audio_out.cpp
         src/miniaudio_impl.cpp
         src/midi_in_win32.cpp

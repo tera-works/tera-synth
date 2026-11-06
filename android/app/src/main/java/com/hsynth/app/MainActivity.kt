@@ -24,7 +24,14 @@ import java.util.concurrent.Executors
 
 /** Process-wide services that must outlive an Activity instance. */
 object AppServices {
-    val loader = Executors.newSingleThreadExecutor { r -> Thread(r, "hsynth-loader") }
+    // background priority: loading presets / samples / songs must not take CPU
+    // time from the audio callback and its render helpers
+    val loader = Executors.newSingleThreadExecutor { r ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            r.run()
+        }, "hsynth-loader")
+    }
 }
 
 class MainActivity : Activity() {
@@ -38,8 +45,11 @@ class MainActivity : Activity() {
     lateinit var edit: EditPanel
     lateinit var libraryPanel: LibraryPanel
     lateinit var monitor: MonitorPanel
+    lateinit var player: PlayerPanel
 
-    private val tabButtons = mutableListOf<TextView>()
+    private val tabButtons = mutableListOf<LedButton>()
+    private lateinit var headerLcd: TextView
+    private val clearParamDisplay = Runnable { showPresetInHeader() }
     private val panels = mutableListOf<View>()
     private val logLines = ArrayDeque<String>()
     private val logListeners = mutableListOf<() -> Unit>()
@@ -55,39 +65,81 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("hsynth", Context.MODE_PRIVATE)
+        Hw.init(this)
         library = Library(this)
+        L10n.init(prefs.getString("lang", "auto") ?: "auto")
         Params.clearListeners()
-        NativeEngine.nativeSetMaxVoices(prefs.getInt("voices", 32))
+        // v0.5: the default polyphony became 128; move the old default (32) once
+        if (!prefs.getBoolean("voices128", false)) {
+            if (prefs.getInt("voices", 128) == 32) prefs.edit().putInt("voices", 128).apply()
+            prefs.edit().putBoolean("voices128", true).apply()
+        }
+        NativeEngine.nativeSetMaxVoices(prefs.getInt("voices", 128))
         NativeEngine.nativeSetQuality(prefs.getInt("quality", 1))
         NativeEngine.nativeSetMpe(prefs.getBoolean("mpe", false))
         midi = MidiInput(this) { monitor.refreshMidi() }
 
+        play = PlayPanel(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.BG)
         }
-        val tabs = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.rgb(11, 13, 17))
-            setPadding(Ui.dp(context, 8), Ui.dp(context, 2), Ui.dp(context, 8), Ui.dp(context, 2))
+        // header: logo, LCD (preset / touched parameter + status), mode buttons
+        val tabs = ChassisBar(this).apply {
+            setPadding(Ui.dp(context, 10), Ui.dp(context, 6), Ui.dp(context, 10), Ui.dp(context, 6))
+        }
+        val logo = TextView(this).apply {
+            text = android.text.SpannableString("HSYNTH").apply {
+                setSpan(android.text.style.ForegroundColorSpan(Hw.LED), 0, 1, 0)
+            }
+            textSize = 15f
+            letterSpacing = 0.12f
+            setTextColor(Color.rgb(230, 232, 238))
+            typeface = Hw.BOLD
+            textSize = 18f
+        }
+        headerLcd = TextView(this).apply {
+            textSize = 17f
+            setTextColor(Hw.LCD_FG)
+            typeface = Hw.MONO
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val lcdBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Hw.lcdBg(context)
+            setPadding(Ui.dp(context, 10), Ui.dp(context, 3), Ui.dp(context, 10), Ui.dp(context, 3))
+            addView(headerLcd)
+            addView(play.statusText.apply {
+                textSize = 10f
+                typeface = Hw.MONO
+                maxLines = 1
+            })
+        }
+        tabs.addView(logo, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = Ui.dp(this@MainActivity, 8) })
+        tabs.addView(lcdBox, LinearLayout.LayoutParams(Ui.dp(this, 185), -2).apply { marginEnd = Ui.dp(this@MainActivity, 10) })
+        Hw.onParamTouched = { label, value ->
+            headerLcd.text = "$label  $value"
+            ui.removeCallbacks(clearParamDisplay)
+            ui.postDelayed(clearParamDisplay, 1500)
         }
         val content = FrameLayout(this)
-        play = PlayPanel(this)
         edit = EditPanel(this)
         libraryPanel = LibraryPanel(this)
         monitor = MonitorPanel(this)
-        listOf("Play" to play.view, "Edit" to edit.view, "Library" to libraryPanel.view, "Monitor" to monitor.view).forEachIndexed { i, (name, v) ->
-            val b = Ui.text(this, name, 16f, Ui.DIM, bold = true).apply {
-                setPadding(Ui.dp(context, 18), Ui.dp(context, 8), Ui.dp(context, 18), Ui.dp(context, 8))
+        player = PlayerPanel(this)
+        listOf("Play" to play.view, "Edit" to edit.view, "Library" to libraryPanel.view, "Player" to player.view, "System" to monitor.view).forEachIndexed { i, (name, v) ->
+            val b = LedButton(this, name).apply {
+                textSize = 12.5f
+                letterSpacing = 0f
+                setPadding(Ui.dp(context, 16), paddingTop, Ui.dp(context, 2), paddingBottom)
                 setOnClickListener { selectTab(i) }
             }
             tabButtons += b
-            tabs.addView(b)
+            tabs.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = Ui.dp(this@MainActivity, 6) })
             panels += v
             content.addView(v, FrameLayout.LayoutParams(-1, -1))
         }
-        tabs.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))  // spacer (a bare View would expand to full height)
-        tabs.addView(play.statusText)
         root.addView(tabs, Ui.lp())
         root.addView(content, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         setContentView(root)
@@ -120,9 +172,10 @@ class MainActivity : Activity() {
 
     fun selectTab(i: Int) {
         panels.forEachIndexed { k, v -> v.visibility = if (k == i) View.VISIBLE else View.GONE }
-        tabButtons.forEachIndexed { k, b -> b.setTextColor(if (k == i) Ui.ACCENT else Ui.DIM) }
+        tabButtons.forEachIndexed { k, b -> b.lit = k == i }
         if (i == 1) edit.refreshValues()
         if (i == 2) libraryPanel.refresh()
+        if (i == 3) player.refreshPlaylist()
     }
 
     override fun onStart() {
@@ -171,10 +224,15 @@ class MainActivity : Activity() {
                 val w = result.optJSONArray("warnings")
                 for (i in 0 until (w?.length() ?: 0)) log("  ${w!!.getString(i)}", Ui.WARN)
                 log("preset \"$currentPresetName\" loaded")
+                showPresetInHeader()
                 Params.notifyChanged()
                 presetListeners.forEach { it() }
             }
         }
+    }
+
+    private fun showPresetInHeader() {
+        if (::headerLcd.isInitialized) headerLcd.text = currentPresetName
     }
 
     fun stepPreset(delta: Int) {
@@ -234,7 +292,7 @@ class MainActivity : Activity() {
     fun log(msg: String, color: Int = Ui.TEXT) {
         val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         val tag = when (color) { Ui.ERR -> "ERROR "; Ui.WARN -> "warn  "; else -> "" }
-        logLines.addLast("$ts $tag$msg")
+        logLines.addLast("$ts $tag${L10n.log(msg)}")
         while (logLines.size > 300) logLines.removeFirst()
         logListeners.forEach { it() }
     }
@@ -247,15 +305,26 @@ class MainActivity : Activity() {
     @Deprecated("Activity result API from the framework")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode == RESULT_OK) libraryPanel.onActivityResult(requestCode, data)
+        if (resultCode != RESULT_OK) return
+        if (requestCode == PlayerPanel.REQ_FOLDER || requestCode == PlayerPanel.REQ_FILES) player.onActivityResult(requestCode, data)
+        else libraryPanel.onActivityResult(requestCode, data)
     }
 
     // ------------------------------------------------------------ stats
 
+    private var lastXruns = -1
     private val statsTick = object : Runnable {
         override fun run() {
             val s = NativeEngine.nativeGetStats()
+            if (s.size > 20 && s[13].toInt() != lastXruns) {
+                // diagnostics: an underrun with the slowest callback / render since the last one
+                // phases: slowest block's us in params / swaps+events / voices / inserts / rack / stats, voices, parallel
+                if (lastXruns >= 0) android.util.Log.w("HSynth", "xrun +${s[13].toInt() - lastXruns} cbMax ${s[20].toInt()} us " +
+                    "renderPeak ${s[5].toInt()} us phases ${NativeEngine.nativePeakProfile().joinToString(" ") { it.toInt().toString() }}")
+                lastXruns = s[13].toInt()
+            }
             play.updateStats(s)
+            player.updateStats(s)
             if (monitor.view.visibility == View.VISIBLE) monitor.updateStats(s)
             val pc = NativeEngine.nativeTakeProgramChange()
             if (pc >= 0) {

@@ -1,5 +1,7 @@
 #include "hsynth/params.h"
 
+#include "hsynth/dsp/fm.h"
+
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -10,25 +12,24 @@ namespace hsynth {
 
 namespace {
 
-const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt"};
-const std::vector<std::string> kVaWaveNames = {"saw", "square", "pulse", "triangle", "sine"};
+const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt", "organ"};
+const std::vector<std::string> kVaWaveNames = {"saw", "square", "pulse", "triangle", "sine", "supersaw"};
 const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch", "ladder", "comb+", "comb-", "formant"};
 const std::vector<std::string> kVfxNames = {"off", "saturate", "fold", "crush", "ring"};
 const std::vector<std::string> kLfoWaveNames = {"sine", "triangle", "saw", "square", "s&h"};
 const std::vector<std::string> kModSourceNames = {
     "none", "velocity", "key", "ampenv", "env2", "lfo1", "lfo2", "modwheel", "pitchbend",
-    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4", "lfo3", "env3", "constant"};
+    "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4", "lfo3", "env3", "constant", "relvelocity", "notetimbre+-",
+    "macro1", "macro2", "macro3", "macro4", "motion1", "motion2", "motion3", "motion4", "mseg"};
 const std::vector<std::string> kModDestNames = {
     "none", "pitch", "a.level", "b.level", "c.level", "morph", "a.pitch", "b.pitch", "c.pitch",
     "va.pw", "va.mix", "va.noise", "fm.index", "fm.feedback", "cutoff", "resonance", "drive",
     "amp", "pan", "lfo1.rate", "wt.pos", "wt.warp", "filter.morph", "vfx.amount",
     "a.pan", "b.pan", "c.pan", "fm.op1.level", "fm.op2.level", "fm.op3.level", "fm.op4.level",
-    "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate", "fm.op5.level", "fm.op6.level"};
-const std::vector<std::string> kFmAlgoNames = {
-    "1: 4>3>2>1", "2: (4+3)>2>1", "3: 4>3>1 + 2>1", "4: 4>3 + 2>1", "5: 4>(3,2,1)",
-    "6: 4>3>2 + 1", "7: 4>1 + 2 + 3", "8: 1+2+3+4",
-    "9: 6op 6>5>4>3 + 2>1", "10: 6op 6>5>4>3 + 2>1 (fb 2)", "11: 6op 6>5 + 4>3 + 2>1", "12: 6op 6>5>3, 4>3, 2>1",
-    "13: 6op (2 + 4>3 + 6>5)>1", "14: 6op 6>(5,4,3) + 2>1", "15: 6op 6>5 + 1..4", "16: 6op 1+2+3+4+5+6"};
+    "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate", "fm.op5.level", "fm.op6.level",
+    "fm.op7.level", "fm.op8.level", "fm.modpitch", "va.osc2pitch", "va.detune", "filter.envamt", "env2.time", "env3.time",
+    "lfo1.depth", "lfo3.depth", "mod1.amt", "mod2.amt", "mod3.amt", "mod4.amt", "wt.detune", "wt.spread", "vfx.ratio"};
+const std::vector<std::string> kFmWaveNames = {"sine", "half", "abs", "quarter", "alt", "altabs", "square", "saw"};
 
 struct Builder {
     std::vector<ParamInfo> t;
@@ -142,6 +143,47 @@ std::vector<ParamInfo> build() {
     for (int i = 0; i < 4; ++i)
         b.in(P::CtlCc1 + i, "ctl.cc" + std::to_string(i + 1), "Controllers", "CC" + std::to_string(i + 1) + " #", 0, 127,
              (float)(16 + i));
+    for (int i = 0; i < 4; ++i)
+        b.fl(P::Macro1 + i, "macro." + std::to_string(i + 1), "Macros", "Macro " + std::to_string(i + 1), 0, 1, 0);
+    b.fl(P::SendA, "send.a", "Sends", "Send A (Reverb)", 0, 1, 0);
+    b.fl(P::SendB, "send.b", "Sends", "Send B (Delay)", 0, 1, 0);
+    // multi-segment envelope (mod source "mseg")
+    b.in(P::MsegPoints, "mseg.points", "MSEG", "Points", 2, kMsegPoints, 4);
+    b.in(P::MsegLoop, "mseg.loop", "MSEG", "Loop From Point (0 = off)", 0, kMsegPoints - 1, 0);
+    b.bo(P::MsegBeats, "mseg.beats", "MSEG", "Times in Beats", false);
+    {
+        static const float kT[8] = {0, 0.05f, 0.3f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f};
+        static const float kL[8] = {0, 1, 0.5f, 0, 0, 0, 0, 0};
+        for (int i = 0; i < kMsegPoints; ++i) {
+            const std::string n = "mseg.p" + std::to_string(i + 1), l = "P" + std::to_string(i + 1) + " ";
+            b.fl(msegPt(i, MsegTime), n + ".time", "MSEG", l + "Time (from previous)", 0, 10, kT[i] - (i ? kT[i - 1] : 0), "s");
+            b.fl(msegPt(i, MsegLevel), n + ".level", "MSEG", l + "Level", 0, 1, kL[i]);
+            b.fl(msegPt(i, MsegCurve), n + ".curve", "MSEG", l + "Curve", -1, 1, 0);
+        }
+    }
+    // motion lanes (mod sources "motion1..4")
+    for (int ln = 0; ln < kMotionLanes; ++ln) {
+        const std::string n = "motion" + std::to_string(ln + 1), g = "Motion " + std::to_string(ln + 1);
+        b.en(motion(ln, MotionRate), n + ".rate", g, "Step", std::vector<std::string>(kSyncNames.begin() + 1, kSyncNames.end()), 10);
+        b.in(motion(ln, MotionSteps), n + ".steps", g, "Steps", 1, kMotionSteps, 16);
+        b.fl(motion(ln, MotionSmooth), n + ".smooth", g, "Smooth", 0, 1, 0);
+        for (int s = 0; s < kMotionSteps; ++s)
+            b.fl(motion(ln, MotionValue1 + s), n + ".v" + std::to_string(s + 1), g, "Step " + std::to_string(s + 1), -1, 1, 0);
+    }
+    // step sequencer
+    b.bo(P::SeqOn, "seq.on", "Sequencer", "Sequencer On", false);
+    b.en(P::SeqMode, "seq.mode", "Sequencer", "Mode", {"free", "key"}, 0);
+    b.en(P::SeqRate, "seq.rate", "Sequencer", "Step", std::vector<std::string>(kSyncNames.begin() + 1, kSyncNames.end()), 10);
+    b.in(P::SeqSteps, "seq.steps", "Sequencer", "Steps", 1, kSeqSteps, 16);
+    b.fl(P::SeqGate, "seq.gate", "Sequencer", "Gate", 0.05f, 1, 0.8f);
+    b.fl(P::SeqSwing, "seq.swing", "Sequencer", "Swing", 0, 0.5f, 0);
+    b.in(P::SeqTranspose, "seq.transpose", "Sequencer", "Transpose", -24, 24, 0, "st");
+    for (int s = 0; s < kSeqSteps; ++s) {
+        const std::string n = "seq.s" + std::to_string(s + 1), l = "Step " + std::to_string(s + 1) + " ";
+        b.in(seqStep(s, SeqNote), n + ".note", "Sequencer", l + "Note", 0, 127, 60);
+        b.fl(seqStep(s, SeqVel), n + ".vel", "Sequencer", l + "Velocity (0 = rest)", 0, 1, s < 16 && s % 4 == 0 ? 0.8f : 0.0f);
+        b.fl(seqStep(s, SeqLen), n + ".len", "Sequencer", l + "Length (steps)", 0.1f, 8, 1);
+    }
 
     buildFx(b);
 
@@ -176,11 +218,19 @@ std::vector<ParamInfo> build() {
         b.fl(layer(l, VaDetune), n + ".va.detune", gv, "Detune", 0, 50, 7, "ct");
         b.fl(layer(l, VaMix), n + ".va.mix", gv, "Osc1<>Osc2", 0, 1, 0.5f);
         b.fl(layer(l, VaNoise), n + ".va.noise", gv, "Noise", 0, 1, 0);
+        b.bo(layer(l, VaSync), n + ".va.sync", gv, "Osc2 Hard Sync", false);
+        b.fl(layer(l, VaXmod), n + ".va.xmod", gv, "Cross Mod (Osc1>2)", 0, 1, 0);
+        b.fl(layer(l, VaSub), n + ".va.sub", gv, "Sub Osc", 0, 1, 0);
+        b.en(layer(l, VaSubWave), n + ".va.subwave", gv, "Sub Wave", {"square -1", "sine -1", "square -2"}, 0);
+        b.fl(layer(l, VaSsDetune), n + ".va.ssdetune", gv, "Supersaw Detune", 0, 1, 0.4f);
+        b.fl(layer(l, VaSsMix), n + ".va.ssmix", gv, "Supersaw Mix", 0, 1, 0.6f);
 
         const std::string gf = g + " / FM";
-        b.en(layer(l, FmAlgo), n + ".fm.algo", gf, "Algorithm", kFmAlgoNames, 0);
+        b.en(layer(l, FmAlgo), n + ".fm.algo", gf, "Algorithm", fmAlgorithmNames(), 0);
         b.fl(layer(l, FmFeedback), n + ".fm.feedback", gf, "Feedback", 0, 1, 0);
         b.fl(layer(l, FmIndex), n + ".fm.index", gf, "Mod Index", 0, 1, 0.5f);
+        b.fl(layer(l, FmPegAmt), n + ".fm.peg.amt", gf, "Pitch Env Amount", -24, 24, 0, "st");
+        b.ex(layer(l, FmPegTime), n + ".fm.peg.time", gf, "Pitch Env Time", 0.001f, 10, 0.1f, "s");
         for (int op = 0; op < kFmOps; ++op) {
             const std::string on = n + ".fm.op" + std::to_string(op + 1);
             const std::string ol = "Op" + std::to_string(op + 1) + " ";
@@ -192,6 +242,11 @@ std::vector<ParamInfo> build() {
             b.fl(fmOp(l, op, OpSustain), on + ".sustain", gf, ol + "Sustain", 0, 1, op == 0 ? 0.8f : 0.4f);
             b.ex(fmOp(l, op, OpRelease), on + ".release", gf, ol + "Release", 0.001f, 20, 0.3f, "s");
             b.fl(fmOp(l, op, OpVelSens), on + ".velsens", gf, ol + "Vel Sens", 0, 1, op == 0 ? 0.0f : 0.5f);
+            b.en(fmOp(l, op, OpWave), on + ".wave", gf, ol + "Wave", kFmWaveNames, 0);
+            b.fl(fmOp(l, op, OpFixed), on + ".fixed", gf, ol + "Fixed Freq (0 = ratio)", 0, 8000, 0, "Hz");
+            b.fl(fmOp(l, op, OpKeyScale), on + ".keyscale", gf, ol + "Key Scaling", -12, 12, 0, "dB/oct");
+            b.fl(fmOp(l, op, OpRateScale), on + ".ratescale", gf, ol + "Rate Scaling", 0, 1, 0);
+            b.fl(fmOp(l, op, OpAms), on + ".ams", gf, ol + "LFO1 AM Sens", 0, 1, 0);
         }
 
         const std::string gp = g + " / PCM";
@@ -209,6 +264,18 @@ std::vector<ParamInfo> build() {
         b.in(layer(l, WtUnison), n + ".wt.unison", gw, "Unison", 1, 7, 1);
         b.fl(layer(l, WtDetune), n + ".wt.detune", gw, "Unison Detune", 0, 100, 12, "ct");
         b.fl(layer(l, WtSpread), n + ".wt.spread", gw, "Unison Spread", 0, 1, 0.7f);
+
+        const std::string go = g + " / Organ";
+        static const char* kFeet[9] = {"16'", "5 1/3'", "8'", "4'", "2 2/3'", "2'", "1 3/5'", "1 1/3'", "1'"};
+        static const float kBars[9] = {8, 8, 8, 0, 0, 0, 0, 0, 0};  // "888000000"
+        for (int k = 0; k < 9; ++k)
+            b.fl(layer(l, OrgDrawbar1 + k), n + ".organ.bar" + std::to_string(k + 1), go, std::string("Drawbar ") + kFeet[k], 0, 8,
+                 kBars[k]);
+        b.en(layer(l, OrgPerc), n + ".organ.perc", go, "Percussion", {"off", "2nd", "3rd"}, 0);
+        b.en(layer(l, OrgPercDecay), n + ".organ.percdecay", go, "Perc Decay", {"fast", "slow"}, 0);
+        b.fl(layer(l, OrgPercLevel), n + ".organ.perclevel", go, "Perc Level", 0, 1, 0.6f);
+        b.fl(layer(l, OrgClick), n + ".organ.click", go, "Key Click", 0, 1, 0.3f);
+        b.fl(layer(l, OrgLeak), n + ".organ.leak", go, "Leakage", 0, 1, 0.2f);
     }
 
     // Part insert effects: copies of the rack metadata of the insert blocks,

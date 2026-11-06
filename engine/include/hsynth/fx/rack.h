@@ -17,6 +17,7 @@ namespace fx {
 struct FxGlobals {
     float modWheel = 0, lfo2 = 0, chanPressure = 0, expression = 1, breath = 0, pitchBend = 0;
     bool notesHeld = false;
+    float sustain = 0;  // sustain pedal of part 0 (0..1, half pedal)
 };
 
 enum class LooperCmd : int { None = 0, Tap, Stop, Clear, Undo, Play };
@@ -103,6 +104,10 @@ private:
     float paramTempo_ = 120;
     void tempoChanged();
     double beat_ = 0;
+    // idle: input and output have been digital silence for a while (every
+    // tail has died away) -> the chain is skipped until sound arrives
+    int64_t silentFrames_ = 0;
+    bool idle_ = false;
     float velocity_ = 0, lastKey_ = 60, env_ = 0, held_ = 0;
     std::vector<float> tmpL_, tmpR_;
     Looper looper_;

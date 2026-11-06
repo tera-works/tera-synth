@@ -11,6 +11,7 @@
 #include "hsynth/dsp/envelope.h"
 #include "hsynth/dsp/fm.h"
 #include "hsynth/dsp/lfo.h"
+#include "hsynth/dsp/organ.h"
 #include "hsynth/dsp/oscillators.h"
 #include "hsynth/dsp/svf.h"
 #include "hsynth/dsp/voice_fx.h"
@@ -37,6 +38,8 @@ struct VoiceContext {
     float cc[4] = {};              // assignable controllers (ctl.cc1..4)
     float tempo = 120.0f;          // bpm (effect rack tempo / MIDI clock) for synced LFOs
     float masterTune = 0.0f;       // semitones (master.tune)
+    double beat = 0.0;             // tempo position (beats) at the start of this control block (motion lanes)
+    float pedal = 0.0f;            // sustain pedal 0..1 of the part (half pedal)
     const SampleSet* sampleSets[kNumLayers] = {};
     uint32_t seq[kNumLayers] = {};    // round-robin counters (SFZ seq_position)
     int keyswitch[kNumLayers] = {-1, -1, -1};  // active SFZ keyswitch per layer (-1 = default)
@@ -49,7 +52,7 @@ public:
     void start(const Region* r, int key, float velocity, float startFrac, float velTrackScale, float sampleRate,
                float gainDb = 0.0f);
     void release();
-    void stop() { region_ = nullptr; }
+    void stop() { finish(); }
     // Exclusive-group cut: fast fade (6 ms) or the region's normal release.
     void cut();
     // 6 ms fade regardless of the region (sample set swap); a player still in
@@ -64,17 +67,42 @@ public:
     void render(float* L, float* R, int n, float gain);
 
 private:
+    void finish() {                                  // the player stops (releases its disk stream)
+        region_ = nullptr;
+        detachStream();
+    }
+    void detachStream() {
+        if (stream_) streamer_->release(stream_);
+        stream_ = nullptr;
+    }
+    // streamed samples (streaming.h): level 0, never looping
+    const float* frames0(int c, int64_t first, int count) const;  // contiguous frames or nullptr
+    float streamAt(int c, int64_t idx) const;
+    StreamSlot* stream_ = nullptr;
+    DiskStreamer* streamer_ = nullptr;
+    mutable bool starved_ = false;                   // a needed frame had not arrived from disk
     void startFade(float seconds);                   // linear fade to silence, then the player stops
     float at(int c, int64_t idx) const;
     float atLevel(int c, int64_t j) const;           // sample j of the current mip level, loop-aware
     float sampleAt(int c, int64_t idx, float f) const;  // 4-point Hermite (level 0)
     float sincAt(int c, double pos) const;           // polyphase windowed sinc (current level / cutoff)
+    void sincAt2(double pos, float& l, float& r) const;  // both channels, one kernel (SIMD)
     float value(int c, double pos) const {
         if (cut_ < 0) {
             const int64_t idx = (int64_t)pos;
             return sampleAt(c, idx, (float)(pos - (double)idx));
         }
         return sincAt(c, pos);
+    }
+    void value2(double pos, float& l, float& r) const {
+        if (cut_ < 0) {
+            const int64_t idx = (int64_t)pos;
+            const float f = (float)(pos - (double)idx);
+            l = sampleAt(0, idx, f);
+            r = sampleAt(1, idx, f);
+            return;
+        }
+        sincAt2(pos, l, r);
     }
     int cut_ = -1;     // sinc cutoff row, -1 = Hermite
     int level_ = 0;    // mip level read by the sinc path
@@ -118,8 +146,9 @@ public:
     // cutting this voice's regions with off_by == group.
     int startedGroups(int* out, int max) const;
     void choke(int group);
-    void hardStop() { active_ = false; }
+    void hardStop() { deactivate(); }
     void applyExpression(EventType type, float value);
+    void setReleaseVelocity(float v) { releaseVel_ = v; }  // before release(): "relvelocity" source
 
     // Render n <= kControlBlock samples, adding into L/R.
     void render(float* L, float* R, int n, const VoiceContext& ctx);
@@ -134,15 +163,23 @@ public:
     bool sustained = false;  // note-off arrived while sustain pedal / hold active
     bool hold = false;       // per-note hard-press hold (NoteHold event)
     int part = 0;            // owning part (multi-timbral), set by the engine
+    // sample-accurate scheduling inside one process() block (engine): the
+    // voice renders from startDelay frames on and is released at releaseAt
+    int startDelay = 0;
+    int releaseAt = -1;
     int matchKey = 60;       // key as received (before part transpose), for key-matched events
     float unisonDetune = 0;  // semitones (set by the engine before start)
     float unisonPan = 0;     // -1..1
 
 private:
+    void deactivate();       // voice ends: every PCM player stops (disk streams are released)
+    void stopPlayers();
     static constexpr int kMaxReleaseRegions = 4;
     struct Layer {
         LayerType type = LayerType::Off;
-        VaOsc osc1, osc2;
+        VaOsc osc1, osc2, sub;
+        VaOsc ss1[6], ss2[6];        // supersaw side oscillators
+        OrganVoice organ;
         FmVoice fm;
         WtOsc wt;
         PcmPlayer pcm[kMaxRegionsPerLayer];
@@ -184,6 +221,13 @@ private:
     Adsr ampEnv_, env2_, env3_;
     Lfo lfo1_, lfo3_;
     float lfo1Value_ = 0.0f, lfo3Value_ = 0.0f;
+    float lfo1Depth_ = 1.0f, lfo3Depth_ = 1.0f;   // lfo1.depth / lfo3.depth destinations
+    float env2Scale_ = 1.0f, env3Scale_ = 1.0f;   // env2.time / env3.time (applied from the next block)
+    float releaseVel_ = 0.5f;
+    float msegT_ = 0.0f, msegValue_ = 0.0f;  // multi-segment envelope position / value
+    float dampGain_ = 1.0f;                   // half pedal: sustained notes fade
+    void advanceMseg(const float* p, float dtSec, float tempo);
+    float motionValue(const VoiceContext& ctx, int lane) const;
     Rng rng_;
     Rng rng3_{0x5EEDu};  // LFO3 sample & hold (separate stream: the main one feeds noise / phases)
     VoiceFilter filterL_, filterR_;

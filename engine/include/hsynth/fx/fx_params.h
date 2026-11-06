@@ -26,6 +26,10 @@ enum Block : int {
     Delay, Reverb, Convo,
     // rhythm / utility
     Slicer, Stutter, Stereo, Vocoder,
+    // v0.6
+    DeEsser, Isolator, StepFilter, MultiTap, Doubler, Granular, TapeStop, Pump, Resonator, Swell, Talkbox, GatedVerb,
+    // v0.7 (acoustic modelling)
+    Sympathetic, Scanner,
     BlockCount
 };
 
@@ -81,6 +85,25 @@ namespace vocoder {
 enum { On, Bands, LowFreq, HighFreq, Q, Attack, Release, Formant, Unvoiced, InputGain, GateThresh, Mix, Count };
 }
 
+namespace deesser { enum { On, Freq, Thresh, Range, Listen, Count }; }
+namespace isolator { enum { On, Low, Mid, High, XLow, XHigh, Count }; }
+namespace stepfilter {
+enum { On, Type, Division, Steps, Base, Depth, Reso, Glide, Mix, Step1, Count = Step1 + 16 };
+}
+namespace multitap {
+enum { On, Sync, Time, Feedback, Tone, Mix, Tap1Time, Tap1Level, Tap1Pan, Count = Tap1Time + 4 * 3 };
+}
+namespace doubler { enum { On, Detune, Delay, Width, Mix, Count }; }
+namespace granular { enum { On, Size, Density, Pitch, Spray, Spread, Reverse, Feedback, Freeze, Mix, Count }; }
+namespace tapestop { enum { On, Stop, Time, Curve, Count }; }
+namespace pump { enum { On, Division, Depth, Release, Curve, Count }; }
+namespace resonator { enum { On, Chord, Root, KeyFollow, Decay, Tone, Mix, Count }; }
+namespace swell { enum { On, Attack, Thresh, Curve, Count }; }
+namespace talkbox { enum { On, Mode, Vowel, Rate, Sync, Depth, Sens, Reso, Mix, Count }; }
+namespace gatedverb { enum { On, Mode, Size, PreDelay, Density, Damp, Width, Mix, Count }; }
+namespace sympathetic { enum { On, Amount, Decay, PedalFollow, Tone, Count }; }
+namespace scanner { enum { On, Mode, Rate, Count }; }
+
 constexpr int kBlockParams[BlockCount] = {
     0,
     gate::Count, comp::Count, mbcomp::Count, transient::Count, limiter::Count,
@@ -90,6 +113,9 @@ constexpr int kBlockParams[BlockCount] = {
     pitch::Count, octaver::Count,
     delay::Count, reverb::Count, convo::Count,
     slicer::Count, stutter::Count, stereo::Count, vocoder::Count,
+    deesser::Count, isolator::Count, stepfilter::Count, multitap::Count, doubler::Count, granular::Count,
+    tapestop::Count, pump::Count, resonator::Count, swell::Count, talkbox::Count, gatedverb::Count,
+    sympathetic::Count, scanner::Count,
 };
 
 constexpr int blockOffset(int b) {
@@ -103,7 +129,8 @@ constexpr int kBlockParamTotal = blockOffset(BlockCount);
 // serial slots per part choosing from this subset of light-weight blocks.
 // Each part has its own copy of these blocks' parameters ("ins.<key>.<param>").
 constexpr int kInsertSlots = 3;
-constexpr int kInsertBlockList[] = {Comp, Drive, Crush, Peq, Filter, Wah, Chorus, Flanger, Phaser, Tremolo, RingMod, Stereo};
+constexpr int kInsertBlockList[] = {Comp, Drive, Crush, Peq, Filter, Wah, Chorus, Flanger, Phaser, Tremolo, RingMod, Stereo,
+                                    DeEsser, Isolator, StepFilter, Pump, Talkbox, Doubler};
 constexpr int kNumInsertBlocks = (int)(sizeof(kInsertBlockList) / sizeof(kInsertBlockList[0]));
 constexpr int insertOffset(int i) {
     int s = 0;

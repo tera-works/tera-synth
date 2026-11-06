@@ -25,7 +25,11 @@ void ChorusFx::update(const float* p, const FxContext& c) {
     delay_ = p[chorus::Delay];
     fb_ = p[chorus::Feedback];
     width_ = p[chorus::Width];
-    const float r = mode_ == 1 ? rate_ * 0.5f : rate_;
+    float r = mode_ == 1 ? rate_ * 0.5f : rate_;
+    if (mode_ >= 3) {  // juno: fixed rates (the Rate knob scales them around 1 Hz)
+        static const float kJuno[3] = {0.513f, 0.863f, 8.0f};
+        r = kJuno[mode_ - 3] * clampf(rate_, 0.1f, 10.0f);
+    }
     lfo_.setRate(r, 0, c.tempo, sr_);
     lfo2_.setRate(rate_ * 9.0f, 0, c.tempo, sr_);
     mixR_.target = p[chorus::Mix];
@@ -38,6 +42,26 @@ void ChorusFx::process(float* L, float* R, int n, const FxContext&) {
     if (mode_ == 1) nv = 2;
     if (mode_ == 2) nv = 3;
     const float norm = 1.0f / std::sqrt((float)nv);
+    if (mode_ >= 3) {
+        // juno: delay sweeps 1.66 .. 5.35 ms (I / II) or 3.3 .. 3.7 ms (I+II), BBD tone
+        const bool both = mode_ == 5;
+        const float centre = (both ? 3.5f : 3.5f) * msToS, range = (both ? 0.2f : 1.85f) * msToS * clampf(depth_ * 2.0f, 0.0f, 2.0f);
+        for (int i = 0; i < n; ++i) {
+            const float m = lfo_.value(FxWave::Triangle, 0.0f);
+            lfo_.tick(FxWave::Triangle, rng_);
+            dl_.push(L[i]);
+            dr_.push(R[i]);
+            float wl = dl_.readCubic(std::max(2.0f, centre + range * m));
+            float wr = dr_.readCubic(std::max(2.0f, centre - range * m));
+            bbd_.process(wl, wr);
+            const float mid = 0.5f * (wl + wr), side = 0.5f * (wl - wr) * width_;
+            float dg, wg;
+            mixGains(mixR_.next(), dg, wg);
+            L[i] = L[i] * dg + (mid + side) * wg;
+            R[i] = R[i] * dg + (mid - side) * wg;
+        }
+        return;
+    }
     for (int i = 0; i < n; ++i) {
         dl_.push(L[i] + fbL_ * fb_);
         dr_.push(R[i] + fbR_ * fb_);

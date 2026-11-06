@@ -158,10 +158,11 @@ void AudioOut::audioCallback(float* out, const float* in, uint32_t frames, uint3
         }
         engine_.process(left_, right_, n);
         float* o = out + (size_t)done * channels;
+        const bool mute = muted_.load(std::memory_order_relaxed);
         for (int i = 0; i < n; ++i) {
             float* f = o + (size_t)i * channels;
-            f[0] = left_[i];
-            if (channels > 1) f[1] = right_[i];
+            f[0] = mute ? 0.0f : left_[i];
+            if (channels > 1) f[1] = mute ? 0.0f : right_[i];
             for (uint32_t c = 2; c < channels; ++c) f[c] = 0.0f;
             scopeL_[sp] = left_[i];
             scopeR_[sp] = right_[i];

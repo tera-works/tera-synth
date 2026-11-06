@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
@@ -15,7 +16,7 @@
 
 namespace hsynth {
 
-std::unique_ptr<Sample> sampleFromWav(const std::string& path, std::string& error);
+std::unique_ptr<Sample> sampleFromWav(const std::string& path, std::string& error, bool stream);
 
 namespace {
 
@@ -281,6 +282,31 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
     std::unordered_map<std::string, Sample*> loaded;
     std::set<std::string> failedSamples;
     int skippedTrigger = 0, skippedSamples = 0;
+    // disk streaming: decided by the total size of the sample files (streaming.h)
+    bool stream = false;
+    {
+        const SampleLoadOptions opt = sampleLoadOptions();
+        if (opt.mode == StreamMode::Always) {
+            stream = true;
+        } else if (opt.mode == StreamMode::Auto) {
+            std::set<std::string> files;
+            for (const OpcodeMap& op : parser.regions) {
+                auto it = op.find("sample");
+                if (it == op.end() || it->second.empty()) continue;
+                std::string rel = parser.defaultPath + it->second;
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                if (rel[0] == '*') continue;
+                files.insert((rel.size() > 1 && (rel[0] == '/' || rel[1] == ':')) ? rel : parser.rootDir + rel);
+            }
+            int64_t total = 0;
+            for (const auto& f : files) {
+                std::error_code ec;
+                const auto sz = std::filesystem::file_size(utf8Path(f), ec);
+                if (!ec) total += (int64_t)sz;
+            }
+            stream = total > opt.autoThresholdBytes;
+        }
+    }
 
     for (const OpcodeMap& op : parser.regions) {
         for (auto& kv : op)
@@ -308,7 +334,7 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
             sample = found->second;
         } else if (!failedSamples.count(full)) {
             std::string err;
-            auto s = sampleFromWav(full, err);
+            auto s = sampleFromWav(full, err, stream);
             if (!s) {
                 failedSamples.insert(full);
                 parser.warnings.push_back("sample load failed: " + err);
@@ -475,6 +501,7 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
     }
     if (skippedSamples) parser.warnings.push_back(std::to_string(skippedSamples) + " regions skipped because their sample failed to load");
     set->warnings = std::move(parser.warnings);
+    set->finalizeStreaming();
     set->prepareMips();
     if (set->regions.empty()) {
         error = "no playable regions in " + path;

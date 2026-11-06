@@ -4,12 +4,16 @@
 const char* const kBlockKeys[fx::BlockCount] = {
     "none", "gate", "comp", "mbcomp", "transient", "limiter", "drive", "amp", "cab", "crush", "lofi", "exciter",
     "peq", "geq", "filter", "wah", "chorus", "flanger", "phaser", "tremolo", "vibe", "rotary", "ringmod",
-    "pitch", "octaver", "delay", "reverb", "convo", "slicer", "stutter", "stereo", "vocoder"};
+    "pitch", "octaver", "delay", "reverb", "convo", "slicer", "stutter", "stereo", "vocoder",
+    "deesser", "isolator", "stepfilter", "multitap", "doubler", "granular", "tapestop", "pump", "resonator", "swell",
+    "talkbox", "gatedverb", "sympathetic", "scanner"};
 const char* const kBlockTitles[fx::BlockCount] = {
     "None", "Noise Gate", "Compressor", "Multiband Comp", "Transient Shaper", "Limiter", "Drive", "Amp", "Cabinet",
     "Bit Crusher", "Lo-Fi", "Exciter", "Parametric EQ", "Graphic EQ", "Filter", "Wah", "Chorus", "Flanger", "Phaser",
     "Tremolo / Pan", "Uni-Vibe", "Rotary", "Ring Mod / Shift", "Pitch Shifter", "Octaver", "Delay", "Reverb",
-    "IR Reverb", "Slicer", "Stutter", "Stereo Image", "Vocoder"};
+    "IR Reverb", "Slicer", "Stutter", "Stereo Image", "Vocoder",
+    "De-Esser", "Isolator", "Step Filter", "Multi-Tap Delay", "Doubler", "Granular", "Tape Stop", "Pump (Sidechain)",
+    "Resonator", "Slow Attack (Swell)", "Talk Box", "Gated / Reverse Reverb", "String Resonance", "Scanner Vibrato"};
 
 const std::vector<std::string> kSyncNames = {"off", "1/1", "1/2", "1/2.", "1/2T", "1/4", "1/4.", "1/4T", "1/8",
                                              "1/8.", "1/8T", "1/16", "1/16.", "1/16T", "1/32"};
@@ -70,6 +74,21 @@ void buildFx(Builder& b) {
     b.fl(fxChain(FxMacro2), "fx.macro2", gc, "Macro 2", 0, 1, 0);
     b.fl(fxChain(LooperLevel), "looper.level", gc, "Looper Level", 0, 1, 0.8f);
     b.bo(fxChain(FxClockSync), "fx.clocksync", gc, "MIDI Clock Sync", false);
+    {
+        const std::string gs = "Send FX";
+        b.en(fxChain(SendAType), "sendfx.a.type", gs, "A: Reverb Type",
+             {"room", "hall", "plate", "chamber", "cathedral", "spring", "shimmer", "ambience"}, 1);
+        b.fl(fxChain(SendASize), "sendfx.a.size", gs, "A: Size", 0, 1, 0.6f);
+        b.ex(fxChain(SendADecay), "sendfx.a.decay", gs, "A: Decay", 0.1f, 30, 2.5f, "s");
+        b.fl(fxChain(SendAPreDelay), "sendfx.a.predelay", gs, "A: Pre-Delay", 0, 250, 15, "ms");
+        b.fl(fxChain(SendADamp), "sendfx.a.damp", gs, "A: Damping", 0, 1, 0.4f);
+        b.fl(fxChain(SendALevel), "sendfx.a.level", gs, "A: Return Level", 0, 1, 0.8f);
+        b.en(fxChain(SendBSync), "sendfx.b.sync", gs, "B: Sync", kSyncNames, 9);
+        b.fl(fxChain(SendBTime), "sendfx.b.time", gs, "B: Time", 10, 2000, 375, "ms");
+        b.fl(fxChain(SendBFeedback), "sendfx.b.feedback", gs, "B: Feedback", 0, 0.95f, 0.35f);
+        b.ex(fxChain(SendBTone), "sendfx.b.tone", gs, "B: Tone (High Cut)", 1000, 20000, 6000, "Hz");
+        b.fl(fxChain(SendBLevel), "sendfx.b.level", gs, "B: Return Level", 0, 1, 0.8f);
+    }
     for (int s = 0; s < F::kFxSlots; ++s) {
         const int def = s == 0 ? F::Chorus : s == 1 ? F::Delay : s == 2 ? F::Reverb : F::None;
         b.en(fxSlot(s), "fx.slot" + std::to_string(s + 1), gc, "Slot " + std::to_string(s + 1), blocks, def);
@@ -219,7 +238,7 @@ void buildFx(Builder& b) {
 
     // ---- modulation
     FxB(b, F::Chorus)
-        .en(F::chorus::Mode, "mode", "Mode", {"classic", "dimension", "ensemble"}, 0)
+        .en(F::chorus::Mode, "mode", "Mode", {"classic", "dimension", "ensemble", "juno i", "juno ii", "juno i+ii"}, 0)
         .in(F::chorus::Voices, "voices", "Voices", 1, 4, 2)
         .ex(F::chorus::Rate, "rate", "Rate", 0.05f, 8, 0.6f, "Hz")
         .fl(F::chorus::Depth, "depth", "Depth", 0, 1, 0.5f)
@@ -365,6 +384,110 @@ void buildFx(Builder& b) {
         .db(F::vocoder::InputGain, "inputgain", "Input Gain", -24, 24, 0)
         .db(F::vocoder::GateThresh, "gate", "Input Gate", -90, -20, -70)
         .mix(F::vocoder::Mix, 1);
+
+    // ---- v0.6 blocks
+    const std::vector<std::string> kDivNames = {"1/1", "1/2", "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32"};
+    FxB(b, F::DeEsser)
+        .ex(F::deesser::Freq, "freq", "Frequency", 2000, 12000, 6500, "Hz")
+        .db(F::deesser::Thresh, "thresh", "Threshold", -60, 0, -30)
+        .db(F::deesser::Range, "range", "Max Reduction", 0, 24, 10)
+        .bo(F::deesser::Listen, "listen", "Listen (sidechain)", false);
+    FxB(b, F::Isolator)
+        .db(F::isolator::Low, "low", "Low", -60, 6, 0)
+        .db(F::isolator::Mid, "mid", "Mid", -60, 6, 0)
+        .db(F::isolator::High, "high", "High", -60, 6, 0)
+        .ex(F::isolator::XLow, "xlow", "Low / Mid", 80, 800, 250, "Hz")
+        .ex(F::isolator::XHigh, "xhigh", "Mid / High", 1000, 10000, 3000, "Hz");
+    {
+        FxB s(b, F::StepFilter);
+        s.en(F::stepfilter::Type, "type", "Type", {"lp", "bp", "hp"}, 0)
+            .en(F::stepfilter::Division, "division", "Step", kDivNames, 5)
+            .in(F::stepfilter::Steps, "steps", "Steps", 2, 16, 16)
+            .ex(F::stepfilter::Base, "base", "Base Cutoff", 40, 8000, 200, "Hz")
+            .fl(F::stepfilter::Depth, "depth", "Depth", 0, 7, 5, "oct")
+            .fl(F::stepfilter::Reso, "reso", "Resonance", 0, 1, 0.6f)
+            .fl(F::stepfilter::Glide, "glide", "Glide", 0, 1, 0.2f)
+            .mix(F::stepfilter::Mix, 1);
+        static const float kSteps[16] = {1, 0.2f, 0.6f, 0.1f, 0.8f, 0.3f, 0.5f, 0, 0.9f, 0.4f, 0.7f, 0.15f, 1, 0.25f, 0.55f, 0.05f};
+        for (int k = 0; k < 16; ++k)
+            s.fl(F::stepfilter::Step1 + k, "step" + std::to_string(k + 1), "Step " + std::to_string(k + 1), 0, 1, kSteps[k]);
+    }
+    {
+        FxB m(b, F::MultiTap);
+        m.en(F::multitap::Sync, "sync", "Sync", kSyncNames, 5)
+            .fl(F::multitap::Time, "time", "Time", 10, 2000, 500, "ms")
+            .fl(F::multitap::Feedback, "feedback", "Feedback", 0, 0.95f, 0.3f)
+            .ex(F::multitap::Tone, "tone", "Tone (High Cut)", 1000, 20000, 8000, "Hz")
+            .mix(F::multitap::Mix, 0.35f);
+        static const float kT[4] = {0.25f, 0.5f, 0.75f, 1.0f}, kL[4] = {0.6f, 0.8f, 0.5f, 0.7f}, kP[4] = {-0.8f, 0.8f, -0.4f, 0.4f};
+        for (int k = 0; k < 4; ++k) {
+            const std::string t = "tap" + std::to_string(k + 1), l = "Tap " + std::to_string(k + 1) + " ";
+            m.fl(F::multitap::Tap1Time + 3 * k, t + ".time", l + "Time", 0, 1, kT[k])
+                .fl(F::multitap::Tap1Level + 3 * k, t + ".level", l + "Level", 0, 1, kL[k])
+                .fl(F::multitap::Tap1Pan + 3 * k, t + ".pan", l + "Pan", -1, 1, kP[k]);
+        }
+    }
+    FxB(b, F::Doubler)
+        .fl(F::doubler::Detune, "detune", "Detune", 0, 40, 9, "ct")
+        .fl(F::doubler::Delay, "delay", "Delay", 10, 60, 25, "ms")
+        .fl(F::doubler::Width, "width", "Width", 0, 1, 1)
+        .mix(F::doubler::Mix, 0.5f);
+    FxB(b, F::Granular)
+        .ex(F::granular::Size, "size", "Grain Size", 10, 500, 90, "ms")
+        .ex(F::granular::Density, "density", "Density", 1, 60, 16, "/s")
+        .fl(F::granular::Pitch, "pitch", "Pitch", -24, 24, 0, "st")
+        .fl(F::granular::Spray, "spray", "Spray", 0, 1, 0.3f)
+        .fl(F::granular::Spread, "spread", "Stereo Spread", 0, 1, 0.7f)
+        .fl(F::granular::Reverse, "reverse", "Reverse", 0, 1, 0)
+        .fl(F::granular::Feedback, "feedback", "Feedback", 0, 0.9f, 0)
+        .bo(F::granular::Freeze, "freeze", "Freeze", false)
+        .mix(F::granular::Mix, 0.5f);
+    FxB(b, F::TapeStop)
+        .bo(F::tapestop::Stop, "stop", "Stop (hold)", false)
+        .ex(F::tapestop::Time, "time", "Stop Time", 0.05f, 5, 0.8f, "s")
+        .fl(F::tapestop::Curve, "curve", "Curve", 0, 1, 0.5f);
+    FxB(b, F::Pump)
+        .en(F::pump::Division, "division", "Rate", kDivNames, 2)
+        .fl(F::pump::Depth, "depth", "Depth", 0, 1, 0.7f)
+        .fl(F::pump::Release, "release", "Release", 0.05f, 1, 0.6f)
+        .fl(F::pump::Curve, "curve", "Curve", 0, 1, 0.5f);
+    FxB(b, F::Resonator)
+        .en(F::resonator::Chord, "chord", "Chord",
+            {"unison", "octaves", "fifth", "major", "minor", "sus4", "maj7", "min7"}, 3)
+        .in(F::resonator::Root, "root", "Root Note", 24, 96, 48)
+        .bo(F::resonator::KeyFollow, "keyfollow", "Follow Last Note", true)
+        .ex(F::resonator::Decay, "decay", "Decay", 0.05f, 8, 1.2f, "s")
+        .fl(F::resonator::Tone, "tone", "Tone", 0, 1, 0.6f)
+        .mix(F::resonator::Mix, 0.4f);
+    FxB(b, F::Swell)
+        .ex(F::swell::Attack, "attack", "Attack", 10, 3000, 400, "ms")
+        .db(F::swell::Thresh, "thresh", "Threshold", -60, 0, -36)
+        .fl(F::swell::Curve, "curve", "Curve", 0, 1, 0.5f);
+    FxB(b, F::Talkbox)
+        .en(F::talkbox::Mode, "mode", "Mode", {"manual", "lfo", "envelope"}, 1)
+        .fl(F::talkbox::Vowel, "vowel", "Vowel (a-e-i-o-u)", 0, 1, 0)
+        .ex(F::talkbox::Rate, "rate", "LFO Rate", 0.05f, 10, 0.5f, "Hz")
+        .sync(F::talkbox::Sync)
+        .fl(F::talkbox::Depth, "depth", "Depth", 0, 1, 1)
+        .fl(F::talkbox::Sens, "sens", "Envelope Sens", 0, 1, 0.5f)
+        .fl(F::talkbox::Reso, "reso", "Resonance", 0, 1, 0.6f)
+        .mix(F::talkbox::Mix, 1);
+    FxB(b, F::GatedVerb)
+        .en(F::gatedverb::Mode, "mode", "Mode", {"gated", "reverse", "decay"}, 0)
+        .ex(F::gatedverb::Size, "size", "Length", 50, 1000, 300, "ms")
+        .fl(F::gatedverb::PreDelay, "predelay", "Pre-Delay", 0, 200, 10, "ms")
+        .fl(F::gatedverb::Density, "density", "Density", 0, 1, 0.7f)
+        .fl(F::gatedverb::Damp, "damp", "Damping", 0, 1, 0.3f)
+        .fl(F::gatedverb::Width, "width", "Width", 0, 1, 1)
+        .mix(F::gatedverb::Mix, 0.35f);
+    FxB(b, F::Sympathetic)
+        .fl(F::sympathetic::Amount, "amount", "Amount", 0, 1, 0.3f)
+        .ex(F::sympathetic::Decay, "decay", "Decay", 0.2f, 12, 4, "s")
+        .bo(F::sympathetic::PedalFollow, "pedal", "Only With Sustain Pedal", true)
+        .fl(F::sympathetic::Tone, "tone", "Tone", 0, 1, 0.5f);
+    FxB(b, F::Scanner)
+        .en(F::scanner::Mode, "mode", "Mode", {"v1", "v2", "v3", "c1", "c2", "c3"}, 5)
+        .ex(F::scanner::Rate, "rate", "Rate", 4, 9, 6.9f, "Hz");
 
     // Chorus and delay sit in the default chain switched off (matching presets
     // made before the rack existed); every other block is on when inserted.

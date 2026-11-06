@@ -3,6 +3,7 @@
 // {
 //   "format": "hsynth-preset", "version": 1,
 //   "name": "...", "category": "...", "author": "...", "comment": "...",
+//   "tags": ["warm", "pad"],                                   (optional)
 //   "samples": { "a": "factory/piano/piano.sfz", "b": "", "c": "" },
 //   "impulses": { "cab": "user/ir/4x12.wav", "reverb": "" },   (optional)
 //   "params": { "master.volume": 0.7, "a.type": "fm", ... }
@@ -26,6 +27,7 @@ struct Preset {
     std::string category;
     std::string author;
     std::string comment;
+    std::vector<std::string> tags;      // free-form search tags
     std::vector<float> params;          // kNumParams values
     std::string samples[kNumLayers];    // library-relative sample/SFZ paths
     std::string impulses[2];            // user IRs: cabinet, IR reverb (library-relative)

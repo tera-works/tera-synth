@@ -1,6 +1,7 @@
 #include "hsynth/voice.h"
 
 #include "hsynth/dsp/resample.h"
+#include "hsynth/dsp/simd.h"
 
 namespace hsynth {
 
@@ -8,6 +9,7 @@ namespace hsynth {
 
 void PcmPlayer::start(const Region* r, int key, float velocity, float startFrac, float velTrackScale,
                       float sampleRate, float gainDb) {
+    detachStream();
     region_ = r;
     released_ = false;
     sr_ = sampleRate;
@@ -17,6 +19,14 @@ void PcmPlayer::start(const Region* r, int key, float velocity, float startFrac,
     off += (int64_t)((double)clampf(startFrac, 0.0f, 1.0f) * (double)std::max<int64_t>(0, end_ - off));
     if (off >= end_) off = std::max<int64_t>(0, end_ - 1);
     pos_ = (double)off;
+    starved_ = false;
+    if (s->streamed && s->streamer) {
+        // the ring starts a little before the end of the preloaded head (so
+        // that every interpolation window is in one of the two)
+        streamer_ = s->streamer;
+        stream_ = streamer_->claim(s, std::max<int64_t>(0, std::max<int64_t>(s->preloadFrames - StreamSlot::kMirror,
+                                                                                off - resample::kTaps)));
+    }
     looping_ = (r->loopMode == LoopMode::Continuous || r->loopMode == LoopMode::Sustain) && r->loopEnd > r->loopStart + 1 &&
                r->loopStart >= 0 && r->loopEnd <= s->frames;
     xfLen_ = 0;
@@ -81,7 +91,7 @@ void PcmPlayer::startFade(float seconds) {
 
 void PcmPlayer::fadeOut() {
     if (!region_) return;
-    if (delay_ > 0) { region_ = nullptr; return; }
+    if (delay_ > 0) { finish(); return; }
     startFade(Voice::kSwapFadeSeconds);
 }
 
@@ -105,9 +115,29 @@ void PcmPlayer::setPitch(float pitchSemis, float engineRate, int quality) {
     cut_ = resample::cutoffIndex(s);
 }
 
+inline const float* PcmPlayer::frames0(int c, int64_t first, int count) const {
+    const Sample* s = region_->sample;
+    if (first >= 0 && first + count <= s->preloadFrames) return s->channel(c) + first;
+    if (!stream_) return nullptr;
+    const float* p = stream_->window(c, first, count);
+    if (!p && streamer_->offline() && first >= stream_->start && first + count <= s->frames) {
+        streamer_->waitFor(*stream_, first + count);  // offline render: wait for the disk
+        p = stream_->window(c, first, count);
+    }
+    return p;
+}
+
+inline float PcmPlayer::streamAt(int c, int64_t idx) const {
+    if (idx < 0 || idx >= region_->sample->frames) return 0.0f;
+    if (const float* p = frames0(c, idx, 1)) return *p;
+    starved_ = true;
+    return 0.0f;
+}
+
 inline float PcmPlayer::atLevel(int c, int64_t j) const {
     if (j < 0) return 0.0f;
     const Sample* s = region_->sample;
+    if (s->streamed) return streamAt(c, j);
     if (looping_) {
         // loop points are level-0 frames: wrap in that domain
         int64_t j0 = j << level_;
@@ -134,17 +164,42 @@ float PcmPlayer::sincAt(int c, double pos) const {
     float acc = 0.0f;
     const bool inside = first >= 0 && last < s->levelFrames(level_) &&
                         (!looping_ || (last << level_) < region_->loopEnd);
-    if (inside) {
-        const float* d = s->levelChannel(level_, c) + first;
-        for (int k = 0; k < resample::kTaps; ++k) acc += d[k] * (k0[k] + pf * (k1[k] - k0[k]));
+    const float* d = !inside ? nullptr : s->streamed ? frames0(c, first, resample::kTaps) : s->levelChannel(level_, c) + first;
+    if (d) {
+        acc = simd::dotLerpKernel(d, k0, k1, pf, resample::kTaps);
     } else {
         for (int k = 0; k < resample::kTaps; ++k) acc += atLevel(c, first + k) * (k0[k] + pf * (k1[k] - k0[k]));
     }
     return acc;
 }
 
+void PcmPlayer::sincAt2(double pos, float& l, float& r) const {
+    const double p = level_ ? std::ldexp(pos, -level_) : pos;
+    const int64_t idx = (int64_t)p;
+    const int64_t first = idx - (resample::kTaps / 2 - 1);
+    const int64_t last = first + resample::kTaps - 1;
+    const Sample* s = region_->sample;
+    if (!(first >= 0 && last < s->levelFrames(level_) && (!looping_ || (last << level_) < region_->loopEnd))) {
+        l = sincAt(0, pos);
+        r = sincAt(1, pos);
+        return;
+    }
+    const float* d0 = s->streamed ? frames0(0, first, resample::kTaps) : s->levelChannel(level_, 0) + first;
+    const float* d1 = s->streamed ? frames0(1, first, resample::kTaps) : s->levelChannel(level_, 1) + first;
+    if (!d0 || !d1) {
+        l = sincAt(0, pos);
+        r = sincAt(1, pos);
+        return;
+    }
+    const float fp = (float)(p - (double)idx) * (float)resample::kPhases;
+    const int ph = std::min((int)fp, resample::kPhases - 1);
+    const float* k0 = resample::kernel(cut_, ph);
+    simd::dotLerpKernel2(d0, d1, k0, k0 + resample::kTaps, fp - (float)ph, resample::kTaps, l, r);
+}
+
 inline float PcmPlayer::at(int c, int64_t idx) const {
     if (idx < 0) return 0.0f;
+    if (region_->sample->streamed) return streamAt(c, idx);
     if (looping_ && idx >= region_->loopEnd) idx = region_->loopStart + (idx - region_->loopEnd) % (region_->loopEnd - region_->loopStart);
     const Sample* s = region_->sample;
     if (idx >= s->frames + Sample::kPadFrames) return 0.0f;
@@ -154,9 +209,11 @@ inline float PcmPlayer::at(int c, int64_t idx) const {
 inline float PcmPlayer::sampleAt(int c, int64_t idx, float f) const {
     float xm1, x0, x1, x2;
     const int64_t lim = looping_ ? region_->loopEnd : region_->sample->frames + Sample::kPadFrames;
-    if (idx >= 1 && idx + 2 < lim) {  // common case: all four taps inside, no wrap
-        const float* d = region_->sample->channel(c) + idx;
-        xm1 = d[-1]; x0 = d[0]; x1 = d[1]; x2 = d[2];
+    const float* d = nullptr;
+    if (region_->sample->streamed) d = frames0(c, idx - 1, 4);
+    else if (idx >= 1 && idx + 2 < lim) d = region_->sample->channel(c) + idx - 1;  // common case: all four taps inside, no wrap
+    if (d) {
+        xm1 = d[0]; x0 = d[1]; x1 = d[2]; x2 = d[3];
     } else {
         xm1 = at(c, idx - 1); x0 = at(c, idx); x1 = at(c, idx + 1); x2 = at(c, idx + 2);
     }
@@ -168,14 +225,24 @@ inline float PcmPlayer::sampleAt(int c, int64_t idx, float f) const {
 
 void PcmPlayer::render(float* L, float* R, int n, float gain) {
     if (!region_) return;
+    if (stream_) stream_->low.store((int64_t)pos_ - resample::kTaps, std::memory_order_release);
+    struct StarveReport {  // one underrun per block that had to play silence
+        const PcmPlayer& p;
+        DiskStreamer* s;
+        ~StarveReport() {
+            if (p.starved_ && s) s->underrun();
+            p.starved_ = false;
+        }
+    } starveReport{*this, streamer_};
     const bool stereo = region_->sample->channels == 2;
     const float gl = gainL_ * gain, gr = gainR_ * gain;
     const RegionFilter ft = region_->filter;
     for (int i = 0; i < n; ++i) {
         if (delay_ > 0) { --delay_; continue; }
         const int64_t idx = (int64_t)pos_;
-        float l = value(0, pos_);
-        float r = stereo ? value(1, pos_) : l;
+        float l, r;
+        if (stereo) value2(pos_, l, r);
+        else r = l = value(0, pos_);
         if (xfLen_ > 0 && looping_ && idx >= region_->loopEnd - xfLen_) {
             // loop crossfade: blend in the material before the loop start
             const int64_t len = region_->loopEnd - region_->loopStart;
@@ -206,7 +273,7 @@ void PcmPlayer::render(float* L, float* R, int n, float gain) {
         }
         if (fadeStep_ > 0.0f) {
             fade_ -= fadeStep_;
-            if (fade_ <= 0.0f) { region_ = nullptr; return; }
+            if (fade_ <= 0.0f) { finish(); return; }
             e *= fade_;
         }
         L[i] += l * gl * e;
@@ -215,11 +282,11 @@ void PcmPlayer::render(float* L, float* R, int n, float gain) {
         if (looping_) {
             if (pos_ >= (double)region_->loopEnd) pos_ -= (double)(region_->loopEnd - region_->loopStart);
         } else if (pos_ >= (double)end_) {
-            region_ = nullptr;
+            finish();
             return;
         }
         if (useEnv_ && envDelay_ == 0 && !env_.active()) {
-            region_ = nullptr;
+            finish();
             return;
         }
     }
@@ -227,12 +294,79 @@ void PcmPlayer::render(float* L, float* R, int n, float gain) {
 
 // -------------------------------------------------------------------- Voice
 
+// Multi-segment envelope: point 0 at t = 0, point i reached after the sum of
+// the times of points 1..i. While the key is held and a loop point is set,
+// time wraps from the last point back to the loop point.
+void Voice::advanceMseg(const float* p, float dtSec, float tempo) {
+    const int np = std::max(2, std::min(P::kMsegPoints, (int)p[P::MsegPoints]));
+    const bool beats = p[P::MsegBeats] > 0.5f;
+    float total = 0.0f, loopStart = 0.0f;
+    const int loop = (int)p[P::MsegLoop];
+    for (int i = 1; i < np; ++i) {
+        if (i == loop) loopStart = total;
+        total += std::max(0.0f, p[P::msegPt(i, P::MsegTime)]);
+    }
+    if (loop == 0) loopStart = -1.0f;
+    msegT_ += beats ? dtSec * tempo / 60.0f : dtSec;
+    if (!released_ && loopStart >= 0.0f && loop < np - 1 && total > loopStart + 1e-4f && msegT_ > total)
+        msegT_ = loopStart + std::fmod(msegT_ - loopStart, total - loopStart);
+    float t0 = 0.0f;
+    msegValue_ = p[P::msegPt(np - 1, P::MsegLevel)];
+    for (int i = 1; i < np; ++i) {
+        const float d = std::max(0.0f, p[P::msegPt(i, P::MsegTime)]);
+        if (msegT_ < t0 + d) {
+            float x = d > 0.0f ? (msegT_ - t0) / d : 1.0f;
+            const float c = p[P::msegPt(i, P::MsegCurve)];
+            if (c > 0.0f) x = std::pow(x, 1.0f + 4.0f * c);                 // slow start
+            else if (c < 0.0f) x = 1.0f - std::pow(1.0f - x, 1.0f - 4.0f * c);  // fast start
+            const float a = p[P::msegPt(i - 1, P::MsegLevel)], b = p[P::msegPt(i, P::MsegLevel)];
+            msegValue_ = a + (b - a) * x;
+            break;
+        }
+        t0 += d;
+    }
+}
+
+// Motion lane: tempo-synced step values (part parameters), optionally smoothed.
+float Voice::motionValue(const VoiceContext& ctx, int lane) const {
+    const float* p = ctx.params;
+    const float stepBeats = fx::syncBeats((int)p[P::motion(lane, P::MotionRate)] + 1);
+    if (stepBeats <= 0.0f) return 0.0f;
+    const int steps = std::max(1, std::min(P::kMotionSteps, (int)p[P::motion(lane, P::MotionSteps)]));
+    const double pos = ctx.beat / stepBeats;
+    const double fl = std::floor(pos);
+    const int idx = (int)((int64_t)fl % steps + steps) % steps;
+    const float frac = (float)(pos - fl);
+    const float v = p[P::motion(lane, P::MotionValue1 + idx)];
+    const float sm = p[P::motion(lane, P::MotionSmooth)];
+    if (sm <= 0.0f || frac < 1.0f - sm) return v;
+    const float next = p[P::motion(lane, P::MotionValue1 + (idx + 1) % steps)];
+    float x = (frac - (1.0f - sm)) / sm;
+    x = x * x * (3.0f - 2.0f * x);
+    return v + (next - v) * x;
+}
+
+void Voice::stopPlayers() {
+    for (auto& ly : layers_)
+        for (auto& pl : ly.pcm) pl.stop();
+    for (auto& pl : relPcm_) pl.stop();
+    relActive_ = false;
+}
+
+void Voice::deactivate() {
+    active_ = false;
+    stopPlayers();
+}
+
 void Voice::prepare(float sampleRate) {
     sampleRate_ = sampleRate;
     ampEnv_.setSampleRate(sampleRate);
     env2_.setSampleRate(sampleRate);
     env3_.setSampleRate(sampleRate);
-    for (auto& l : layers_) l.fm.setSampleRate(sampleRate);
+    for (auto& l : layers_) {
+        l.fm.setSampleRate(sampleRate);
+        l.organ.setSampleRate(sampleRate);
+    }
     if (!combMem_) {
         combMem_.reset(new float[2 * Comb::kSize]());
         filterL_.setCombBuffer(combMem_.get());
@@ -242,6 +376,7 @@ void Voice::prepare(float sampleRate) {
 }
 
 void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom) {
+    stopPlayers();  // a reused (stolen) voice: release the previous note's disk streams
     const float* p = ctx.params;
     noteId_ = e.noteId;
     key_ = e.key;
@@ -274,6 +409,13 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     lfo3_.reset(p[P::Lfo3KeySync] > 0.5f ? 0.0f : std::fmod(random * 7.31f, 1.0f));
     lfo3Value_ = 0.0f;
     filterL_.reset();
+    lfo1Depth_ = lfo3Depth_ = env2Scale_ = env3Scale_ = 1.0f;
+    releaseVel_ = 0.5f;
+    msegT_ = 0.0f;
+    msegValue_ = p[P::msegPt(0, P::MsegLevel)];
+    dampGain_ = 1.0f;
+    startDelay = 0;
+    releaseAt = -1;
     filterR_.reset();
     vfx_.reset();
 
@@ -295,10 +437,17 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
             case LayerType::VA:
                 ly.osc1.reset(unisonDetune != 0.0f ? rng_.unipolar() : 0.0f);  // unison: free-running phases
                 ly.osc2.reset(rng_.unipolar());
+                ly.sub.reset(0.0f);
+                for (auto& o : ly.ss1) o.reset(rng_.unipolar());
+                for (auto& o : ly.ss2) o.reset(rng_.unipolar());
                 break;
             case LayerType::FM:
-                ly.fm.noteOn(velocity_);
+                ly.fm.noteOn(velocity_, key_);
                 ly.fm.control(p, l);
+                break;
+            case LayerType::Organ:
+                ly.organ.noteOn(key_, rng_);
+                ly.organ.control(p, l);
                 break;
             case LayerType::WT:
                 ly.wt.reset(rng_, (int)p[P::layer(l, P::WtUnison)]);
@@ -341,6 +490,8 @@ void Voice::release() {
     }
     if (!(anyLayer && allOneShot)) ampEnv_.gate(false);
     env2_.gate(false);
+    for (auto& ly : layers_)
+        if (ly.type == LayerType::Organ && !ly.finished) ly.organ.noteOff();
     env3_.gate(false);
     for (auto& ly : layers_) {
         if (ly.type == LayerType::FM) ly.fm.noteOff();
@@ -462,7 +613,7 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
         case ModSource::Key: return (float)(key_ - 60) / 60.0f;
         case ModSource::AmpEnv: return ampEnv_.level();
         case ModSource::Env2: return env2_.level();
-        case ModSource::Lfo1: return lfo1Value_;
+        case ModSource::Lfo1: return lfo1Value_ * lfo1Depth_;
         case ModSource::Lfo2: return ctx.lfo2;
         case ModSource::ModWheel: return ctx.modWheel;
         case ModSource::PitchBend: return ctx.pitchBendNorm;
@@ -478,9 +629,20 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
         case ModSource::Cc2:
         case ModSource::Cc3:
         case ModSource::Cc4: return ctx.cc[(int)s - (int)ModSource::Cc1];
-        case ModSource::Lfo3: return lfo3Value_;
+        case ModSource::Lfo3: return lfo3Value_ * lfo3Depth_;
         case ModSource::Env3: return env3_.level();
         case ModSource::Constant: return 1.0f;
+        case ModSource::ReleaseVelocity: return releaseVel_;
+        case ModSource::NoteTimbreBi: return noteTimbre_ * 2.0f - 1.0f;
+        case ModSource::Macro1:
+        case ModSource::Macro2:
+        case ModSource::Macro3:
+        case ModSource::Macro4: return ctx.params[P::Macro1 + ((int)s - (int)ModSource::Macro1)];
+        case ModSource::Motion1:
+        case ModSource::Motion2:
+        case ModSource::Motion3:
+        case ModSource::Motion4: return motionValue(ctx, (int)s - (int)ModSource::Motion1);
+        case ModSource::Mseg: return msegValue_;
         default: return 0.0f;
     }
 }
@@ -509,7 +671,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         }
         relActive_ = any;
         if (mainDone_) {
-            if (!relActive_) active_ = false;
+            if (!relActive_) deactivate();
             return;
         }
     }
@@ -528,24 +690,61 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     }
 
     if (!stolen_) ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
-    env2_.set(p[P::Env2Attack], p[P::Env2Decay], p[P::Env2Sustain], p[P::Env2Release]);
+    env2_.set(p[P::Env2Attack] * env2Scale_, p[P::Env2Decay] * env2Scale_, p[P::Env2Sustain], p[P::Env2Release] * env2Scale_);
     const float e2 = env2_.processBlock(n);
-    env3_.set(p[P::Env3Attack], p[P::Env3Decay], p[P::Env3Sustain], p[P::Env3Release]);
+    env3_.set(p[P::Env3Attack] * env3Scale_, p[P::Env3Decay] * env3Scale_, p[P::Env3Sustain], p[P::Env3Release] * env3Scale_);
     env3_.processBlock(n);
+    // half pedal: notes held only by a partly raised pedal fade out
+    if (sustained && ctx.pedal < 0.85f) {
+        const float tau = 0.1f + 8.0f * ctx.pedal * ctx.pedal;
+        dampGain_ *= std::exp(-dtSec / tau);
+    }
 
-    // Modulation matrix
-    float d[(int)ModDest::Count] = {};
+    // Modulation matrix: one scan collects the active slots, then pass 1
+    // evaluates the destinations that scale other modulation (LFO depths,
+    // amounts of slots 1-4; e.g. pressure sets the vibrato depth per note) and
+    // pass 2 everything else.
+    int aSrc[P::kModSlots], aVia[P::kModSlots], aDst[P::kModSlots], aSlot[P::kModSlots];
+    float aAmt[P::kModSlots];
+    int na = 0;
+    bool anyMeta = false, usesMseg = false;
+    auto isMeta = [](int dst) { return dst >= (int)ModDest::Lfo1Depth && dst <= (int)ModDest::Mod4Amt; };
     for (int s = 0; s < P::kModSlots; ++s) {
+        const float amt = p[P::mod(s, P::ModAmt)];
+        if (amt == 0.0f) continue;
         const int src = (int)p[P::mod(s, P::ModSrc)];
         const int dst = (int)p[P::mod(s, P::ModDst)];
-        const float amt = p[P::mod(s, P::ModAmt)];
-        if (src <= 0 || dst <= 0 || dst >= (int)ModDest::Count || amt == 0.0f) continue;
-        float v = modSource((ModSource)src, ctx) * amt;
+        if (src <= 0 || dst <= 0 || dst >= (int)ModDest::Count) continue;
         const int via = (int)p[P::mod(s, P::ModVia)];
-        if (via > 0) v *= modSource((ModSource)via, ctx);
-        d[dst] += v;
+        aSrc[na] = src;
+        aVia[na] = via;
+        aDst[na] = dst;
+        aAmt[na] = amt;
+        aSlot[na++] = s;
+        anyMeta = anyMeta || isMeta(dst);
+        usesMseg = usesMseg || src == (int)ModSource::Mseg || via == (int)ModSource::Mseg;
     }
+    if (usesMseg) advanceMseg(p, dtSec, ctx.tempo);
+    float d[(int)ModDest::Count] = {};
+    float slotScale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    lfo1Depth_ = lfo3Depth_ = 1.0f;
+    auto evalSlot = [&](int i, float amt) {
+        float v = modSource((ModSource)aSrc[i], ctx) * amt;
+        if (aVia[i] > 0) v *= modSource((ModSource)aVia[i], ctx);
+        d[aDst[i]] += v;
+    };
+    if (anyMeta) {
+        for (int i = 0; i < na; ++i)
+            if (isMeta(aDst[i])) evalSlot(i, aAmt[i]);
+        lfo1Depth_ = clampf(1.0f + d[(int)ModDest::Lfo1Depth], 0.0f, 4.0f);
+        lfo3Depth_ = clampf(1.0f + d[(int)ModDest::Lfo3Depth], 0.0f, 4.0f);
+        for (int k = 0; k < 4; ++k) slotScale[k] = clampf(1.0f + d[(int)ModDest::Mod1Amt + k], 0.0f, 4.0f);
+    }
+    for (int i = 0; i < na; ++i)
+        if (!isMeta(aDst[i])) evalSlot(i, aSlot[i] < 4 ? aAmt[i] * slotScale[aSlot[i]] : aAmt[i]);
     auto D = [&](ModDest x) { return d[(int)x]; };
+    env2Scale_ = D(ModDest::Env2Time) != 0.0f ? fastExp2(clampf(D(ModDest::Env2Time), -2.0f, 2.0f) * 3.0f) : 1.0f;
+    env3Scale_ = D(ModDest::Env3Time) != 0.0f ? fastExp2(clampf(D(ModDest::Env3Time), -2.0f, 2.0f) * 3.0f) : 1.0f;
 
     // amp envelope time modulation (x8 per unit), only when modulated
     if (!stolen_ && (D(ModDest::AmpAttack) != 0.0f || D(ModDest::AmpDecay) != 0.0f || D(ModDest::AmpRelease) != 0.0f)) {
@@ -584,7 +783,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
 
     // Filter
     const auto ftype = (FilterType)(int)p[P::FilterType];
-    const float cutoffOct = p[P::FilterKeytrack] * (float)(key_ - 60) / 12.0f + p[P::FilterEnvAmt] * e2 * 6.0f +
+    const float cutoffOct = p[P::FilterKeytrack] * (float)(key_ - 60) / 12.0f + (p[P::FilterEnvAmt] + D(ModDest::FilterEnvAmt)) * e2 * 6.0f +
                             p[P::FilterVelAmt] * 3.0f * (velocity_ - 1.0f) + D(ModDest::Cutoff) * 5.0f;
     const float cutoff = p[P::FilterCutoff] * fastExp2(clampf(cutoffOct, -12.0f, 12.0f));
     const float reso = clampf(p[P::FilterReso] + D(ModDest::Resonance), 0.0f, 1.0f);
@@ -596,13 +795,13 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const auto vfxType = (VfxType)(int)p[P::VfxType];
     if (vfxType != VfxType::Off)
         vfx_.set(vfxType, p[P::VfxAmount] + D(ModDest::VfxAmount), p[P::VfxMix] + D(ModDest::VfxMix),
-                 midiToHz(basePitch) * p[P::VfxRatio] / sr, hq);
+                 midiToHz(basePitch) * p[P::VfxRatio] * fastExp2(clampf(D(ModDest::VfxRatio), -1.0f, 1.0f) * 2.0f) / sr, hq);
     else
         vfx_.set(VfxType::Off, 0.0f, 0.0f, 0.0f);
 
     // Amp / pan
     const float vs = p[P::AmpVelSens];
-    const float ampTarget = (1.0f - vs + vs * velocity_ * velocity_) * clampf(1.0f + D(ModDest::Amp), 0.0f, 2.0f);
+    const float ampTarget = (1.0f - vs + vs * velocity_ * velocity_) * clampf(1.0f + D(ModDest::Amp), 0.0f, 2.0f) * dampGain_;
     const float pan = clampf(D(ModDest::Pan) + unisonPan, -1.0f, 1.0f);
     const float panL = std::min(1.0f, 1.0f - pan), panR = std::min(1.0f, 1.0f + pan);
     const float morph = clampf(p[P::Morph] + D(ModDest::Morph), -1.0f, 1.0f);
@@ -635,7 +834,8 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         switch (ly.type) {
             case LayerType::VA: {
                 const float dt1T = midiToHz(lpitch) / sr;
-                const float dt2T = midiToHz(lpitch + p[P::layer(l, P::VaOsc2Semi)] + p[P::layer(l, P::VaDetune)] / 100.0f) / sr;
+                const float dt2T = midiToHz(lpitch + p[P::layer(l, P::VaOsc2Semi)] + D(ModDest::VaOsc2Pitch) * 24.0f +
+                                            (p[P::layer(l, P::VaDetune)] + D(ModDest::VaDetune) * 50.0f) / 100.0f) / sr;
                 if (firstBlock_) { ly.dt1 = dt1T; ly.dt2 = dt2T; }
                 const float s1 = (dt1T - ly.dt1) * invN, s2 = (dt2T - ly.dt2) * invN;
                 const auto w1 = (VaWave)(int)p[P::layer(l, P::VaWave1)];
@@ -643,12 +843,47 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 const float pw = clampf(p[P::layer(l, P::VaPw)] + D(ModDest::VaPulseWidth) * 0.45f, 0.05f, 0.95f);
                 const float mix = clampf(p[P::layer(l, P::VaMix)] + D(ModDest::VaOscMix), 0.0f, 1.0f);
                 const float noise = clampf(p[P::layer(l, P::VaNoise)] + D(ModDest::VaNoise), 0.0f, 1.0f);
-                for (int i = 0; i < n; ++i) {
-                    ly.dt1 += s1;
-                    ly.dt2 += s2;
-                    float v = ly.osc1.tick(w1, ly.dt1, pw) * (1.0f - mix) + ly.osc2.tick(w2, ly.dt2, pw) * mix;
-                    if (noise > 0.0f) v += noise * rng_.bipolar();
-                    tmp[i] = v;
+                const bool sync = p[P::layer(l, P::VaSync)] > 0.5f;
+                const float xmod = p[P::layer(l, P::VaXmod)];
+                const float subLvl = p[P::layer(l, P::VaSub)];
+                const bool fancy = sync || xmod > 0.0f || subLvl > 0.0f || w1 == VaWave::SuperSaw || w2 == VaWave::SuperSaw;
+                if (!fancy) {
+                    for (int i = 0; i < n; ++i) {
+                        ly.dt1 += s1;
+                        ly.dt2 += s2;
+                        float v = ly.osc1.tick(w1, ly.dt1, pw) * (1.0f - mix) + ly.osc2.tick(w2, ly.dt2, pw) * mix;
+                        if (noise > 0.0f) v += noise * rng_.bipolar();
+                        tmp[i] = v;
+                    }
+                } else {
+                    // supersaw: centre + 6 detuned saws (detune curve of the classic design)
+                    static const float kSs[6] = {-0.11002313f, -0.06288439f, -0.01952356f, 0.01991221f, 0.06216538f, 0.10745242f};
+                    const float det = p[P::layer(l, P::VaSsDetune)];
+                    const float ssDet = det * det * 0.9f + det * 0.1f;
+                    const float ssMix = p[P::layer(l, P::VaSsMix)];
+                    const float cg = 1.0f - 0.55f * ssMix, sg = 0.42f * ssMix;
+                    auto osc = [&](VaOsc& o, VaOsc* side, VaWave w, float dt) {
+                        if (w != VaWave::SuperSaw) return o.tick(w, dt, pw);
+                        float v = o.tick(VaWave::Saw, dt, pw) * cg;
+                        for (int k = 0; k < 6; ++k) v += side[k].tick(VaWave::Saw, dt * (1.0f + kSs[k] * ssDet), pw) * sg;
+                        return v;
+                    };
+                    const int sw = (int)p[P::layer(l, P::VaSubWave)];
+                    const float subRatio = sw == 2 ? 0.25f : 0.5f;
+                    const VaWave subWave = sw == 1 ? VaWave::Sine : VaWave::Square;
+                    for (int i = 0; i < n; ++i) {
+                        ly.dt1 += s1;
+                        ly.dt2 += s2;
+                        const float o1 = osc(ly.osc1, ly.ss1, w1, ly.dt1);
+                        float d2 = ly.dt2;
+                        if (xmod > 0.0f) d2 = std::max(0.0f, d2 * (1.0f + 2.0f * xmod * o1));
+                        if (sync && ly.osc1.wrapped()) ly.osc2.reset(ly.osc1.wrapFrac() * d2);
+                        const float o2 = osc(ly.osc2, ly.ss2, w2, d2);
+                        float v = o1 * (1.0f - mix) + o2 * mix;
+                        if (subLvl > 0.0f) v += subLvl * ly.sub.tick(subWave, ly.dt1 * subRatio, 0.5f);
+                        if (noise > 0.0f) v += noise * rng_.bipolar();
+                        tmp[i] = v;
+                    }
                 }
                 ly.dt1 = dt1T;
                 ly.dt2 = dt2T;
@@ -656,9 +891,12 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
             }
             case LayerType::FM: {
                 const float opMod[P::kFmOps] = {D(ModDest::FmOp1Level), D(ModDest::FmOp2Level), D(ModDest::FmOp3Level),
-                                                D(ModDest::FmOp4Level), D(ModDest::FmOp5Level), D(ModDest::FmOp6Level)};
-                ly.fm.control(p, l, opMod);
-                const float dtT = midiToHz(lpitch) / sr;
+                                                D(ModDest::FmOp4Level), D(ModDest::FmOp5Level), D(ModDest::FmOp6Level),
+                                                D(ModDest::FmOp7Level), D(ModDest::FmOp8Level)};
+                ly.fm.control(p, l, opMod, D(ModDest::FmModPitch) * 24.0f, lfo1Value_);
+                const float pegAmt = p[P::layer(l, P::FmPegAmt)];
+                const float peg = pegAmt != 0.0f ? pegAmt * std::exp(-timeSinceOn_ / std::max(0.001f, p[P::layer(l, P::FmPegTime)])) : 0.0f;
+                const float dtT = midiToHz(lpitch + peg) / sr;
                 if (firstBlock_) ly.dt1 = dtT;
                 const float index = clampf(p[P::layer(l, P::FmIndex)] + D(ModDest::FmIndex), 0.0f, 1.0f) * 2.5f;
                 const float fb = clampf(p[P::layer(l, P::FmFeedback)] + D(ModDest::FmFeedback), 0.0f, 1.0f);
@@ -677,8 +915,15 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 const float pos = p[P::layer(l, P::WtPos)] + p[P::layer(l, P::WtPosEnv)] * e2 + D(ModDest::WtPos);
                 const float warpAmt = clampf(p[P::layer(l, P::WtWarpAmt)] + D(ModDest::WtWarp), 0.0f, 1.0f);
                 layerStereo = ly.wt.render(*t, clampf(pos, 0.0f, 1.0f), midiToHz(lpitch) / sr, (WtWarp)(int)p[P::layer(l, P::WtWarpMode)],
-                                           warpAmt, (int)p[P::layer(l, P::WtUnison)], p[P::layer(l, P::WtDetune)],
-                                           p[P::layer(l, P::WtSpread)], tmp, tmpR, n);
+                                           warpAmt, (int)p[P::layer(l, P::WtUnison)],
+                                           p[P::layer(l, P::WtDetune)] * clampf(1.0f + D(ModDest::WtDetune), 0.0f, 4.0f),
+                                           clampf(p[P::layer(l, P::WtSpread)] + D(ModDest::WtSpread), 0.0f, 1.0f), tmp, tmpR, n);
+                break;
+            }
+            case LayerType::Organ: {
+                ly.organ.control(p, l);
+                std::fill(tmp, tmp + n, 0.0f);
+                ly.organ.render(tmp, n, midiToHz(lpitch) / sr, rng_);
                 break;
             }
             case LayerType::PCM: {
@@ -753,7 +998,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const bool envDone = !ampEnv_.active() || (ampEnv_.stage() == Adsr::Stage::Sustain && ampEnv_.level() <= 0.0f);
     if (envDone || !anyLayerRunning) {
         mainDone_ = true;
-        if (!relActive_) active_ = false;
+        if (!relActive_) deactivate();
     }
 }
 

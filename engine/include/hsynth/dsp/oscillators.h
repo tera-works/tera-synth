@@ -95,12 +95,21 @@ public:
                 break;
         }
         phase_ += dt;
-        if (phase_ >= 1.0f) phase_ -= 1.0f;
+        wrapped_ = phase_ >= 1.0f;
+        if (wrapped_) {
+            phase_ -= 1.0f;
+            wrapFrac_ = dt > 0.0f ? phase_ / dt : 0.0f;  // fraction of this sample after the wrap
+        }
         return v;
     }
+    // hard sync: did the last tick wrap, and how far past the wrap (in samples)
+    bool wrapped() const { return wrapped_; }
+    float wrapFrac() const { return wrapFrac_; }
 
 private:
     float phase_ = 0.0f;
+    bool wrapped_ = false;
+    float wrapFrac_ = 0.0f;
 };
 
 }  // namespace hsynth

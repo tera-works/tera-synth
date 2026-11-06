@@ -48,6 +48,10 @@ public:
     bool running() const { return running_.load(); }
     AudioOutStats stats();
     void resetPeaks();
+    // Muted: the device gets silence; the scope, the recording and the
+    // timing statistics still see the engine output (silent tests).
+    void setMuted(bool m) { muted_.store(m); }
+    bool muted() const { return muted_.load(); }
 
     // Oscilloscope tap (written by the audio thread, read by UI; tearing is fine).
     static constexpr int kScopeSize = 4096;
@@ -81,6 +85,7 @@ private:
     std::vector<float> recBuf_;
     std::atomic<size_t> recPos_{0};
     std::atomic<bool> recording_{false};
+    std::atomic<bool> muted_{false};
 
     std::atomic<float> cbUsAvg_{0}, cbUsMax_{0}, cbLoadMax_{0};
     std::atomic<int> lastFrames_{0}, late_{0};

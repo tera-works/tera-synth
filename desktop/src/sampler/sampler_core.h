@@ -39,6 +39,8 @@ public:
     virtual float noisePeak() const { return 0.0f; }
     // Lower the output level after clipping (live sources); false if not possible.
     virtual bool reduceLevel() { return false; }
+    // How often the capture device had to be reopened (live sources).
+    virtual int restarts() const { return 0; }
 };
 
 struct InstrumentSpec {
@@ -103,6 +105,9 @@ bool probeInstrument(Source& src, InstrumentSpec& spec, ProbeReport& report, std
 
 // Error text used when Options::stopRequested ended an instrument early.
 constexpr const char* kStoppedError = "stopped by request";
+// Error text when the source went silent after a capture restart (device lost,
+// e.g. after Windows standby): the instrument is not trustworthy.
+constexpr const char* kDeviceLostError = "audio device lost (silent after a capture restart)";
 
 // Curated General MIDI set used by `hsynth_sampler sf2 --set gm`.
 std::vector<InstrumentSpec> gmTestSet();

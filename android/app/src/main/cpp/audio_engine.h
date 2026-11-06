@@ -7,6 +7,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include "hsynth/engine.h"
 
@@ -45,6 +46,15 @@ public:
 
 private:
     bool openLocked();
+    // ADPF performance hint (Android 12+): the audio callback thread and the
+    // engine's render helpers report their work so the scheduler keeps their
+    // cores at a suitable clock (fewer spikes when playing starts after idle).
+    void startHintSession(int64_t targetNs);
+    void closeHintSession();
+    std::atomic<int> audioTid_{0};
+    std::atomic<void*> hint_{nullptr};
+    std::thread hintThread_;
+    std::atomic<bool> hintCancel_{false};
 
     hsynth::Engine& engine_;
     std::mutex lock_;

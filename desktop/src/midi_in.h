@@ -11,6 +11,7 @@
 
 #include "hsynth/engine.h"
 #include "hsynth/midi.h"
+#include "hsynth/midi_learn.h"
 
 class MidiIn {
 public:
@@ -23,6 +24,8 @@ public:
     std::vector<std::string> openPorts() const;
 
     void setMpe(bool on);
+    void setMultiTimbral(bool on);
+    void setLearn(hsynth::MidiLearn* l) { learn_ = l; }
     int takeProgramChange() { return pendingProgram_.exchange(-1); }
     int eventCount() const { return eventCount_.load(); }
     std::string lastMessage() const;
@@ -40,4 +43,5 @@ private:
     std::atomic<int> eventCount_{0};
     std::string last_;
     std::vector<std::string> names_;
+    hsynth::MidiLearn* learn_ = nullptr;
 };

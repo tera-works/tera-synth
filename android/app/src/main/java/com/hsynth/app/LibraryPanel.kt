@@ -27,83 +27,116 @@ class LibraryPanel(private val a: MainActivity) {
     }
 
     val view: LinearLayout
-    private val presetList = Ui.column(a)
+    private val presetList = FlowLayout(a)
     private val sampleList = Ui.column(a)
-    private val logView = Ui.text(a, "", 12f, Ui.DIM).apply { setTextIsSelectable(true) }
-    private val logScroll = ScrollView(a)
+    /** MIDI files: app-specific external storage, so they can be copied in over USB (adb push) without permissions. Played on the Player tab. */
+    val songDir: File = (a.getExternalFilesDir("midi") ?: File(a.filesDir, "midi")).apply { mkdirs() }
+    private var presetFilter = 0  // 0 all, 1 factory, 2 user
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
-        val presetsCol = Ui.column(a).apply {
-            addView(Ui.text(a, "Presets", 16f, Ui.ACCENT, bold = true))
-            addView(Ui.row(a,
-                Ui.button(a, "Save as…") { promptSave() },
-                Ui.button(a, "Import…") { open(REQ_PRESET_IMPORT, "application/json", "*/*") },
-                Ui.button(a, "Export…") { export() },
-            ))
-            addView(ScrollView(a).apply { addView(presetList) }, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
+        // presets: filter + actions, then a grid of preset cards
+        val presets = Hw.Section(a, "Presets")
+        val filters = mutableListOf<LedButton>()
+        val head = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
+        listOf("All", "Factory", "User").forEachIndexed { i, t ->
+            val b = LedButton(a, t).apply { textSize = 13.5f; setOnClickListener { presetFilter = i; filters.forEachIndexed { k, x -> x.lit = k == i }; refreshPresets() } }
+            b.lit = i == 0
+            filters += b
+            head.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
         }
-        val samplesCol = Ui.column(a).apply {
-            addView(Ui.text(a, "Samples (WAV / SFZ)", 16f, Ui.ACCENT, bold = true))
-            addView(Ui.row(a,
-                Ui.button(a, "Import WAV…") { open(REQ_WAV, "audio/*", "audio/wav", "audio/x-wav") },
-                Ui.button(a, "Import SFZ folder…") {
-                    @Suppress("DEPRECATION")
-                    a.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_SFZ_TREE)
-                },
-                Ui.button(a, "SFZ info") { showSfzInfo() },
-            ))
-            addView(ScrollView(a).apply { addView(sampleList) }, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
-        }
-        val logCol = Ui.column(a).apply {
-            addView(Ui.row(a, Ui.text(a, "Messages", 16f, Ui.ACCENT, bold = true), Ui.button(a, "Clear view") { logView.text = "" }))
-            logScroll.addView(logView)
-            addView(logScroll, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
-        }
+        head.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
+        for ((t, f) in listOf<Pair<String, () -> Unit>>("Save as…" to { promptSave() },
+                "Import…" to { open(REQ_PRESET_IMPORT, "application/json", "*/*") }, "Export…" to { export() }))
+            head.addView(LedButton(a, t, led = false).apply { textSize = 13.5f; setOnClickListener { f() } }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) })
+        presets.body.addView(head)
+        presets.body.addView(ScrollView(a).apply { addView(presetList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
+
+        // samples
+        val samples = Hw.Section(a, "Samples (WAV / SFZ)")
+        samples.body.addView(Ui.buttonRow(a,
+            Ui.button(a, "+ WAV…") { open(REQ_WAV, "audio/*", "audio/wav", "audio/x-wav") },
+            Ui.button(a, "+ SFZ…") {
+                @Suppress("DEPRECATION")
+                a.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_SFZ_TREE)
+            },
+            Ui.button(a, "SFZ info") { showSfzInfo() },
+        ))
+        samples.body.addView(ScrollView(a).apply { addView(sampleList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
+
         view = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(d(12), d(8), d(12), d(8))
-            addView(presetsCol, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(12) })
-            addView(samplesCol, LinearLayout.LayoutParams(0, -1, 1.2f).apply { marginEnd = d(12) })
-            addView(logCol, LinearLayout.LayoutParams(0, -1, 1f))
+            setPadding(d(10), d(8), d(10), d(8))
+            addView(presets, LinearLayout.LayoutParams(0, -1, 2f).apply { marginEnd = d(10) })
+            addView(samples, LinearLayout.LayoutParams(0, -1, 1f))
         }
-        a.addLogListener { logView.text = a.logText(); logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
+        // the section bodies stretch so their lists can scroll
+        presets.body.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        samples.body.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
         a.addPresetListener { refreshPresets() }
     }
 
-    private fun item(title: String, sub: String, highlight: Boolean, onClick: () -> Unit, onLong: (() -> Unit)? = null): View {
+    /** Song list now lives on the Player tab. */
+    fun refreshSongs() {}
+
+    private fun playSong(f: File) {
+        a.selectTab(3)
+        a.player.playFile(f)
+    }
+
+    /** A preset card (grid) or a list row. */
+    private fun item(title: String, sub: String, highlight: Boolean, onClick: () -> Unit, onLong: (() -> Unit)? = null, width: Int = -1): View {
         val d = { v: Int -> Ui.dp(a, v) }
         return Ui.column(a).apply {
             setPadding(d(10), d(8), d(10), d(8))
-            background = Ui.rounded(if (highlight) android.graphics.Color.rgb(30, 60, 80) else Ui.PANEL, d(6))
-            addView(Ui.text(a, title, 15f, if (highlight) Ui.ACCENT else Ui.TEXT))
-            if (sub.isNotEmpty()) addView(Ui.text(a, sub, 12f, Ui.DIM))
+            background = if (highlight) Hw.lcdBg(a) else Hw.keyBg(a)
+            addView(Ui.text(a, title, 14f, if (highlight) Hw.LCD_FG else Ui.TEXT, bold = highlight, tr = false).apply { maxLines = 1 })
+            if (sub.isNotEmpty()) addView(Ui.text(a, sub, 11f, if (highlight) Hw.LCD_DIM else Ui.DIM, tr = false).apply { maxLines = 2 })
             setOnClickListener { onClick() }
             if (onLong != null) setOnLongClickListener { onLong(); true }
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(4) }
+            layoutParams = if (width > 0) android.view.ViewGroup.LayoutParams(width, -2)
+                           else LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(6) }
         }
     }
 
+    private var presetEntries: List<Library.Entry> = emptyList()
+    private var sampleEntries: List<Library.Entry>? = null
+    private var scanning = false
+
+    /** Rescans in the background (thousands of sample files); the lists update when done. */
     fun refresh() {
-        refreshPresets()
-        refreshSamples()
+        if (scanning) return
+        scanning = true
+        a.loader.execute {
+            val p = a.library.presets()
+            val s = a.library.sampleSources()
+            a.ui.post {
+                scanning = false
+                if (p != presetEntries) { presetEntries = p; refreshPresets() }
+                if (s != sampleEntries) { sampleEntries = s; buildSamples() }
+            }
+        }
     }
 
+    /** From the last scan (no file access): filter / highlight changes are instant. */
     private fun refreshPresets() {
         presetList.removeAllViews()
-        for (e in a.library.presets()) {
-            presetList.addView(item(e.title, if (e.user) "user · long-press to delete" else "factory", e.file == a.currentPreset,
+        for (e in presetEntries) {
+            if (presetFilter == 1 && e.user || presetFilter == 2 && !e.user) continue
+            presetList.addView(item(e.title, L10n.t(if (e.user) "user · long-press to delete" else "Factory"), e.file == a.currentPreset,
                 { a.loadPreset(e.file) },
-                if (e.user) ({ confirmDelete(e.file) }) else null))
+                if (e.user) ({ confirmDelete(e.file) }) else null, width = Ui.dp(a, 172)))
         }
     }
 
-    private fun refreshSamples() {
+    private fun refreshSamples() = refresh()
+
+    private fun buildSamples() {
         sampleList.removeAllViews()
-        val sources = a.library.sampleSources()
+        val sources = sampleEntries ?: return
         if (sources.isEmpty()) sampleList.addView(Ui.text(a, "(no samples yet)", 13f, Ui.DIM))
         for (e in sources) {
-            sampleList.addView(item(e.file.name, e.title + if (e.user) "  · long-press to delete" else "", false,
+            sampleList.addView(item(e.file.name, e.title + if (e.user) L10n.t("  · long-press to delete") else "", false,
                 { chooseLayer(e.file) },
                 if (e.user) ({ confirmDelete(e.file) }) else null))
         }
@@ -111,8 +144,8 @@ class LibraryPanel(private val a: MainActivity) {
 
     private fun chooseLayer(file: File) {
         AlertDialog.Builder(a)
-            .setTitle("Load ${file.name} into…")
-            .setItems(arrayOf("Layer A", "Layer B", "Layer C")) { _, which -> a.loadSamples(which, file) }
+            .setTitle(L10n.f("Load %s into…", file.name))
+            .setItems(arrayOf("Layer A", "Layer B", "Layer C").map { L10n.t(it) }.toTypedArray()) { _, which -> a.loadSamples(which, file) }
             .show()
     }
 
@@ -128,26 +161,26 @@ class LibraryPanel(private val a: MainActivity) {
     fun pickImpulse(target: Int) = open(if (target == 0) REQ_IR_CAB else REQ_IR_REVERB, "audio/*", "audio/wav", "audio/x-wav")
 
     fun pickSamplesFor(layer: Int) {
-        val sources = a.library.sampleSources()
+        val sources = sampleEntries ?: a.library.sampleSources()
         if (sources.isEmpty()) {
             a.log("no samples in the library yet — import WAV or SFZ on the Library tab", Ui.WARN)
             return
         }
         AlertDialog.Builder(a)
-            .setTitle("Samples for layer ${"ABC"[layer]}")
+            .setTitle(L10n.f("Samples for layer %s", "ABC"[layer].toString()))
             .setItems(sources.map { it.title }.toTypedArray()) { _, which -> a.loadSamples(layer, sources[which].file) }
             .show()
     }
 
     private fun confirmDelete(file: File) {
         AlertDialog.Builder(a)
-            .setTitle("Delete ${file.name}?")
-            .setMessage(if (file.extension == "sfz") "The .sfz file is removed; its sample folder is kept." else "This removes the file from the app library.")
-            .setPositiveButton("Delete") { _, _ ->
+            .setTitle(L10n.f("Delete %s?", file.name))
+            .setMessage(L10n.t(if (file.extension == "sfz") "The .sfz file is removed; its sample folder is kept." else "This removes the file from the app library."))
+            .setPositiveButton(L10n.t("Delete")) { _, _ ->
                 if (file.delete()) a.log("deleted ${file.name}") else a.log("could not delete ${file.name}", Ui.ERR)
                 refresh()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(L10n.t("Cancel"), null)
             .show()
     }
 
@@ -158,13 +191,13 @@ class LibraryPanel(private val a: MainActivity) {
             setSelectAllOnFocus(true)
         }
         AlertDialog.Builder(a)
-            .setTitle("Save preset")
+            .setTitle(L10n.t("Save preset"))
             .setView(input)
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(L10n.t("Save")) { _, _ ->
                 val name = input.text.toString().trim().ifEmpty { "Untitled" }
-                a.savePreset(name) { refreshPresets() }
+                a.savePreset(name) { refresh() }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(L10n.t("Cancel"), null)
             .show()
     }
 
@@ -191,11 +224,10 @@ class LibraryPanel(private val a: MainActivity) {
 
     private fun showSfzInfo() {
         AlertDialog.Builder(a)
-            .setTitle("SFZ support")
-            .setMessage("Supported headers: <control> <global> <master> <group> <region>, #define, #include.\n\n" +
-                "Supported opcodes:\n" + NativeEngine.nativeSupportedSfzOpcodes() +
-                "\n\nAll other opcodes are ignored and listed as warnings in the message log when an instrument is loaded. " +
-                "Samples must be WAV (8/16/24/32-bit PCM or float). FLAC is planned.")
+            .setTitle(L10n.t("SFZ support"))
+            .setMessage(L10n.f("Supported headers: <control> <global> <master> <group> <region>, #define, #include.\n\n" +
+                "Supported opcodes:\n%s\n\nAll other opcodes are ignored and listed as warnings in the message log when an instrument is loaded. " +
+                "Samples must be WAV (8/16/24/32-bit PCM or float). FLAC is planned.", NativeEngine.nativeSupportedSfzOpcodes()))
             .setPositiveButton("OK", null)
             .show()
     }
@@ -302,7 +334,7 @@ class LibraryPanel(private val a: MainActivity) {
                 a.loader.execute {
                     try {
                         val f = a.library.importPreset(u)
-                        a.ui.post { a.log("imported preset ${f.name}"); refreshPresets(); a.loadPreset(f) }
+                        a.ui.post { a.log("imported preset ${f.name}"); refresh(); a.loadPreset(f) }
                     } catch (e: Exception) {
                         a.ui.post { a.log("preset import failed: ${e.message}", Ui.ERR) }
                     }

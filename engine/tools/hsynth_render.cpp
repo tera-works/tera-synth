@@ -6,6 +6,8 @@
 //                      [--pattern chord|scale|drums|sustain] [--seconds 6]
 //                      [--sr 48000] [--block 128] [--voices 32] [--quality 0..2]
 //                      [--compare ref.wav] [--max-error-db -80]
+//        hsynth_render --midi song.mid --presets dir[;dir...] [--library dir] [--out out.wav] [--seconds N]
+//                      renders a Standard MIDI File with the GM sound selection (gm_bank.h)
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -14,6 +16,9 @@
 #include <string>
 
 #include "hsynth/engine.h"
+#include "hsynth/gm_bank.h"
+#include "hsynth/preset_index.h"
+#include "hsynth/smf.h"
 #include "hsynth/host_utils.h"
 #include "hsynth/preset.h"
 #include "hsynth/wav.h"
@@ -21,10 +26,11 @@
 using namespace hsynth;
 
 int main(int argc, char** argv) {
-    std::string presetPath, library = ".", out = "render.wav", pattern = "chord", compare;
+    std::string presetPath, library = ".", out = "render.wav", pattern = "chord", compare, midi, presetDirs;
+    bool secondsGiven = false;
     double seconds = 6.0, maxErrDb = -80.0;
     float sr = 48000.0f;
-    int block = 128, voices = 32, quality = 1;
+    int block = 128, voices = kDefaultVoices, quality = 1;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -35,7 +41,9 @@ int main(int argc, char** argv) {
         else if (a == "--library") library = next();
         else if (a == "--out") out = next();
         else if (a == "--pattern") pattern = next();
-        else if (a == "--seconds") seconds = std::atof(next().c_str());
+        else if (a == "--seconds") { seconds = std::atof(next().c_str()); secondsGiven = true; }
+        else if (a == "--midi") midi = next();
+        else if (a == "--presets") presetDirs = next();
         else if (a == "--sr") sr = (float)std::atof(next().c_str());
         else if (a == "--block") block = std::atoi(next().c_str());
         else if (a == "--voices") voices = std::atoi(next().c_str());
@@ -57,6 +65,52 @@ int main(int argc, char** argv) {
         applyPreset(engine, p, library, warnings);
         for (auto& w : warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
         std::printf("preset: %s\n", p.name.c_str());
+    }
+
+    if (!midi.empty()) {
+        // song: GM sound selection from the preset folders, then real-time-paced rendering
+        std::vector<std::pair<std::string, bool>> folders;
+        for (size_t a = 0; a <= presetDirs.size();) {
+            size_t b = presetDirs.find(';', a);
+            if (b == std::string::npos) b = presetDirs.size();
+            if (b > a) folders.push_back({presetDirs.substr(a, b - a), false});
+            a = b + 1;
+        }
+        PresetIndex idx;
+        idx.setFolders(folders);
+        idx.rescan();
+        GmBank bank;
+        bank.build(idx.all());
+        auto song = std::make_unique<Song>();
+        std::string err;
+        if (!loadSmf(midi, *song, err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        std::printf("song: %s  %.1f s  %d notes  tempo %.1f  (%zu presets, %zu GM entries)\n", song->name.c_str(), song->length,
+                    song->noteCount, song->initialTempo, idx.all().size(), bank.entries().size());
+        std::string loaded[kNumParts];
+        std::vector<std::string> report;
+        prepareSong(engine, *song, bank, library, loaded, report);
+        for (auto& r : report) std::printf("  %s\n", r.c_str());
+        const double total = secondsGiven ? seconds : song->length + 2.0;
+        engine.setSong(std::move(song));
+        engine.songPlay(true);
+        engine.setOfflineRender(true);
+        const int64_t frames = (int64_t)(total * sr);
+        std::vector<float> L((size_t)frames), R((size_t)frames);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int64_t pos = 0; pos < frames; pos += block) {
+            const int n = (int)std::min<int64_t>(block, frames - pos);
+            engine.process(L.data() + pos, R.data() + pos, n);
+            engine.collectGarbage();
+        }
+        const double cpu = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const EngineStats st = engine.stats();
+        float pk = 0.0f;
+        for (int64_t i = 0; i < frames; ++i) pk = std::max(pk, std::max(std::fabs(L[(size_t)i]), std::fabs(R[(size_t)i])));
+        std::printf("rendered %.1f s in %.2f s CPU (%.1f %% of real time), peak voices %d, output peak %.3f\n", total, cpu,
+                    cpu / total * 100.0, st.peakVoices, pk);
+        if (!writeWav(out, L, &R, (int)sr, true, err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        std::printf("wrote %s\n", out.c_str());
+        return 0;
     }
 
     RenderJob job;

@@ -4,6 +4,11 @@
 #include <atomic>
 #include <cstdlib>
 #include <new>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+
+#include "hsynth/wav.h"
 
 #include "analysis.h"
 #include "hsynth/engine.h"
@@ -127,4 +132,71 @@ TEST(realtime_process_never_allocates) {
     INFO("allocations on the audio thread: %ld\n", allocs);
     CHECK(allocs == 0);
     CHECK(e.stats().peakVoices > 10);
+}
+
+TEST(realtime_parallel_render_never_allocates) {
+    // multi-core rendering: the audio thread hands voices to the worker pool
+    // without allocating (the pool and its buses are created beforehand)
+    Engine e;
+    e.prepare(48000);
+    e.setRenderThreads(4);
+    e.setMultiTimbral(true);
+    for (int i = 0; i < 64; ++i) {
+        Event on = Event::noteOn((uint32_t)(i + 1), 30 + i, 0.5f);
+        on.channel = (uint8_t)(i % 8);
+        e.sendEvent(on);
+    }
+    std::vector<float> L(512), R(512);
+    long allocs = 0;
+    for (int b = 0; b < 200; ++b) allocs += audioBlock(e, L.data(), R.data(), b % 2 ? 512 : 96);
+    INFO("64 voices on 8 parts, 4 render threads: %ld allocations, %d voices active\n", allocs, e.stats().activeVoices);
+    CHECK(allocs == 0);
+    CHECK(e.stats().activeVoices == 64);
+}
+
+TEST(realtime_streamed_playback_never_allocates) {
+    // disk streaming: claiming / releasing stream slots and reading the ring
+    // buffers on the audio thread (and render helpers) does not allocate
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "hsynth_tests" / "rt_stream";
+    fs::create_directories(dir);
+    {
+        std::vector<float> l(96000), r(96000);
+        for (size_t i = 0; i < l.size(); ++i) {
+            l[i] = 0.3f * std::sin(0.02f * (float)i);
+            r[i] = 0.3f * std::sin(0.03f * (float)i);
+        }
+        std::string err;
+        writeWav((dir / "s.wav").generic_string(), l, &r, 48000, false, err);
+        std::ofstream((dir / "s.sfz").generic_string()) << "<region> sample=s.wav lokey=40 hikey=70 pitch_keycenter=62\n";
+    }
+    const SampleLoadOptions saved = sampleLoadOptions();
+    SampleLoadOptions o;
+    o.mode = StreamMode::Always;
+    o.preloadFrames = 4096;
+    setSampleLoadOptions(o);
+    std::string err;
+    auto set = loadSampleSet((dir / "s.sfz").generic_string(), err);
+    setSampleLoadOptions(saved);
+    CHECK(set && set->streamedSamples() == 1);
+    if (!set) return;
+    Engine e;
+    e.prepare(48000);
+    e.setRenderThreads(2);
+    e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
+    e.setSampleSet(0, std::move(set));
+    std::vector<float> L(256), R(256);
+    long allocs = 0;
+    int streams = 0;
+    for (int b = 0; b < 400; ++b) {
+        if (b % 40 == 0)
+            for (int k = 0; k < 12; ++k) e.sendEvent(Event::noteOn((uint32_t)(b * 16 + k + 1), 48 + k, 0.6f));
+        if (b % 40 == 20)
+            for (int k = 0; k < 12; ++k) e.sendEvent(Event::noteOff((uint32_t)((b - 20) * 16 + k + 1), 48 + k));
+        allocs += audioBlock(e, L.data(), R.data(), 256);
+        streams = std::max(streams, e.stats().streamVoices);
+    }
+    INFO("streamed notes on and off: %ld allocations, up to %d streams\n", allocs, streams);
+    CHECK(allocs == 0);
+    CHECK(streams >= 12);
 }

@@ -16,6 +16,9 @@ namespace fx {
     void update(const float* p, const FxContext& c) override;     \
     void process(float* L, float* R, int n, const FxContext& c) override;
 
+// v0.6 blocks (fx_extra.cpp); nullptr for other types.
+std::unique_ptr<FxBlock> createExtraBlock(int type);
+
 // Shared one-knob mix with click-free ramp.
 struct MixRamp {
     Smoother s;

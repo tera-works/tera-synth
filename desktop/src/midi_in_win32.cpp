@@ -80,6 +80,11 @@ void MidiIn::setMpe(bool on) {
     translator_.setMpeEnabled(on);
 }
 
+void MidiIn::setMultiTimbral(bool on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    translator_.setMultiTimbral(on);
+}
+
 std::string MidiIn::lastMessage() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_;
@@ -88,6 +93,7 @@ std::string MidiIn::lastMessage() const {
 void MidiIn::onBytes(const uint8_t* data, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     Sink sink(engine_, pendingProgram_, eventCount_);
+    if (learn_) learn_->onMidi(data, len, engine_);  // learned CC -> parameter (the CC still reaches the engine)
     translator_.processMidi1(data, len, sink);
     char buf[32];
     std::snprintf(buf, sizeof buf, "%02X %02X %02X", data[0], len > 1 ? data[1] : 0, len > 2 ? data[2] : 0);

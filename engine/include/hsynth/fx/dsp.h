@@ -347,6 +347,7 @@ struct FxContext {
     bool highQuality = false;
     float lastNoteHz = 261.63f;  // most recent note-on (ring-mod key track)
     bool notesHeld = false;
+    float sustain = 0.0f;        // sustain pedal 0..1 (string resonance)
     const float* inL = nullptr;  // external audio input (vocoder), may be null
     const float* inR = nullptr;
 };

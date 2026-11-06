@@ -1,201 +1,155 @@
 package com.hsynth.app
 
+import android.app.AlertDialog
+import android.view.Gravity
 import android.view.View
-import android.widget.CompoundButton
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.SeekBar
-import android.widget.Spinner
-import android.widget.Switch
 import android.widget.TextView
 import kotlin.math.roundToInt
 
 /**
- * Generic sound editor generated from the engine's parameter metadata, so new
- * engine parameters appear here without UI code changes.
+ * Sound editor laid out like a synth's edit panels: section buttons along
+ * the top, each page a stack of framed panels with knobs, LCD selectors and
+ * LED switches. Generated from the engine's parameter metadata, so new engine
+ * parameters appear without UI code changes.
  */
 class EditPanel(private val a: MainActivity) {
     val view: LinearLayout
     private val content = Ui.column(a)
-    private val pageButtons = mutableListOf<TextView>()
+    private val pageButtons = mutableListOf<LedButton>()
+    private val layerButtons = mutableListOf<LedButton>()
+    private val layerBox: LinearLayout
     private var page = 0
     private var layer = 0
-    private val rows = mutableListOf<Row>()
-    private val layerBar: LinearLayout
-    private val layerButtons = mutableListOf<TextView>()
+    private val controls = mutableListOf<ParamControl>()
 
-    private data class Page(val title: String, val perLayer: Boolean, val groups: (String) -> List<String>)
+    private data class Page(val title: String, val groups: List<String>)
 
     private val pages = listOf(
-        Page("Layers", false) { listOf("Layer A", "Layer B", "Layer C", "Master") },
-        Page("VA", true) { l -> listOf("$l / VA") },
-        Page("FM", true) { l -> listOf("$l / FM") },
-        Page("PCM", true) { l -> listOf("$l / PCM") },
-        Page("WT", true) { l -> listOf("$l / WT") },
-        Page("Filter", false) { listOf("Filter") },
-        Page("Env", false) { listOf("Amp Env", "Mod Env") },
-        Page("LFO", false) { listOf("LFO") },
-        Page("FX", false) { emptyList() },  // chain editor, built by buildFx()
-        Page("FX Mod", false) { listOf("FX Mod") },
-        Page("Mod", false) { listOf("Mod Matrix") },
+        Page("OSC", emptyList()),  // layer common + the engine of the layer's type, built by buildOsc()
+        Page("Filter", listOf("Filter", "Voice FX")),
+        Page("Env", listOf("Amp Env", "Mod Env", "Env 3")),
+        Page("LFO", listOf("LFO")),
+        Page("Mod", listOf("Mod Matrix", "Macros", "Controllers")),
+        Page("Arp / Seq", listOf("Arpeggiator", "Sequencer")),
+        Page("Motion", listOf("MSEG", "Motion 1", "Motion 2", "Motion 3", "Motion 4")),
+        Page("FX", emptyList()),   // chain editor, built by buildFx()
+        Page("Voice", listOf("Voice", "Tuning", "Master")),
     )
-
-    /** One editable parameter row; keeps its widgets in sync with the engine. */
-    private inner class Row(val meta: ParamMeta) {
-        val valueText = Ui.text(a, "", 13f, Ui.ACCENT)
-        var seek: SeekBar? = null
-        var spinner: Spinner? = null
-        var switch: Switch? = null
-        var updating = false
-        val view: View
-
-        init {
-            val d = { v: Int -> Ui.dp(a, v) }
-            val label = Ui.text(a, meta.label, 14f)
-            val line = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
-            line.addView(label, LinearLayout.LayoutParams(d(150), -2))
-            when (meta.kind) {
-                "enum" -> {
-                    // Spinners report their initial selection on first layout: ignore no-op changes
-                    spinner = Ui.spinner(a, meta.options, 0) { pos ->
-                        if (!updating && pos != NativeEngine.nativeGetParam(meta.id).roundToInt()) set(pos.toFloat())
-                    }
-                    line.addView(spinner, LinearLayout.LayoutParams(0, -2, 1f))
-                }
-                "bool" -> {
-                    switch = Switch(a).apply {
-                        setOnCheckedChangeListener { _: CompoundButton, c: Boolean -> if (!updating) set(if (c) 1f else 0f) }
-                    }
-                    line.addView(switch, LinearLayout.LayoutParams(0, -2, 1f))
-                }
-                else -> {
-                    val steps = if (meta.kind == "int") (meta.max - meta.min).roundToInt().coerceAtLeast(1) else 1000
-                    seek = Ui.seek(a, steps, 0) { p, user ->
-                        if (user && !updating) set(if (meta.kind == "int") meta.min + p else meta.fromNormalized(p / 1000f))
-                    }
-                    line.addView(seek, LinearLayout.LayoutParams(0, d(40), 1f))
-                    // double tap the value to reset to default
-                    valueText.setOnClickListener { set(meta.def); refresh() }
-                }
-            }
-            line.addView(valueText, LinearLayout.LayoutParams(d(96), -2).apply { marginStart = d(8) })
-            view = line
-            refresh()
-        }
-
-        fun set(v: Float) {
-            NativeEngine.setParam(meta.id, v)
-            valueText.text = meta.format(NativeEngine.nativeGetParam(meta.id))
-            if (meta.name.endsWith(".type")) ui { buildPage() }
-        }
-
-        fun refresh() {
-            val v = NativeEngine.nativeGetParam(meta.id)
-            updating = true
-            seek?.progress = if (meta.kind == "int") (v - meta.min).roundToInt() else (meta.toNormalized(v) * 1000).roundToInt()
-            spinner?.setSelection(v.roundToInt(), false)
-            switch?.isChecked = v > 0.5f
-            valueText.text = meta.format(v)
-            updating = false
-        }
-    }
 
     private fun ui(f: () -> Unit) = a.ui.post(f)
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
-        val bar = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; setPadding(d(8), d(4), d(8), d(4)) }
+        val bar = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         pages.forEachIndexed { i, p ->
-            val b = Ui.text(a, p.title, 15f, Ui.DIM, bold = true).apply {
-                setPadding(d(14), d(8), d(14), d(8))
-                setOnClickListener { page = i; buildPage() }
-            }
+            val b = LedButton(a, p.title).apply { setOnClickListener { page = i; buildPage() } }
             pageButtons += b
-            bar.addView(b)
+            bar.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
         }
-        layerBar = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; setPadding(d(8), 0, d(8), d(4)) }
-        layerBar.addView(Ui.text(a, "Layer:", 14f, Ui.DIM))
+        layerBox = LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(Hw.engraved(a, "Layer:", 12f), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
+        }
         for (l in 0..2) {
-            val b = Ui.text(a, "ABC"[l].toString(), 15f, Ui.DIM, bold = true).apply {
-                setPadding(d(16), d(6), d(16), d(6))
-                setOnClickListener { layer = l; buildPage() }
-            }
+            val b = LedButton(a, "ABC"[l].toString(), tr = false).apply { setOnClickListener { layer = l; buildPage() } }
             layerButtons += b
-            layerBar.addView(b)
+            layerBox.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
         }
         val scroll = ScrollView(a).apply { addView(content) }
-        content.setPadding(d(16), d(4), d(16), d(24))
+        content.setPadding(d(10), d(8), d(10), d(24))
         view = Ui.column(a).apply {
-            addView(HorizontalScrollView(a).apply { addView(bar) }, Ui.lp())
-            addView(layerBar, Ui.lp())
+            addView(HorizontalScrollView(a).apply {
+                isHorizontalScrollBarEnabled = false
+                setPadding(d(8), d(8), d(8), d(2))
+                addView(bar)
+            }, Ui.lp())
             addView(scroll, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         }
         Params.addListener { buildPage() }  // layer types / sample names may have changed
         buildPage()
     }
 
-    private fun header(text: String) = Ui.text(a, text, 15f, Ui.ACCENT, bold = true).apply {
-        setPadding(0, Ui.dp(a, 14), 0, Ui.dp(a, 4))
+    /** A framed panel with the controls of the given parameters. */
+    private fun panel(title: String, metas: List<ParamMeta>, tr: Boolean = true, extra: View? = null): Hw.Section {
+        val s = Hw.Section(a, title, tr)
+        val flow = FlowLayout(a)
+        for (m in metas) {
+            val c = ParamControl(a, m) { pc -> if (pc.meta.name.endsWith(".type")) ui { buildPage() } }
+            controls += c
+            flow.addView(c.view)
+        }
+        s.body.addView(flow, LinearLayout.LayoutParams(-1, -2))
+        if (extra != null) s.body.addView(extra, LinearLayout.LayoutParams(-1, -2).apply { topMargin = Ui.dp(a, 8) })
+        content.addView(s, Hw.sectionLp(a))
+        return s
     }
+
+    private fun group(g: String) = Params.meta.filter { it.group == g }
 
     fun buildPage() {
         val p = pages[page]
-        pageButtons.forEachIndexed { i, b -> b.setTextColor(if (i == page) Ui.ACCENT else Ui.DIM) }
-        layerBar.visibility = if (p.perLayer) View.VISIBLE else View.GONE
-        layerButtons.forEachIndexed { i, b -> b.setTextColor(if (i == layer) Ui.ACCENT else Ui.DIM) }
+        pageButtons.forEachIndexed { i, b -> b.lit = i == page }
+        layerBox.visibility = if (p.title == "OSC") View.VISIBLE else View.GONE
+        layerButtons.forEachIndexed { i, b -> b.lit = i == layer }
         content.removeAllViews()
-        rows.clear()
-        val layerName = "Layer " + "ABC"[layer]
-        if (p.title == "FX") {
-            buildFx()
-            return
-        }
-        if (p.perLayer) {
-            val typeMeta = Params.meta.first { it.name == "${"abc"[layer]}.type" }
-            val type = typeMeta.options.getOrElse(NativeEngine.nativeGetParam(typeMeta.id).roundToInt()) { "?" }
-            val expected = p.title.lowercase()
-            val note = if (type != expected) "  (layer $layerName is currently '$type' — set Type below to '$expected' to hear these)" else ""
-            content.addView(Ui.text(a, "$layerName engine: $type$note", 13f, if (note.isEmpty()) Ui.DIM else Ui.WARN))
-            val r = Row(typeMeta)
-            rows += r
-            content.addView(r.view)
-            if (p.title == "WT") {
-                val name = NativeEngine.nativeSampleSetName(layer).ifEmpty { "(none)" }
-                content.addView(Ui.row(a,
-                    Ui.text(a, "User table: $name", 14f),
-                    Ui.button(a, "Load .wav…") { a.libraryPanel.pickWavetable(layer) },
-                    Ui.button(a, "Unload") { NativeEngine.nativeUnloadSamples(layer); buildPage() },
-                ))
-            }
-            if (p.title == "PCM") {
-                val name = NativeEngine.nativeSampleSetName(layer).ifEmpty { "(none)" }
-                content.addView(Ui.row(a,
-                    Ui.text(a, "Samples: $name", 14f),
-                    Ui.button(a, "Choose…") { a.libraryPanel.pickSamplesFor(layer) },
-                    Ui.button(a, "Unload") { NativeEngine.nativeUnloadSamples(layer); buildPage() },
-                ))
-            }
-        }
-        for (g in p.groups(layerName)) {
-            content.addView(header(g))
-            val metas = Params.meta.filter { it.group == g }
-            if (g == "Mod Matrix") {
-                content.addView(Ui.text(a, "out += source × via × amount   (via 'none' = 1)", 12f, Ui.DIM))
-            }
-            for (m in metas) {
-                if (p.perLayer && m.name.endsWith(".type")) continue
-                val r = Row(m)
-                rows += r
-                content.addView(r.view)
-                if (g == "Mod Matrix" && m.name.endsWith(".amt")) content.addView(View(a), LinearLayout.LayoutParams(-1, Ui.dp(a, 10)))
+        controls.clear()
+        (layerBox.parent as? android.view.ViewGroup)?.removeView(layerBox)
+        if (p.title == "OSC") content.addView(layerBox, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = Ui.dp(a, 8) })
+        when (p.title) {
+            "OSC" -> buildOsc()
+            "FX" -> buildFx()
+            else -> for (g in p.groups) {
+                val metas = group(g)
+                if (metas.isEmpty()) continue
+                val extra = if (g == "Mod Matrix") Ui.text(a, "out += source × via × amount   (via 'none' = 1)", 12f, Ui.DIM) else null
+                panel(g, metas, extra = extra)
             }
         }
     }
 
-    fun refreshValues() {
-        if (rows.isEmpty()) return
-        rows.forEach { it.refresh() }
+    fun refreshValues() = controls.forEach { it.refresh() }
+
+    // ------------------------------------------------------------------ oscillators
+
+    private fun buildOsc() {
+        val lname = "Layer " + "ABC"[layer]
+        val typeMeta = Params.meta.first { it.name == "${"abc"[layer]}.type" }
+        val type = typeMeta.options.getOrElse(NativeEngine.nativeGetParam(typeMeta.id).roundToInt()) { "" }
+        panel(lname, group(lname))
+        // the engine of the chosen type (VA / FM / PCM / WT / Organ)
+        val engine = Params.meta.map { it.group }.distinct()
+            .firstOrNull { it.startsWith("$lname / ") && it.removePrefix("$lname / ").equals(type, ignoreCase = true) }
+        if (engine == null) {
+            content.addView(Ui.text(a, L10n.f("%s engine: %s", L10n.t(lname), type), 13f, Ui.DIM, tr = false))
+            return
+        }
+        val d = { v: Int -> Ui.dp(a, v) }
+        val extra: View? = when (type.lowercase()) {
+            "pcm" -> sampleRow(L10n.f("Samples: %s", NativeEngine.nativeSampleSetName(layer).ifEmpty { L10n.t("(none)") }),
+                "Choose…" to { a.libraryPanel.pickSamplesFor(layer) },
+                "Unload" to { NativeEngine.nativeUnloadSamples(layer); buildPage() })
+            "wt" -> sampleRow(L10n.f("User table: %s", NativeEngine.nativeSampleSetName(layer).ifEmpty { L10n.t("(none)") }),
+                "Load .wav…" to { a.libraryPanel.pickWavetable(layer) },
+                "Unload" to { NativeEngine.nativeUnloadSamples(layer); buildPage() })
+            else -> null
+        }
+        panel(engine, group(engine), extra = extra)
+        content.setPadding(d(10), d(8), d(10), d(24))
+    }
+
+    private fun sampleRow(label: String, vararg buttons: Pair<String, () -> Unit>): View {
+        val d = { v: Int -> Ui.dp(a, v) }
+        return LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(Hw.lcd(a, label, 13f), LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = d(8) })
+            for ((t, f) in buttons) addView(LedButton(a, t, led = false).apply { setOnClickListener { f() } },
+                LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
+        }
     }
 
     // ------------------------------------------------------------------ effects
@@ -212,7 +166,7 @@ class EditPanel(private val a: MainActivity) {
             if (!t.isAttachedToWindow) return
             val s = NativeEngine.nativeLooperStatus()
             val names = arrayOf("empty", "recording", "playing", "overdubbing", "stopped")
-            t.text = "Looper: ${names.getOrElse(s[0].toInt()) { "?" }}   %.1f / %.1f s".format(s[2], s[1])
+            t.text = L10n.f("Looper: %s   %.1f / %.1f s", L10n.t(names.getOrElse(s[0].toInt()) { "?" }), s[2], s[1])
             a.ui.postDelayed(this, 250)
         }
     }
@@ -222,87 +176,89 @@ class EditPanel(private val a: MainActivity) {
         val slots = (1..12).map { Params.id("fx.slot$it") }
         val blocks = slots.map { NativeEngine.nativeGetParam(it).roundToInt() }
         val titles = blockKeys.indices.map { blockTitle(it) }
-        content.addView(header("Effect chain (top to bottom)"))
+
+        // chain: 12 slots, two columns
+        val chain = Hw.Section(a, "Effect chain (top to bottom)")
+        val flow = FlowLayout(a)
         val seen = mutableSetOf<Int>()
         for (s in slots.indices) {
             val b = blocks[s]
-            val line = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
-            line.addView(Ui.text(a, "${s + 1}", 14f, Ui.DIM), LinearLayout.LayoutParams(d(28), -2))
-            val sp = Ui.spinner(a, titles, b) { pos ->
-                if (pos != NativeEngine.nativeGetParam(slots[s]).roundToInt()) {
-                    NativeEngine.setParam(slots[s], pos.toFloat())
-                    if (pos > 0) Params.set("fx.${blockKeys[pos]}.on", 1f)
-                    ui { buildPage() }
+            val line = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            line.addView(Hw.engraved(a, "${s + 1}", 13f, tr = false), LinearLayout.LayoutParams(d(24), -2))
+            val sel = Hw.lcd(a, titles.getOrElse(b) { "?" } + if (b > 0 && !seen.add(b)) L10n.t(" dup") else "", 13f).apply {
+                setOnClickListener {
+                    AlertDialog.Builder(a).setTitle(L10n.f("Slot %d", s + 1))
+                        .setSingleChoiceItems(titles.toTypedArray(), b) { dlg, pos ->
+                            dlg.dismiss()
+                            NativeEngine.setParam(slots[s], pos.toFloat())
+                            if (pos > 0) Params.set("fx.${blockKeys[pos]}.on", 1f)
+                            buildPage()
+                        }.show()
                 }
             }
-            line.addView(sp, LinearLayout.LayoutParams(0, -2, 1f))
+            line.addView(sel, LinearLayout.LayoutParams(d(140), -2).apply { marginEnd = d(6) })
             if (b > 0) {
                 val onId = Params.id("fx.${blockKeys[b]}.on")
-                line.addView(Switch(a).apply {
-                    isChecked = NativeEngine.nativeGetParam(onId) > 0.5f
-                    setOnCheckedChangeListener { _: CompoundButton, c: Boolean -> NativeEngine.setParam(onId, if (c) 1f else 0f) }
-                })
-                if (!seen.add(b)) line.addView(Ui.text(a, " dup", 12f, Ui.WARN))
+                line.addView(ToggleSwitch(a, "On", vertical = false).apply {
+                    on = NativeEngine.nativeGetParam(onId) > 0.5f
+                    onToggle = { v -> NativeEngine.setParam(onId, if (v) 1f else 0f) }
+                }, LinearLayout.LayoutParams(d(86), -2).apply { marginEnd = d(6) })
+            } else {
+                line.addView(View(a), LinearLayout.LayoutParams(d(92), 1))
             }
             fun swap(o: Int) {
                 NativeEngine.setParam(slots[s], blocks[o].toFloat())
                 NativeEngine.setParam(slots[o], blocks[s].toFloat())
                 buildPage()
             }
-            line.addView(Ui.button(a, "▲") { if (s > 0) swap(s - 1) })
-            line.addView(Ui.button(a, "▼") { if (s < slots.size - 1) swap(s + 1) })
-            content.addView(line)
+            line.addView(LedButton(a, "▲", led = false).apply { setOnClickListener { if (s > 0) swap(s - 1) } },
+                LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+            line.addView(LedButton(a, "▼", led = false).apply { setOnClickListener { if (s < slots.size - 1) swap(s + 1) } })
+            flow.addView(line)
         }
-        val running = NativeEngine.nativeFxChain().joinToString(" > ") { blockTitle(it) }.ifEmpty { "(dry)" }
-        content.addView(Ui.text(a, "running: $running", 12f, Ui.DIM))
+        chain.body.addView(flow, LinearLayout.LayoutParams(-1, -2))
+        val running = NativeEngine.nativeFxChain().joinToString(" > ") { blockTitle(it) }.ifEmpty { L10n.t("(dry)") }
+        chain.body.addView(Ui.text(a, L10n.f("running: %s", running), 12f, Ui.DIM, tr = false),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+        content.addView(chain, Hw.sectionLp(a))
 
-        content.addView(header("Tempo / macros"))
-        for (n in listOf("fx.tempo", "fx.retrig", "fx.macro1", "fx.macro2")) {
-            val r = Row(Params.meta.first { it.name == n })
-            rows += r
-            content.addView(r.view)
-        }
+        panel("Tempo / macros", group("FX Chain").filter { !it.name.startsWith("fx.slot") && !it.name.startsWith("looper.") })
 
         val shown = mutableSetOf<Int>()
         for (s in slots.indices) {
             val b = blocks[s]
             if (b <= 0 || !shown.add(b)) continue
-            content.addView(header("${s + 1}. ${blockTitle(b)}"))
-            val group = "FX / ${blockTitle(b)}"
-            for (m in Params.meta.filter { it.group == group }) {
-                val r = Row(m)
-                rows += r
-                content.addView(r.view)
-            }
             val key = blockKeys[b]
-            if (key == "cab" || key == "convo") {
-                val target = if (key == "cab") 0 else 1
-                val name = NativeEngine.nativeImpulseName(target).ifEmpty { "(none)" }
-                content.addView(Ui.row(a,
-                    Ui.text(a, "User IR: $name", 14f),
-                    Ui.button(a, "Load IR…") { a.libraryPanel.pickImpulse(target) },
-                    Ui.button(a, "Unload") { NativeEngine.nativeUnloadImpulse(target); buildPage() },
-                ))
+            val extra: View? = when (key) {
+                "cab", "convo" -> {
+                    val target = if (key == "cab") 0 else 1
+                    sampleRow(L10n.f("User IR: %s", NativeEngine.nativeImpulseName(target).ifEmpty { L10n.t("(none)") }),
+                        "Load IR…" to { a.libraryPanel.pickImpulse(target) },
+                        "Unload" to { NativeEngine.nativeUnloadImpulse(target); buildPage() })
+                }
+                "vocoder" -> Ui.text(a, "The vocoder needs an audio input (microphone). Input capture is " +
+                    "not wired up in the Android app yet; it works in the desktop build.", 12f, Ui.WARN)
+                else -> null
             }
-            if (key == "vocoder") {
-                content.addView(Ui.text(a, "The vocoder needs an audio input (microphone). Input capture is " +
-                    "not wired up in the Android app yet; it works in the desktop build.", 12f, Ui.WARN))
-            }
+            panel("${s + 1}. ${blockTitle(b)}", group("FX / ${blockTitle(b)}").filter { !it.name.endsWith(".on") }, tr = false, extra = extra)
         }
+        for (g in listOf("Send FX", "Sends", "FX Mod", "Part FX")) group(g).takeIf { it.isNotEmpty() }?.let { panel(g, it) }
 
-        content.addView(header("Looper"))
-        val status = Ui.text(a, "", 14f)
+        // looper
+        val status = Hw.lcd(a, "", 13f)
         looperText = status
-        content.addView(status)
-        content.addView(Ui.row(a,
-            Ui.button(a, "Rec / Play / Dub") { NativeEngine.nativeLooperCommand(NativeEngine.Looper.TAP) },
-            Ui.button(a, "Stop") { NativeEngine.nativeLooperCommand(NativeEngine.Looper.STOP) },
-            Ui.button(a, "Undo") { NativeEngine.nativeLooperCommand(NativeEngine.Looper.UNDO) },
-            Ui.button(a, "Clear") { NativeEngine.nativeLooperCommand(NativeEngine.Looper.CLEAR) },
-        ))
-        val lvl = Row(Params.meta.first { it.name == "looper.level" })
-        rows += lvl
-        content.addView(lvl.view)
+        val buttons = LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            for ((t, cmd) in listOf("Rec / Play / Dub" to NativeEngine.Looper.TAP, "Stop" to NativeEngine.Looper.STOP,
+                    "Undo" to NativeEngine.Looper.UNDO, "Clear" to NativeEngine.Looper.CLEAR))
+                addView(LedButton(a, t, led = false).apply { setOnClickListener { NativeEngine.nativeLooperCommand(cmd) } },
+                    LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
+        }
+        val box = Ui.column(a).apply {
+            addView(status, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(6) })
+            addView(buttons)
+        }
+        panel("Looper", Params.meta.filter { it.name.startsWith("looper.") }, extra = box)
         a.ui.removeCallbacks(looperTick)
         a.ui.post(looperTick)
     }

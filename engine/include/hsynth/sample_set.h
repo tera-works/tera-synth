@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "hsynth/dsp/wavetable.h"
+#include "hsynth/streaming.h"
 
 namespace hsynth {
 
@@ -23,6 +24,15 @@ struct Sample {
     int64_t loopStart = -1;           // from smpl chunk
     int64_t loopEnd = -1;             // exclusive
     int unityNote = -1;
+
+    // Disk streaming (streaming.h): data[] holds only the first preloadFrames
+    // (+ padding); the rest is read by the engine's DiskStreamer.
+    bool streamed = false;
+    int64_t preloadFrames = 0;
+    StreamSource stream;
+    DiskStreamer* streamer = nullptr;  // set by the engine when the set is installed
+    // Loads the frames that are on disk only (the sample is no longer streamed).
+    bool loadFully(std::string& error);
 
     static constexpr int kPadFrames = 4;
     const float* channel(int c) const { return data[c < channels ? c : 0].data(); }
@@ -114,12 +124,18 @@ struct SampleSet {
     // keyswitch range (sw_lokey / sw_hikey, -1 = none) and default switch
     int swLo = -1, swHi = -1, swDefault = -1;
     bool hasReleaseRegions = false;
+    int streamedSamples() const;
+    int64_t diskBytes() const;  // bytes left on disk (streamed samples)
     bool isKeyswitch(int key) const { return swLo >= 0 && key >= swLo && key <= swHi; }
     size_t memoryBytes() const;
 
     // Builds the sample mip levels each sample needs for its regions' key
     // ranges (plus a bend headroom). Loader thread.
     void prepareMips();
+    // Samples that cannot be streamed (looped, pitched up more than an octave
+    // or started far into the file) are loaded fully. Loader thread, after
+    // the regions are known and before prepareMips().
+    void finalizeStreaming();
 
     // Returns number of matching regions written to out (at most max).
     int findRegions(const RegionQuery& q, const Region** out, int max) const;

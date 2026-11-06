@@ -8,6 +8,7 @@
 #include "hsynth/json.h"
 #include "hsynth/midi.h"
 #include "hsynth/preset.h"
+#include "hsynth/fileio.h"
 #include "hsynth/wav.h"
 #include "test.h"
 
@@ -377,4 +378,24 @@ TEST(wav_reader_rejects_bad_block_align) {
     CHECK(!readWavMemory(bad2.data(), bad2.size(), w, err));
     auto good = make(2, 16, 4, 100);
     CHECK(readWavMemory(good.data(), good.size(), w, err) && w.frames == 25 && w.channels == 2);
+}
+
+TEST(io_non_utf8_path_does_not_throw) {
+    // Shift-JIS "テスト.wav" (older Japanese SFZ libraries): not valid UTF-8.
+    // std::filesystem throws on such strings on Windows; utf8Path must not.
+    const std::string sjis = "\x83\x65\x83\x58\x83\x67.wav";
+    bool threw = false;
+    try {
+        const auto p = utf8Path(sjis);
+        CHECK(!p.empty());
+        FILE* f = fopenUtf8(sjis, "rb");  // does not exist: must simply fail
+        CHECK(f == nullptr);
+        if (f) std::fclose(f);
+        std::string err;
+        WavData w;
+        CHECK(!readWav(sjis, w, err));
+    } catch (...) {
+        threw = true;
+    }
+    CHECK(!threw);
 }

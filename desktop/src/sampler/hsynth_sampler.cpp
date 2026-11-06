@@ -108,7 +108,8 @@ std::string safe(const std::string& s) {
     std::string o;
     for (unsigned char c : s) o += (std::isalnum(c) || c == '-' || c == '.') ? (char)c : '_';
     while (o.find("__") != std::string::npos) o.replace(o.find("__"), 2, "_");
-    while (!o.empty() && o.back() == '_') o.pop_back();
+    // Windows drops trailing dots from folder names: never end a name with one
+    while (!o.empty() && (o.back() == '_' || o.back() == '.')) o.pop_back();
     return o.empty() ? "x" : o;
 }
 
@@ -246,6 +247,16 @@ fs::path sfzPathOf(const InsPatch& p, const std::string& vendor) {
     return hsynth::utf8Path(safe(shortList(p.list, vendor))) / hsynth::utf8Path(leaf) / hsynth::utf8Path(leaf + ".sfz");
 }
 
+// Marker for a patch that was probed silent while a reference patch sounded (so it
+// really makes no sound on its own, e.g. a split / layer-only patch).
+fs::path silentMarker(const fs::path& out, const InsPatch& p, const std::string& vendor) {
+    fs::path s = out / sfzPathOf(p, vendor);
+    return s.parent_path().parent_path() / (s.stem().string() + ".silent");
+}
+bool isDone(const fs::path& out, const InsPatch& p, const std::string& vendor) {
+    return fs::exists(out / sfzPathOf(p, vendor)) || fs::exists(silentMarker(out, p, vendor));
+}
+
 std::atomic<bool> g_stop{false};
 BOOL WINAPI onConsoleCtrl(DWORD type) {
     g_stop = true;
@@ -302,7 +313,7 @@ int printStatus(const Args& a) {
         if (!groups.count(j.group)) order.push_back(j.group);
         auto& g = groups[j.group];
         ++g.second;
-        if (fs::exists(out / sfzPathOf(j.patch, vendor))) { ++g.first; ++done; }
+        if (isDone(out, j.patch, vendor)) { ++g.first; ++done; }
         else remaining += avg[j.density == "lite" ? 1 : 0];
     }
     std::printf("SonicCell capture: %d / %zu patches done (%.0f %%), %.1f GB\n", done, jobs.size(), 100.0 * done / jobs.size(), mb / 1024.0);
@@ -448,12 +459,29 @@ int main(int argc, char** argv) {
         };
         // graceful stop: STOP file (soniccell_stop.bat) or Ctrl+C / closing the window
         installStopHandler();
+        // keep Windows (incl. Modern Standby laptops) awake and the display on while sampling:
+        // standby suspends the capture and the SonicCell's USB audio does not recover from it
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+        // A known-good sound to tell "this patch is silent" from "the device stopped working".
+        auto deviceAlive = [&]() {
+            InstrumentSpec ref;
+            ref.bank = 121 * 128;  // GM2 capital, program 1 (piano)
+            ref.program = 0;
+            ProbeReport rr;
+            std::string e;
+            return probeInstrument(*src, ref, rr, e) && !rr.silent;
+        };
+        auto deviceLostMessage = [&]() {
+            log("SonicCell is not producing sound (Windows standby or a USB problem?): stopping.");
+            log("Power-cycle the SonicCell, then run soniccell_start.bat to resume.");
+        };
+        int failedInRow = 0;
         auto stopNow = [&]() { return g_stop.load() || fs::exists(stopFile); };
         opt.stopRequested = stopNow;
 
         const int low = std::atoi(a.get("--low", "24").c_str()), high = std::atoi(a.get("--high", "108").c_str());
         size_t pending = 0;
-        for (auto& j : jobs) if (!fs::exists(outDir / sfzPathOf(j.patch, vendor))) ++pending;
+        for (auto& j : jobs) if (!isDone(outDir, j.patch, vendor)) ++pending;
         log("batch: " + std::to_string(jobs.size()) + " patches, " + std::to_string(pending) + " still to sample -> " + opt.outDir);
         const auto batchStart = std::chrono::steady_clock::now();
         int done = 0, failed = 0, silent = 0;
@@ -464,7 +492,7 @@ int main(int argc, char** argv) {
             if (stopNow()) { stopped = true; break; }
             const Job& job = jobs[j];
             const InsPatch& p = job.patch;
-            if (fs::exists(outDir / sfzPathOf(p, vendor))) continue;
+            if (isDone(outDir, p, vendor)) continue;
             const bool lite = job.density == "lite";
             InstrumentSpec s;
             const std::string list = shortList(p.list, vendor);
@@ -504,10 +532,31 @@ int main(int argc, char** argv) {
             if (lite && !s.drum && rep.sustained) s.holdSec = 2.0;
             if (lite) s.maxReleaseSec = std::min(s.maxReleaseSec, 3.0);
             std::string type = "failed";
-            if (ok && rep.silent) { type = "silent"; ++silent; }
-            else if (ok && sampleInstrument(*src, s, opt, err, &res)) type = s.drum ? "kit" : rep.sustained ? "sustained" : "decaying";
-            else if (err == kStoppedError) { stopped = true; break; }
-            else { log("  error: " + err); ++failed; }
+            bool deviceLost = false;
+            if (ok && rep.silent) {
+                // genuinely silent patch, or has the SonicCell stopped answering?
+                if (!deviceAlive()) deviceLost = true;
+                else {
+                    type = "silent";
+                    ++silent;
+                    std::ofstream(silentMarker(outDir, p, vendor)) << "probe found no sound; reference patch OK\n";
+                }
+            } else if (ok && sampleInstrument(*src, s, opt, err, &res)) {
+                type = s.drum ? "kit" : rep.sustained ? "sustained" : "decaying";
+            } else if (err == kStoppedError) {
+                stopped = true;
+                break;
+            } else {
+                log("  error: " + err);
+                ++failed;
+                if (err == kDeviceLostError || ++failedInRow >= 2 || !deviceAlive()) deviceLost = true;
+            }
+            if (type != "failed") failedInRow = 0;
+            if (deviceLost) {
+                deviceLostMessage();
+                stopped = true;
+                break;
+            }
             const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (type != "failed") { spent += el; ++done; --left; }
             if (type != "failed" && type != "silent") {

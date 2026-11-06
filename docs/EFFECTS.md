@@ -65,6 +65,21 @@ HSynth のエフェクトは、31 種類のエフェクトブロックを最大 
 | stutter | Stutter | hold (repeat), division, reverse, gate, mix |
 | stereo | Stereo Image | width (0〜2), pan, haas delay, mono bass below, output |
 | vocoder | Vocoder | bands, low/high band, band Q, attack, release, formant shift, sibilance, input gain, input gate, mix |
+| deesser | De-Esser (v0.6) | frequency, threshold, max reduction, listen。サイドチェイン帯域で動的ハイシェルフを掛ける（信号を分割しない） |
+| isolator | Isolator (v0.6) | low / mid / high（-60 dB = キル）, 2 クロスオーバー（Linkwitz-Riley 4 次、低域はオールパス補正） |
+| stepfilter | Step Filter (v0.6) | type (lp/bp/hp), step 長 (1/1〜1/32), steps (2〜16), base cutoff, depth (oct), resonance, glide, mix, step 1〜16 |
+| multitap | Multi-Tap Delay (v0.6) | time / sync, feedback（最長タップ）, tone, mix, tap 1〜4: time (基準比), level, pan |
+| doubler | Doubler (v0.6) | detune (cent), delay, width, mix（左右逆方向の微小ピッチシフト） |
+| granular | Granular (v0.6) | grain size, density, pitch (±24 st), spray, stereo spread, reverse 確率, feedback, freeze, mix（3 秒バッファ、24 グレイン） |
+| tapestop | Tape Stop (v0.6) | stop（押している間 停止）, stop time, curve |
+| pump | Pump (Sidechain) (v0.6) | rate (1/1〜1/32、テンポ同期), depth, release, curve |
+| resonator | Resonator (v0.6) | chord (8: unison/octaves/fifth/major/minor/sus4/maj7/min7), root / 最終ノート追従, decay, tone, mix（4 本のコムフィルター） |
+| swell | Slow Attack (Swell) (v0.6) | attack, threshold, curve（発音ごとにボリュームを立ち上げる） |
+| talkbox | Talk Box (v0.6) | mode (manual/lfo/envelope), vowel (a-e-i-o-u), rate, sync, depth, envelope sens, resonance, mix（3 フォルマント） |
+| gatedverb | Gated / Reverse Reverb (v0.6) | mode (gated/reverse/decay), length, pre-delay, density, damping, width, mix（32 タップ＋拡散オールパス） |
+
+v0.6 ではコーラスに Juno 系モード（juno i / juno ii / juno i+ii: 左右逆相の三角波で 1 本の BBD ラインを掃引）も加えた。
+サブタイプ込みのアルゴリズム数は約 110。v0.6 で追加したブロックの負荷はどれも 1 コアの 0.3 % 未満（`fx_block_cpu_cost`）。
 
 チェーン全体の設定（グループ `FX Chain`）: `fx.tempo`（20〜300 bpm）、`fx.retrig`（最初のノートで LFO
 とリズムを頭出し）、`fx.macro1/2`、`looper.level`、`fx.slot1`〜`fx.slot12`。

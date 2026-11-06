@@ -55,26 +55,38 @@ class Library(private val context: Context) {
         return f + u
     }
 
-    private fun presetTitle(f: File): String = try {
-        org.json.JSONObject(f.readText()).optString("name", f.nameWithoutExtension)
-    } catch (e: Exception) {
-        f.nameWithoutExtension + " (invalid)"
+    // preset titles by path + modification time (parsing every JSON on each refresh was slow)
+    private val titleCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+
+    private fun presetTitle(f: File): String {
+        val mod = f.lastModified()
+        titleCache[f.path]?.let { if (it.first == mod) return it.second }
+        val t = try {
+            org.json.JSONObject(f.readText()).optString("name", f.nameWithoutExtension)
+        } catch (e: Exception) {
+            f.nameWithoutExtension + if (L10n.ja) "（読み込めません）" else " (invalid)"
+        }
+        titleCache[f.path] = mod to t
+        return t
     }
 
     /** All loadable sample sources (.sfz and stand-alone .wav). */
     fun sampleSources(): List<Entry> {
+        // One pass per directory. A folder with an .sfz is an instrument: its WAVs and
+        // its sub-folders' WAVs belong to it and are not listed (and not walked).
         val out = mutableListOf<Entry>()
-        libraryRoot.walkTopDown().filter { it.isFile }.forEach { f ->
-            val ext = f.extension.lowercase()
-            val user = f.path.startsWith(userSamples.path)
-            if (ext == "sfz") out += Entry(f, f.relativeTo(libraryRoot).path, user)
-            else if (ext == "wav") {
-                // WAVs that live next to an .sfz are part of that instrument
-                val dirHasSfz = f.parentFile?.listFiles { x -> x.extension.lowercase() == "sfz" }?.isNotEmpty() == true ||
-                    f.parentFile?.parentFile?.listFiles { x -> x.extension.lowercase() == "sfz" }?.isNotEmpty() == true
-                if (!dirHasSfz) out += Entry(f, f.relativeTo(libraryRoot).path, user)
-            }
+        fun walk(dir: File, insideInstrument: Boolean) {
+            val files = dir.listFiles() ?: return
+            val sfz = files.filter { it.isFile && it.extension.equals("sfz", true) }
+            val user = dir.path.startsWith(userSamples.path)
+            for (f in sfz) out += Entry(f, f.relativeTo(libraryRoot).path, user)
+            val instrument = insideInstrument || sfz.isNotEmpty()
+            if (!instrument)
+                for (f in files) if (f.isFile && f.extension.equals("wav", true)) out += Entry(f, f.relativeTo(libraryRoot).path, user)
+            if (instrument && sfz.isNotEmpty()) return  // sample folders below an .sfz
+            for (f in files) if (f.isDirectory) walk(f, instrument)
         }
+        walk(libraryRoot, false)
         return out.sortedWith(compareBy({ it.user }, { it.title.lowercase() }))
     }
 

@@ -14,9 +14,12 @@
 
 #include "audio_out.h"
 #include "hsynth/engine.h"
+#include "hsynth/midi_learn.h"
 #include "hsynth/params.h"
+#include "hsynth/preset_index.h"
 #include "host_library.h"
 #include "midi_in.h"
+#include "midi_out.h"
 
 struct ImVec2;
 
@@ -26,8 +29,10 @@ struct AppSettings {
     int sampleRate = 48000;
     int periodFrames = 256;  // 0 = backend default
     bool exclusive = false;
-    int voices = 32;
+    int voices = hsynth::kDefaultVoices;
+    int renderThreads = 0;  // 0 = auto
     int quality = 1;
+    int streamMode = 1;      // disk streaming: 0 off, 1 auto (large sets), 2 always
     bool mpe = false;
     int firstNote = 48;
     int whiteKeys = 22;
@@ -38,6 +43,10 @@ struct AppSettings {
     float uiScale = 0.0f;    // 0 = follow monitor DPI
     bool audioInput = false; // open a capture device (vocoder modulator)
     std::string inputName;   // empty = default capture device
+    std::string midiOutName; // empty = no MIDI output
+    bool midiOutClock = false;
+    bool midiOutEcho = true;  // screen / PC keyboard notes also go to the MIDI output
+    int midiOutChannel = 0;
 };
 
 class App {
@@ -56,6 +65,7 @@ public:
     // Scripted smoke test: plays notes, switches presets and tabs, saves
     // screenshots, a WAV recording and report.txt into outDir, then quits.
     void startAutotest(const fs::path& outDir);
+    void setAudioMuted(bool m) { audio_.setMuted(m); }
     std::string takeScreenshotRequest() { std::string s; s.swap(screenshotRequest_); return s; }
 
 private:
@@ -76,6 +86,14 @@ private:
     void loadImpulse(int target, const fs::path& file);  // 0 cabinet, 1 IR reverb
     void loadWavetable(int layer, const fs::path& file);
     void refreshLists();
+    void loadPresetInto(const fs::path& file, int part);  // part of a multi
+    void applyStreamingSettings();
+
+    // parameters of the part being edited (part 0 in single mode)
+    int editPart() const { return engine_.multiTimbral() ? engine_.selectedPart() : 0; }
+    float getP(int id) const { return engine_.getPartParam(editPart(), id); }
+    void setP(int id, float v);  // with undo history
+    void setMultiMode(bool on);
 
     // UI
     void drawTopBar();
@@ -87,6 +105,36 @@ private:
     void drawLooper();
     void drawLibrary();
     void drawMonitor();
+    void drawBrowser();
+    void drawMulti();
+    void drawSceneBar();
+    void drawZones(float width, float height);
+    void drawMidiMap();
+    bool paramContextMenu(const hsynth::ParamInfo& info, int id, float& v);  // true if v changed
+    // browser
+    void rescanBrowser();
+    void updateBrowserResults();
+    bool presetPicker(const char* id, int part);  // popup body: search + list, loads into part
+    // scenes (multi snapshots in <data>/scenes)
+    fs::path scenePath(int slot) const;
+    void refreshScenes();
+    void recallScene(int slot);
+    void storeScene(int slot, const std::string& name);
+    void saveMidiMap();
+    // performance: notes from the screen / PC keyboard (also echoed to MIDI out)
+    void noteEvent(bool on, uint32_t id, int key, float vel);
+    void setTransport(bool on);
+    void drawSeq();
+    void drawMacros();
+    void drawMidiOut();
+    bool quickAssign(const char* id, hsynth::ModSource src);  // "assign to..." popup: a free mod slot
+    // undo / redo / compare (snapshots of the edited part + global parameters)
+    struct Snap { int part = 0; std::vector<float> p; };
+    Snap captureState() const;
+    void applyState(const Snap& s);
+    void undo();
+    void redo();
+    void toggleCompare();
     void drawLog(float height);
     void handlePcKeyboard();
 
@@ -147,6 +195,40 @@ private:
     double statsTime_ = 0;
 
     float dpiScale_ = 1.0f;
+
+    // browser state
+    hsynth::PresetIndex index_;
+    std::vector<int> browserResults_;
+    char browserSearch_[128] = "";
+    std::string browserCategory_;
+    bool browserFavorites_ = false, browserUser_ = false;
+    bool browserDirty_ = true;
+    int browserSel_ = -1;
+    char tagBuf_[256] = "", catBuf_[96] = "";
+    char pickerSearch_[96] = "";
+
+    // MIDI output, transport
+    MidiOut midiOut_;
+    // undo / compare
+    std::deque<Snap> undo_, redo_;
+    int lastEditId_ = -1;
+    double lastEditTime_ = 0;
+    Snap loadedSnap_, compareSaved_;
+    bool comparing_ = false;
+    int seqLane_ = 0;
+
+    // MIDI learn
+    hsynth::MidiLearn learn_;
+    int learnSeen_ = -1;
+
+    // multi / scenes
+    std::string partNames_[hsynth::kNumParts];
+    static constexpr int kScenes = 16;
+    struct SceneSlot { std::string name; bool used = false; };
+    SceneSlot scenes_[kScenes];
+    int currentScene_ = -1;
+    int sceneEdit_ = -1;
+    char sceneName_[64] = "";
 
     // autotest
     void autotestStep();

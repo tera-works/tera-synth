@@ -9,13 +9,10 @@
 
 namespace hsynth {
 
-inline std::filesystem::path utf8Path(const std::string& s) {
-#if defined(__cpp_char8_t)
-    return std::filesystem::path(std::u8string(s.begin(), s.end()));
-#else
-    return std::filesystem::u8path(s);
-#endif
-}
+// Never throws. On Windows a string that is not valid UTF-8 (e.g. Shift-JIS
+// sample names in older SFZ libraries) is read in the system ANSI code page
+// instead; std::filesystem would throw on it.
+std::filesystem::path utf8Path(const std::string& s);
 
 inline std::string utf8String(const std::filesystem::path& p) {
     const auto s = p.generic_u8string();

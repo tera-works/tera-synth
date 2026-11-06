@@ -1,8 +1,13 @@
 #include "audio_engine.h"
 
+#include <dlfcn.h>
+#include <sched.h>
+#include <unistd.h>
+
 #include <android/log.h>
 
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
 #define LOG_TAG "HSynthAudio"
@@ -57,6 +62,11 @@ bool AudioEngine::openLocked() {
     engine_.prepare((float)stream_->getSampleRate(), hsynth::kMaxBlockSize);
 
     const int burst = stream_->getFramesPerBurst();
+    // ADPF target: half the callback period. With the whole period as the
+    // target the governor sees a light load as slack and lowers the clocks
+    // until a callback takes most of the period, so any extra work (a song
+    // starting, effects waking up) then overruns it.
+    startHintSession((int64_t)(0.5e9 * (double)burst / (double)stream_->getSampleRate()));
     if (bufferBursts_ > 0) {
         tuner_.reset();
         stream_->setBufferSizeInFrames(burst * bufferBursts_);
@@ -86,10 +96,109 @@ void AudioEngine::stop() {
         stream_.reset();
     }
     tuner_.reset();
+    closeHintSession();  // the callback thread has ended with the stream
+}
+
+namespace {
+// NDK performance hint API, resolved at run time (minSdk 28; the API is 31+)
+struct HintApi {
+    using GetManager = void* (*)();
+    using Create = void* (*)(void*, const int32_t*, size_t, int64_t);
+    using Report = int (*)(void*, int64_t);
+    using Close = void (*)(void*);
+    GetManager getManager = nullptr;
+    Create create = nullptr;
+    Report report = nullptr;
+    Close close = nullptr;
+    bool ok = false;
+    HintApi() {
+        void* lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+        if (!lib) return;
+        getManager = (GetManager)dlsym(lib, "APerformanceHint_getManager");
+        create = (Create)dlsym(lib, "APerformanceHint_createSession");
+        report = (Report)dlsym(lib, "APerformanceHint_reportActualWorkDuration");
+        close = (Close)dlsym(lib, "APerformanceHint_closeSession");
+        ok = getManager && create && report && close;
+    }
+};
+const HintApi& hintApi() {
+    static const HintApi api;
+    return api;
+}
+}  // namespace
+
+namespace {
+// Cores faster than the slowest cluster (big.LITTLE): the audio callback and the
+// render helpers stay off the little cores, where a callback can take 2-3x as
+// long and any extra work (a song starting, effects waking up) overruns the
+// buffer. Empty when every core is the same.
+bool fastCoreMask(cpu_set_t& set) {
+    long maxf[CPU_SETSIZE];
+    const int n = std::min((int)sysconf(_SC_NPROCESSORS_CONF), (int)CPU_SETSIZE);
+    long lo = -1, hi = -1;
+    for (int c = 0; c < n; ++c) {
+        maxf[c] = -1;
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+        if (FILE* f = std::fopen(path, "r")) {
+            if (std::fscanf(f, "%ld", &maxf[c]) != 1) maxf[c] = -1;
+            std::fclose(f);
+        }
+        if (maxf[c] < 0) continue;
+        lo = lo < 0 ? maxf[c] : std::min(lo, maxf[c]);
+        hi = std::max(hi, maxf[c]);
+    }
+    if (lo < 0 || lo == hi) return false;
+    CPU_ZERO(&set);
+    int count = 0;
+    for (int c = 0; c < n; ++c)
+        if (maxf[c] > lo) { CPU_SET(c, &set); ++count; }
+    return count > 0;
+}
+}  // namespace
+
+void AudioEngine::startHintSession(int64_t targetNs) {
+    closeHintSession();
+    hintCancel_.store(false);
+    hintThread_ = std::thread([this, targetNs] {
+        // the callback thread exists once audio runs: wait for its tid
+        for (int i = 0; i < 300 && !hintCancel_.load() && audioTid_.load() == 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (hintCancel_.load() || audioTid_.load() == 0) return;
+        int32_t tids[16];
+        int n = 0;
+        tids[n++] = audioTid_.load();
+        int helpers[8];
+        const int nh = engine_.renderThreadIds(helpers, 8);
+        for (int i = 0; i < nh && n < 16; ++i) tids[n++] = helpers[i];
+        cpu_set_t fast;
+        if (fastCoreMask(fast)) {
+            int pinned = 0;
+            for (int i = 0; i < n; ++i) pinned += sched_setaffinity(tids[i], sizeof fast, &fast) == 0;
+            LOGI("pinned %d of %d audio threads to %d fast cores", pinned, n, CPU_COUNT(&fast));
+        }
+        if (!hintApi().ok) return;
+        void* mgr = hintApi().getManager();
+        void* s = mgr ? hintApi().create(mgr, tids, (size_t)n, targetNs) : nullptr;
+        if (s) {
+            hint_.store(s, std::memory_order_release);
+            LOGI("performance hint session: %d threads, target %.2f ms", n, (double)targetNs / 1e6);
+        } else {
+            LOGI("performance hint session not available");
+        }
+    });
+}
+
+void AudioEngine::closeHintSession() {
+    hintCancel_.store(true);
+    if (hintThread_.joinable()) hintThread_.join();
+    if (void* s = hint_.exchange(nullptr)) hintApi().close(s);
+    audioTid_.store(0);
 }
 
 oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream* stream, void* audioData, int32_t numFrames) {
     const auto t0 = std::chrono::steady_clock::now();
+    if (audioTid_.load(std::memory_order_relaxed) == 0) audioTid_.store((int)gettid(), std::memory_order_relaxed);
     if (tuner_) tuner_->tune();  // lock-free, real-time safe
     float* out = static_cast<float*>(audioData);
     const int channels = stream->getChannelCount();
@@ -119,6 +228,7 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream* stream, vo
     if (us > cbUsMax_.load(std::memory_order_relaxed)) cbUsMax_.store(us, std::memory_order_relaxed);
     if (load > cbLoadMax_.load(std::memory_order_relaxed)) cbLoadMax_.store(load, std::memory_order_relaxed);
     lastFrames_.store(numFrames, std::memory_order_relaxed);
+    if (void* s = hint_.load(std::memory_order_acquire)) hintApi().report(s, (int64_t)(us * 1000.0f));
     return oboe::DataCallbackResult::Continue;
 }
 

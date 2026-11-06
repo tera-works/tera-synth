@@ -34,7 +34,7 @@ data class ParamMeta(
 
     fun format(v: Float): String = when (kind) {
         "enum" -> options.getOrElse(v.roundToInt()) { v.roundToInt().toString() }
-        "bool" -> if (v > 0.5f) "on" else "off"
+        "bool" -> L10n.t(if (v > 0.5f) "on" else "off")
         "int" -> v.roundToInt().toString() + if (unit.isNotEmpty()) " $unit" else ""
         else -> {
             val s = when {
