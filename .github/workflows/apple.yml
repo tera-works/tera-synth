@@ -1,0 +1,47 @@
+# macOS / iOS builds (the developer machine is Windows; these runners are the
+# Apple compile check). Engine tests run on macOS too.
+name: apple
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  engine-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S engine -B build/engine -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/engine -j 4
+      - name: Tests
+        run: ./build/engine/hsynth_tests
+
+  desktop-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/desktop -j 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HSynth-macOS
+          path: build/desktop/HSynth.app
+
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: XcodeGen
+        run: brew install xcodegen && cd ios && xcodegen
+      - name: Build (simulator, unsigned)
+        run: |
+          cd ios
+          xcodebuild -project HSynth.xcodeproj -scheme HSynth -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build | tail -n 60
+          exit ${PIPESTATUS[0]}

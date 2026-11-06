@@ -1,0 +1,66 @@
+# XcodeGen spec for the iOS app: `brew install xcodegen && xcodegen` in this
+# folder creates HSynth.xcodeproj (not committed). The engine, the desktop
+# audio (miniaudio) / CoreMIDI code and the factory content are shared with
+# the other hosts.
+name: HSynth
+options:
+  bundleIdPrefix: com.hsynth
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    CLANG_CXX_LANGUAGE_STANDARD: c++17
+    CLANG_CXX_LIBRARY: libc++
+    SWIFT_VERSION: "5.0"
+    GCC_OPTIMIZATION_LEVEL_Release: "3"
+targets:
+  HSynth:
+    type: application
+    platform: iOS
+    sources:
+      - path: HSynth
+      - path: ../engine/src
+        group: Engine
+        excludes:
+          - "**/*.inc"
+      - path: ../desktop/src/audio_out.cpp
+        group: Host
+      - path: ../desktop/src/midi_in_coremidi.cpp
+        group: Host
+      - path: ../android/app/src/main/assets/presets
+        type: folder
+        buildPhase: resources
+      - path: ../android/app/src/main/assets/library
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hsynth.ios
+        PRODUCT_NAME: HSynth
+        SWIFT_OBJC_BRIDGING_HEADER: HSynth/HSynth-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../engine/include
+          - $(SRCROOT)/../engine/src
+          - $(SRCROOT)/../desktop/src
+          - $(SRCROOT)/../third_party/miniaudio
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", "NDEBUG=1"]
+    dependencies:
+      - sdk: CoreMIDI.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+    info:
+      path: HSynth/Info.plist
+      properties:
+        CFBundleDisplayName: HSynth
+        CFBundleShortVersionString: "0.3.0"
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown]
+        NSMicrophoneUsageDescription: "The microphone feeds the vocoder and the looper."
