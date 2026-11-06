@@ -100,7 +100,7 @@ class MonitorPanel(private val a: MainActivity) {
             a.prefs.edit().putBoolean("exclusive", c).apply(); a.startAudio()
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
         // audio input (microphone / USB input) for the vocoder and the looper
-        inputSwitch = toggle("Audio Input (mic / USB) for vocoder and looper", false) { c -> a.setAudioInput(c) }
+        inputSwitch = toggle("Audio Input (mic / USB) for vocoder and looper", NativeEngine.nativeInputEnabled()) { c -> a.setAudioInput(c) }
         audio.body.addView(inputSwitch, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(4) })
         audio.body.addView(inputText, LinearLayout.LayoutParams(-1, -2))
         col.addView(audio, Hw.sectionLp(a))

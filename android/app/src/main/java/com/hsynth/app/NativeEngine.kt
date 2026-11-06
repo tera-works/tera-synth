@@ -69,6 +69,8 @@ object NativeEngine {
     external fun nativeSetAllParams(values: FloatArray)
     external fun nativeSetTransport(on: Boolean)
     external fun nativeSetInput(on: Boolean): Boolean
+    external fun nativeInputEnabled(): Boolean
+    external fun nativeSeqPosition(): Int
     external fun nativeInputPeak(): Float
     external fun nativeRecordStart(path: String): Boolean
     external fun nativeRecordStop(): Double

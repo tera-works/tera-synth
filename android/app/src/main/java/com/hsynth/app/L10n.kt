@@ -63,9 +63,11 @@ object L10n {
         "(none)" to "（なし）",
         "Sound for part %d" to "パート %d の音色", "Store scene %d" to "シーン %d に保存",
         "Audio Input (mic / USB) for vocoder and looper" to "Audio Input（マイク / USB 入力。ボコーダーとルーパー用）",
+        "Search name / category / tag" to "名前・カテゴリ・タグで検索",
+        "Add to favourites" to "お気に入りに追加", "Remove from favourites" to "お気に入りから外す",
         // multi
-        "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays channel 1." to
-            "マルチモードでは 16 パートを鳴らせます。同じ MIDI チャンネルのパートは重なり、鍵域を分けるとスプリットになります。画面の鍵盤は ch 1 です。",
+        "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays the channel of the part being edited." to
+            "マルチモードでは 16 パートを鳴らせます。同じ MIDI チャンネルのパートは重なり、鍵域を分けるとスプリットになります。画面の鍵盤は、エディット中のパートのチャンネルで鳴ります。",
         "Tap a scene to recall it. Store, then a scene, saves the current multi there." to
             "シーンをタップすると呼び出します。Store を押してからシーンをタップすると、今のマルチを保存します。",
         // library

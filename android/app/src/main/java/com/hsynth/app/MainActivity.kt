@@ -227,6 +227,10 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
+        if (NativeEngine.nativeRecordSeconds() >= 0) {
+            val sec = NativeEngine.nativeRecordStop()
+            log("recording saved (%.1f s): %s".format(sec, lastRecording))
+        }
         play.keyboard.allNotesOff()
         NativeEngine.control(NativeEngine.Control.ALL_NOTES_OFF, 0f)
         midi.stop()

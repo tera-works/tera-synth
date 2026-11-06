@@ -333,6 +333,17 @@ class FmAlgoView(ctx: Context, private val layer: Char) : GraphView(ctx, 150f) {
  * values. Velocity at the bottom = rest.
  */
 class StepSeqView(ctx: Context) : GraphView(ctx, 230f) {
+    private var playStep = -1
+    // follows the sequencer while the view is on screen
+    private val follow = object : Runnable {
+        override fun run() {
+            if (!isAttachedToWindow) return
+            val s = NativeEngine.nativeSeqPosition()
+            if (s != playStep) { playStep = s; invalidate() }
+            postDelayed(this, 40)
+        }
+    }
+    override fun onAttachedToWindow() { super.onAttachedToWindow(); post(follow) }
     private val names = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
     private val laneNote = 0.44f
     private val laneVel = 0.34f
@@ -355,6 +366,7 @@ class StepSeqView(ctx: Context) : GraphView(ctx, 230f) {
         }
         for (s in 0 until n) {
             val x0 = labelW + s * sw
+            if (s == playStep) c.drawRect(x0, 0f, x0 + sw, height.toFloat(), Paint().apply { color = Color.argb(70, 255, 140, 26) })
             if (s % 4 == 0) c.drawLine(x0, 0f, x0, height.toFloat(), grid)
             val vel = get("seq.s${s + 1}.vel")
             val note = get("seq.s${s + 1}.note").roundToInt()

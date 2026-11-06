@@ -81,7 +81,7 @@ class MultiPanel(private val a: MainActivity) {
             onToggle = { on -> NativeEngine.nativeSetMulti(on); if (!on) a.setEditPart(0); refresh() }
         }
         mode.body.addView(multiSwitch, LinearLayout.LayoutParams(-2, -2))
-        mode.body.addView(Ui.text(a, "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays channel 1.", 12f, Ui.DIM),
+        mode.body.addView(Ui.text(a, "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays the channel of the part being edited.", 12f, Ui.DIM),
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(4) })
 
         val scenes = Hw.Section(a, "Scenes")

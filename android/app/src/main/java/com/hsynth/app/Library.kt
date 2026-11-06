@@ -23,7 +23,8 @@ class Library(private val context: Context) {
     val userPresets = File(context.filesDir, "presets/user")
     private val userSamples = File(libraryRoot, "user")
 
-    data class Entry(val file: File, val title: String, val user: Boolean)
+    data class Entry(val file: File, val title: String, val user: Boolean,
+                     val category: String = "", val tags: List<String> = emptyList(), val comment: String = "")
 
     /** Copy bundled assets when the app version changes. Blocking. */
     fun installFactoryContent(versionCode: Long) {
@@ -50,24 +51,26 @@ class Library(private val context: Context) {
     }
 
     fun presets(): List<Entry> {
-        val f = factoryPresets.listFiles { x -> x.extension == "json" }?.sortedBy { it.name }?.map { Entry(it, presetTitle(it), false) } ?: emptyList()
-        val u = userPresets.listFiles { x -> x.extension == "json" }?.sortedBy { it.name.lowercase() }?.map { Entry(it, presetTitle(it), true) } ?: emptyList()
+        val f = factoryPresets.listFiles { x -> x.extension == "json" }?.sortedBy { it.name }?.map { presetEntry(it, false) } ?: emptyList()
+        val u = userPresets.listFiles { x -> x.extension == "json" }?.sortedBy { it.name.lowercase() }?.map { presetEntry(it, true) } ?: emptyList()
         return f + u
     }
 
-    // preset titles by path + modification time (parsing every JSON on each refresh was slow)
-    private val titleCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+    // preset metadata by path + modification time (parsing every JSON on each refresh was slow)
+    private val metaCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Entry>>()
 
-    private fun presetTitle(f: File): String {
+    private fun presetEntry(f: File, user: Boolean): Entry {
         val mod = f.lastModified()
-        titleCache[f.path]?.let { if (it.first == mod) return it.second }
-        val t = try {
-            org.json.JSONObject(f.readText()).optString("name", f.nameWithoutExtension)
+        metaCache[f.path]?.let { if (it.first == mod) return it.second }
+        val e = try {
+            val o = org.json.JSONObject(f.readText())
+            val tags = o.optJSONArray("tags")?.let { t -> List(t.length()) { t.getString(it) } } ?: emptyList()
+            Entry(f, o.optString("name", f.nameWithoutExtension), user, o.optString("category", ""), tags, o.optString("comment", ""))
         } catch (e: Exception) {
-            f.nameWithoutExtension + if (L10n.ja) "（読み込めません）" else " (invalid)"
+            Entry(f, f.nameWithoutExtension + if (L10n.ja) "（読み込めません）" else " (invalid)", user)
         }
-        titleCache[f.path] = mod to t
-        return t
+        metaCache[f.path] = mod to e
+        return e
     }
 
     /** All loadable sample sources (.sfz and stand-alone .wav). */

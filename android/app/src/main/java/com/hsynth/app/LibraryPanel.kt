@@ -31,7 +31,11 @@ class LibraryPanel(private val a: MainActivity) {
     private val sampleList = Ui.column(a)
     /** MIDI files: app-specific external storage, so they can be copied in over USB (adb push) without permissions. Played on the Player tab. */
     val songDir: File = (a.getExternalFilesDir("midi") ?: File(a.filesDir, "midi")).apply { mkdirs() }
-    private var presetFilter = 0  // 0 all, 1 factory, 2 user
+    private var presetFilter = 0  // 0 all, 1 factory, 2 user, 3 favourites
+    private var category = ""     // "" = every category
+    private var search = ""
+    private val categoryRow = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+    private val favorites: MutableSet<String> = (a.prefs.getStringSet("favorites", emptySet()) ?: emptySet()).toMutableSet()
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
@@ -41,7 +45,7 @@ class LibraryPanel(private val a: MainActivity) {
         // filters and actions; they wrap onto two lines on narrow screens
         val head: android.view.ViewGroup = if (Ui.portrait(a)) FlowLayout(a, Ui.dp(a, 6), Ui.dp(a, 6))
             else LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
-        listOf("All", "Factory", "User").forEachIndexed { i, t ->
+        listOf("All", "Factory", "User", "★").forEachIndexed { i, t ->
             val b = LedButton(a, t).apply { textSize = 13.5f; setOnClickListener { presetFilter = i; filters.forEachIndexed { k, x -> x.lit = k == i }; refreshPresets() } }
             b.lit = i == 0
             filters += b
@@ -53,6 +57,28 @@ class LibraryPanel(private val a: MainActivity) {
             head.addView(LedButton(a, t, led = false).apply { textSize = 13.5f; setOnClickListener { f() } },
                 if (head is LinearLayout) LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) } else android.view.ViewGroup.LayoutParams(-2, -2))
         presets.body.addView(head)
+        // search + categories
+        val searchBox = android.widget.EditText(a).apply {
+            hint = L10n.t("Search name / category / tag")
+            textSize = 14f
+            setTextColor(Hw.LCD_FG)
+            setHintTextColor(Hw.LCD_DIM)
+            typeface = Hw.MONO
+            background = Hw.lcdBg(a)
+            setPadding(d(10), d(6), d(10), d(6))
+            isSingleLine = true
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, af: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) { search = s?.toString()?.trim() ?: ""; refreshPresets() }
+            })
+        }
+        presets.body.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(8) })
+        presets.body.addView(android.widget.HorizontalScrollView(a).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(categoryRow)
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
         presets.body.addView(ScrollView(a).apply { addView(presetList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
 
         // samples
@@ -130,14 +156,66 @@ class LibraryPanel(private val a: MainActivity) {
     }
 
     /** From the last scan (no file access): filter / highlight changes are instant. */
+    private fun matches(e: Library.Entry): Boolean {
+        if (presetFilter == 1 && e.user || presetFilter == 2 && !e.user) return false
+        if (presetFilter == 3 && e.file.path !in favorites) return false
+        if (category.isNotEmpty() && e.category != category) return false
+        if (search.isEmpty()) return true
+        val hay = (e.title + " " + e.category + " " + e.tags.joinToString(" ") + " " + e.comment).lowercase()
+        return search.lowercase().split(Regex("\\s+")).all { it in hay }
+    }
+
+    /** Category chips with counts (from the presets the other filters leave). */
+    private fun refreshCategories() {
+        val d = { v: Int -> Ui.dp(a, v) }
+        categoryRow.removeAllViews()
+        val counts = presetEntries.filter { e ->
+            !(presetFilter == 1 && e.user || presetFilter == 2 && !e.user || presetFilter == 3 && e.file.path !in favorites)
+        }.groupingBy { it.category.ifEmpty { "—" } }.eachCount().toSortedMap()
+        fun chip(label: String, key: String) = LedButton(a, label, tr = false).apply {
+            textSize = 12f
+            minHeight = d(32)
+            lit = category == key
+            setOnClickListener { category = if (category == key) "" else key; refreshPresets() }
+        }
+        categoryRow.addView(chip(L10n.t("All") + " ${counts.values.sum()}", ""), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+        for ((c, n) in counts) categoryRow.addView(chip("$c $n", if (c == "—") "" else c), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+    }
+
     private fun refreshPresets() {
+        refreshCategories()
         presetList.removeAllViews()
         for (e in presetEntries) {
-            if (presetFilter == 1 && e.user || presetFilter == 2 && !e.user) continue
-            presetList.addView(item(e.title, L10n.t(if (e.user) "user · long-press to delete" else "Factory"), e.file == a.currentPreset,
-                { a.loadPreset(e.file) },
-                if (e.user) ({ confirmDelete(e.file) }) else null, width = Ui.dp(a, 172)))
+            if (!matches(e)) continue
+            val fav = e.file.path in favorites
+            val sub = listOfNotNull(e.category.ifEmpty { null }, if (e.user) "User" else "Factory",
+                e.tags.takeIf { it.isNotEmpty() }?.joinToString(" ") { "#$it" }).joinToString(" · ")
+            presetList.addView(item((if (fav) "★ " else "") + e.title, sub, e.file == a.currentPreset,
+                { a.loadPreset(e.file) }, { presetMenu(e) }, width = cardWidth()))
         }
+    }
+
+    /** Cards fill the list's width: as many ~180 dp columns as fit. */
+    private fun cardWidth(): Int {
+        val w = presetList.width
+        if (w <= 0) { presetList.post { if (presetList.width > 0) refreshPresets() }; return Ui.dp(a, 172) }
+        val gap = Ui.dp(a, 10)
+        val cols = maxOf(1, (w + gap) / (Ui.dp(a, 180) + gap))
+        return (w - (cols - 1) * gap) / cols
+    }
+
+    /** Long press on a preset: favourite on / off, delete (user presets). */
+    private fun presetMenu(e: Library.Entry) {
+        val fav = e.file.path in favorites
+        val items = mutableListOf(L10n.t(if (fav) "Remove from favourites" else "Add to favourites"))
+        if (e.user) items += L10n.t("Delete")
+        AlertDialog.Builder(a).setTitle(e.title).setItems(items.toTypedArray()) { _, w ->
+            if (w == 0) {
+                if (fav) favorites.remove(e.file.path) else favorites.add(e.file.path)
+                a.prefs.edit().putStringSet("favorites", favorites.toSet()).apply()
+                refreshPresets()
+            } else confirmDelete(e.file)
+        }.show()
     }
 
     private fun refreshSamples() = refresh()

@@ -82,12 +82,20 @@ JNI(void, nativeStop)(JNIEnv*, jobject) {
     if (gAudio) gAudio->stop();
 }
 
+// The on-screen keyboard plays on the edit part's MIDI channel in multi mode,
+// so every part on that channel sounds (layers) within its key range (splits).
+// In single mode its events stay omni.
+static Event keyboardEvent(Event e) {
+    if (gEngine->multiTimbral()) e.channel = (uint8_t)std::max(0, (int)gEngine->getPartMix(gEditPart.load(), Mix::Channel) - 1);
+    return e;
+}
+
 JNI(void, nativeNoteOn)(JNIEnv*, jobject, jint id, jint key, jfloat vel) {
-    gEngine->sendEvent(Event::noteOn((uint32_t)id, key, vel));
+    gEngine->sendEvent(keyboardEvent(Event::noteOn((uint32_t)id, key, vel)));
 }
 
 JNI(void, nativeNoteOff)(JNIEnv*, jobject, jint id, jint key, jfloat vel) {
-    gEngine->sendEvent(Event::noteOff((uint32_t)id, key, vel));
+    gEngine->sendEvent(keyboardEvent(Event::noteOff((uint32_t)id, key, vel)));
 }
 
 // type: 0 pitch(semitones) 1 pressure 2 timbre 3 x 4 hold
@@ -95,7 +103,7 @@ JNI(void, nativePerNote)(JNIEnv*, jobject, jint type, jint id, jint key, jfloat 
     static const EventType map[] = {EventType::NotePitch, EventType::NotePressure, EventType::NoteTimbre,
                                     EventType::NoteX, EventType::NoteHold};
     if (type < 0 || type > 4) return;
-    gEngine->sendEvent(Event::perNote(map[type], (uint32_t)id, key, value));
+    gEngine->sendEvent(keyboardEvent(Event::perNote(map[type], (uint32_t)id, key, value)));
 }
 
 // type: 0 pitchbend 1 modwheel 2 chanpressure 3 sustain 4 cc 5 all notes off 6 all sound off
@@ -104,7 +112,8 @@ JNI(void, nativeControl)(JNIEnv*, jobject, jint type, jfloat value, jint ctrl) {
                                     EventType::Sustain, EventType::Controller, EventType::AllNotesOff,
                                     EventType::AllSoundOff};
     if (type < 0 || type > 6) return;
-    gEngine->sendEvent(Event::control(map[type], value, ctrl));
+    const Event e = Event::control(map[type], value, ctrl);
+    gEngine->sendEvent(type >= 5 ? e : keyboardEvent(e));  // panic stays omni (all parts)
 }
 
 JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint count, jboolean ump) {
@@ -535,4 +544,5 @@ JNI(jboolean, nativeRecordStart)(JNIEnv* env, jobject, jstring path) {
 }
 JNI(jdouble, nativeRecordStop)(JNIEnv*, jobject) { return gAudio ? gAudio->stopRecording() : 0.0; }
 JNI(jdouble, nativeRecordSeconds)(JNIEnv*, jobject) { return gAudio && gAudio->recording() ? gAudio->recordedSeconds() : -1.0; }
-
+JNI(jboolean, nativeInputEnabled)(JNIEnv*, jobject) { return gAudio && gAudio->inputEnabled() ? JNI_TRUE : JNI_FALSE; }
+JNI(jint, nativeSeqPosition)(JNIEnv*, jobject) { return gEngine->seqPosition(gEditPart.load()); }

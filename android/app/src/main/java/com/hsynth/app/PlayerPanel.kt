@@ -95,7 +95,7 @@ class PlayerPanel(private val a: MainActivity) {
             textSize = size
             setOnClickListener { onClick() }
         }
-        playBtn = tbtn("▶  Play", 15f, led = true) { togglePlay() }.apply { minWidth = d(130) }
+        playBtn = tbtn("▶  Play", 15f, led = true) { togglePlay() }.apply { minWidth = d(if (Ui.portrait(a)) 96 else 130) }
         repeatBtn = tbtn("🔁", led = true) { cycleRepeat() }
         val transport = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -315,6 +315,7 @@ class PlayerPanel(private val a: MainActivity) {
                 tempos = if (t != null) (0 until t.length()).map { t.getJSONArray(it).let { p -> p.getDouble(0) to p.getDouble(1) } }
                          else listOf(0.0 to r.optDouble("tempo", 120.0))
                 table.applyMutes()
+                for (k in 0 until 16) a.partNames[k] = table.preset[k]
                 lastEnd = NativeEngine.nativePlayerState()[3].toInt()
                 NativeEngine.nativeSongSeek(0.0)
                 NativeEngine.nativeSongPlay(true)
