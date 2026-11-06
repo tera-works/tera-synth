@@ -1,69 +1,64 @@
 # macOS / iOS
 
-HSynth runs on macOS (desktop host, same UI as Windows) and iOS (native SwiftUI
-app). Both use the same C++ engine as Android and Windows.
+HSynth は macOS（デスクトップ版。Windows 版と同じ UI）と iOS（SwiftUI のアプリ）でも動きます。
+どちらも Android・Windows と同じ C++ のエンジンを使います。
 
-## Layout
+## 構成
 
-| Path | What |
+| パス | 内容 |
 |---|---|
-| `engine/` | DSP engine (portable C++17). Builds and tests with CMake on macOS. |
-| `desktop/src/main_macos.mm` | macOS entry point: AppKit window, Metal, Dear ImGui (OSX + Metal backends). |
-| `desktop/src/platform_macos.mm` | File dialogs (NSOpenPanel / NSSavePanel), Finder. |
-| `desktop/src/midi_in_coremidi.cpp`, `midi_out_coremidi.cpp` | CoreMIDI input / output (also used by iOS). |
-| `desktop/src/audio_out.cpp` | Audio via miniaudio (CoreAudio on macOS, AVAudioSession / RemoteIO on iOS). |
-| `ios/project.yml` | XcodeGen spec of the iOS app (the `.xcodeproj` is generated, not committed). |
-| `ios/HSynth/Bridge/HSynthEngine.{h,mm}` | Objective-C++ bridge: engine, audio, MIDI, presets, parameters for Swift. |
-| `ios/HSynth/*.swift` | SwiftUI app: Play (preset, Sound knobs, keyboard, wheels), Edit (all parameters by page), Library (search, categories, save). |
-| `.github/workflows/apple.yml` | CI on macOS runners: engine build + tests, macOS app, iOS app (simulator, unsigned). |
+| `engine/` | DSP エンジン（C++17）。macOS でも CMake でビルドとテストができる。 |
+| `desktop/src/main_macos.mm` | macOS の起動部分: AppKit のウィンドウ、Metal、Dear ImGui（OSX + Metal バックエンド）。 |
+| `desktop/src/platform_macos.mm` | ファイルを開く / 保存するダイアログ（NSOpenPanel / NSSavePanel）、Finder で表示。 |
+| `desktop/src/midi_in_coremidi.cpp`、`midi_out_coremidi.cpp` | CoreMIDI の入力 / 出力（iOS でも使う）。 |
+| `desktop/src/audio_out.cpp` | miniaudio による音声（macOS は CoreAudio、iOS は AVAudioSession / RemoteIO）。 |
+| `ios/project.yml` | iOS アプリの XcodeGen 設定（`.xcodeproj` は生成物なのでコミットしない）。 |
+| `ios/HSynth/Bridge/HSynthEngine.{h,mm}` | Objective-C++ の窓口: Swift から使うエンジン・音声・MIDI・プリセット・パラメーター。 |
+| `ios/HSynth/*.swift` | SwiftUI のアプリ: Play（プリセット、Sound のノブ、鍵盤、ホイール）、Edit（全パラメーターをページ別に）、Library（検索、カテゴリ、保存）。 |
+| `.github/workflows/apple.yml` | macOS のランナーでの CI: エンジンのビルドとテスト、macOS 版、iOS アプリ（シミュレーター向け、署名なし）。 |
 
-## Build on a Mac
+## Mac でのビルド
 
-Requirements: Xcode 15+ (command line tools), CMake 3.18+, Homebrew.
+必要なもの: Xcode 15 以降（コマンドラインツール）、CMake 3.18 以降、Homebrew。
 
 ```bash
-# engine + tests
+# エンジンとテスト
 cmake -S engine -B build/engine -DCMAKE_BUILD_TYPE=Release
 cmake --build build/engine -j
 ./build/engine/hsynth_tests
 
-# macOS desktop app (build/desktop/HSynth.app)
+# macOS 版（build/desktop/HSynth.app ができる）
 cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=Release
 cmake --build build/desktop -j
 open build/desktop/HSynth.app
 
-# iOS app
+# iOS アプリ
 brew install xcodegen
 cd ios && xcodegen && open HSynth.xcodeproj
 ```
 
-For the iOS app on a device, set a development team in Xcode (Signing &
-Capabilities) once. The bundle id is `com.hsynth.ios`.
+iOS アプリを実機に入れるには、Xcode で一度だけ開発チーム（Signing & Capabilities → Team）を選びます。
+バンドル ID は `com.hsynth.ios`。手順の詳細は `docs/HANDOFF_MAC.md`。
 
-The macOS app reads user data from `desktop/data` and factory content from
-`android/app/src/main/assets` by default (`--data` / `--factory` override,
-`--autotest DIR [--mute]` runs the scripted smoke test like on Windows).
+macOS 版は、ユーザーデータを `desktop/data`、内蔵コンテンツを `android/app/src/main/assets` から読みます
+（`--data` / `--factory` で変更可。`--autotest DIR [--mute]` で Windows 版と同じ自動テスト）。
 
-## Content rules
+## 同梱してよいもの
 
-The sampled test sounds (GM test set, SonicCell captures) and the MIDI files
-are for testing only and are never committed or bundled. The iOS app bundles
-only `android/app/src/main/assets/presets` and `library/factory`.
+サンプリングしたテスト用音源（GM テスト音源、SonicCell の録音）と MIDI ファイルはテスト専用で、
+コミットもアプリへの同梱もしません。iOS アプリに入れるのは `android/app/src/main/assets/presets` と
+`library/factory` だけです。
 
-## Status (handed over from the Windows session, 2026-11)
+## 状況（2026-11、Windows のセッションから引き継ぎ）
 
-- Written on Windows without a Mac; the GitHub Actions macOS jobs are the first
-  compile check. Fix anything they report first.
-- macOS desktop: feature parity with the Windows host expected (same `App`
-  code). Not yet run on a real Mac: check audio device choice, CoreMIDI
-  hot-plug (ports are opened at start / on "rescan"), Retina font sizes,
-  drag & drop of WAV / SFZ / presets, `--autotest` screenshots.
-- iOS: first version. Missing compared with Android: Multi page, Player (MIDI
-  files), graphic editors (envelope, filter, FM algorithm, step grid, MSEG),
-  MIDI learn / out, undo / compare, recording, sample import (Files app),
-  hardware-style knobs everywhere. The Android Kotlin UI (`android/app/src/main/java/com/hsynth/app/`)
-  is the reference for porting these screens.
-- iOS audio: miniaudio with a 5 ms preferred buffer; check latency and
-  interruptions (phone call, route change, other apps) on a device. An
-  AUv3 (Audio Unit extension) version for GarageBand / AUM would be a natural
-  next step.
+- Mac なしで Windows 上で書いたもの。GitHub Actions の macOS ジョブが最初のコンパイル確認で、3 つとも成功している
+  （エンジンのビルドとテスト、macOS 版、iOS のシミュレーター向けビルド）。
+- macOS 版: Windows 版と同じ `App` のコードなので、機能は同等のはず。まだ Mac で動かしていない。確認すること:
+  音声デバイスの選択、CoreMIDI（起動時と「再スキャン」でポートを開く）、Retina での文字の大きさ、
+  WAV / SFZ / プリセットのドラッグ & ドロップ、`--autotest` のスクリーンショット。
+- iOS: 初版。Android と比べて足りないもの: Multi 画面、Player（MIDI ファイル）、グラフィックエディター
+  （エンベロープ、フィルター、FM アルゴリズム、ステップのマス目、MSEG）、MIDI ラーン / 出力、アンドゥ / コンペア、
+  録音、サンプルの読み込み（ファイル App）、全画面の実機シンセ風ノブ。移植の手本は Android の Kotlin の UI
+  （`android/app/src/main/java/com/hsynth/app/`）。
+- iOS の音声: miniaudio で 5 ms のバッファを要求している。実機で遅延と中断（電話、出力先の切り替え、他アプリ）を確認する。
+  次の段階として AUv3（GarageBand / AUM で使える Audio Unit 拡張）が自然。
