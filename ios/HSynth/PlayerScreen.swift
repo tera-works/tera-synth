@@ -102,7 +102,7 @@ final class PlayerModel: ObservableObject {
         position = seeking ? position : engine.songPosition
         length = engine.songLength
         playing = engine.songPlaying
-        bpm = engine.songTempoAt(position)
+        bpm = engine.songTempo(at: position)
         let m = engine.partMeters().map { $0.floatValue }
         if m.count == 16 * 9 {
             for k in 0..<16 { levels[k] = max(m[k * 9], levels[k] * 0.82) }
