@@ -66,6 +66,24 @@ object NativeEngine {
     external fun nativeLooperStatus(): FloatArray
     external fun nativeFxChain(): IntArray
     external fun nativeFmAlgorithm(index: Int): IntArray
+    external fun nativeSetAllParams(values: FloatArray)
+    external fun nativeSetTransport(on: Boolean)
+    external fun nativeTransport(): Boolean
+    external fun nativeSetMulti(on: Boolean)
+    external fun nativeIsMulti(): Boolean
+    external fun nativeSetEditPart(part: Int)
+    external fun nativeEditPart(): Int
+    external fun nativeGetPartMix(part: Int, id: Int): Float
+    external fun nativeSaveMulti(path: String, name: String, libraryRoot: String): String
+    external fun nativeLoadMulti(path: String, libraryRoot: String): String
+    external fun nativeLearnArm(param: Int)
+    external fun nativeLearnCancel()
+    external fun nativeLearnArmed(): Int
+    external fun nativeLearnLast(): Int
+    external fun nativeLearnRemove(param: Int)
+    external fun nativeLearnDescribe(param: Int): String
+    external fun nativeLearnSave(path: String): String
+    external fun nativeLearnLoad(path: String): String
 
     fun noteOn(id: Int, key: Int, velocity: Float) = nativeNoteOn(id, key, velocity)
     fun noteOff(id: Int, key: Int) = nativeNoteOff(id, key, 0.5f)

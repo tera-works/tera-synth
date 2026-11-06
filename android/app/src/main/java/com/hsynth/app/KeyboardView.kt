@@ -34,6 +34,8 @@ class KeyboardView(context: Context) : View(context) {
     private fun snd(key: Int) = (key + transpose).coerceIn(0, 127)
     var fixedVelocity: Float? = null
     var onNotesChanged: ((Int) -> Unit)? = null
+    /** Every note played (on, key, velocity), e.g. for MIDI out. */
+    var onNote: ((Boolean, Int, Float) -> Unit)? = null
 
     private data class Touch(var noteId: Int, var key: Int, val downX: Float, val downY: Float, var lastTimbre: Float = -1f)
 
@@ -112,6 +114,7 @@ class KeyboardView(context: Context) : View(context) {
         touches[pointerId] = t
         held[key]++
         NativeEngine.noteOn(id, snd(key), velocityAt(y, key))
+        onNote?.invoke(true, snd(key), velocityAt(y, key))
         sendExpression(t, x, y, size)
         onNotesChanged?.invoke(touches.size)
     }
@@ -120,6 +123,7 @@ class KeyboardView(context: Context) : View(context) {
         val t = touches.remove(pointerId) ?: return
         held[t.key] = (held[t.key] - 1).coerceAtLeast(0)
         NativeEngine.noteOff(t.noteId, snd(t.key))
+        onNote?.invoke(false, snd(t.key), 0f)
         onNotesChanged?.invoke(touches.size)
     }
 

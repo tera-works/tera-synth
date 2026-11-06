@@ -19,6 +19,7 @@
 #include "hsynth/smf.h"
 #include "hsynth/host_utils.h"
 #include "hsynth/json.h"
+#include "hsynth/midi_learn.h"
 #include "hsynth/midi.h"
 #include "hsynth/preset.h"
 #include "hsynth/sample_set.h"
@@ -30,6 +31,8 @@ namespace {
 std::unique_ptr<Engine> gEngine;
 std::unique_ptr<AudioEngine> gAudio;
 MidiTranslator gMidi;
+MidiLearn gLearn;
+std::atomic<int> gEditPart{0};  // part the editor works on (0 in single mode)
 std::mutex gMidiMutex;
 std::atomic<int> gPendingProgram{-1};
 std::atomic<int> gMidiCount{0};
@@ -110,8 +113,12 @@ JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint c
     env->GetByteArrayRegion(data, offset, count, reinterpret_cast<jbyte*>(buf.data()));
     std::lock_guard<std::mutex> lock(gMidiMutex);
     EngineSink sink;
-    if (ump) gMidi.processUmpBytes(buf.data(), buf.size(), sink);
-    else gMidi.processMidi1(buf.data(), buf.size(), sink);
+    if (ump) {
+        gMidi.processUmpBytes(buf.data(), buf.size(), sink);
+    } else {
+        gLearn.onMidi(buf.data(), buf.size(), *gEngine);  // learned CCs set their parameters
+        gMidi.processMidi1(buf.data(), buf.size(), sink);
+    }
 }
 
 JNI(void, nativeSetMpe)(JNIEnv*, jobject, jboolean on) {
@@ -122,12 +129,21 @@ JNI(void, nativeSetMpe)(JNIEnv*, jobject, jboolean on) {
 JNI(jint, nativeTakeProgramChange)(JNIEnv*, jobject) { return gPendingProgram.exchange(-1); }
 JNI(jint, nativeMidiEventCount)(JNIEnv*, jobject) { return gMidiCount.load(); }
 
-JNI(void, nativeSetParam)(JNIEnv*, jobject, jint id, jfloat v) { gEngine->setParam(id, v); }
-JNI(jfloat, nativeGetParam)(JNIEnv*, jobject, jint id) { return gEngine->getParam(id); }
+// Parameters of the edit part (part parameters) or global ones.
+JNI(void, nativeSetParam)(JNIEnv*, jobject, jint id, jfloat v) { gEngine->setPartParam(gEditPart.load(), id, v); }
+JNI(jfloat, nativeGetParam)(JNIEnv*, jobject, jint id) { return gEngine->getPartParam(gEditPart.load(), id); }
+
+JNI(void, nativeSetAllParams)(JNIEnv* env, jobject, jfloatArray values) {
+    if (env->GetArrayLength(values) != P::kNumParams) return;
+    std::vector<float> v((size_t)P::kNumParams);
+    env->GetFloatArrayRegion(values, 0, P::kNumParams, v.data());
+    const int part = gEditPart.load();
+    for (int i = 0; i < P::kNumParams; ++i) gEngine->setPartParam(part, i, v[(size_t)i]);
+}
 
 JNI(jfloatArray, nativeGetAllParams)(JNIEnv* env, jobject) {
     std::vector<float> v((size_t)P::kNumParams);
-    gEngine->getAllParams(v.data());
+    gEngine->getPartParams(gEditPart.load(), v.data());
     jfloatArray a = env->NewFloatArray(P::kNumParams);
     env->SetFloatArrayRegion(a, 0, P::kNumParams, v.data());
     return a;
@@ -147,8 +163,10 @@ JNI(jstring, nativeLoadPreset)(JNIEnv* env, jobject, jstring path, jstring libRo
         return jstr(env, r.dump(0));
     }
     std::vector<std::string> warnings;
-    applyPreset(*gEngine, p, str(env, libRoot), warnings);
-    songPartForgotten(0);  // part 1 no longer holds the song's sound
+    const int part = gEditPart.load();
+    if (part == 0 && !gEngine->multiTimbral()) applyPreset(*gEngine, p, str(env, libRoot), warnings);
+    else applyPartPreset(*gEngine, part, p, str(env, libRoot), warnings);
+    songPartForgotten(part);  // the part no longer holds the song's sound
     r.set("ok", true);
     r.set("name", p.name);
     r.set("category", p.category);
@@ -158,7 +176,7 @@ JNI(jstring, nativeLoadPreset)(JNIEnv* env, jobject, jstring path, jstring libRo
 }
 
 JNI(jstring, nativeSavePreset)(JNIEnv* env, jobject, jstring path, jstring name, jstring category, jstring libRoot) {
-    Preset p = capturePreset(*gEngine, str(env, name), str(env, libRoot));
+    Preset p = capturePartPreset(*gEngine, gEditPart.load(), str(env, name), str(env, libRoot));
     p.category = str(env, category);
     p.author = "user";
     std::string err;
@@ -167,7 +185,7 @@ JNI(jstring, nativeSavePreset)(JNIEnv* env, jobject, jstring path, jstring name,
 }
 
 JNI(jstring, nativePresetJson)(JNIEnv* env, jobject, jstring name, jstring libRoot) {
-    Preset p = capturePreset(*gEngine, str(env, name), str(env, libRoot));
+    Preset p = capturePartPreset(*gEngine, gEditPart.load(), str(env, name), str(env, libRoot));
     return jstr(env, presetToJson(p));
 }
 
@@ -175,7 +193,7 @@ JNI(jstring, nativeLoadSamples)(JNIEnv* env, jobject, jint layer, jstring path) 
     Json r = Json::object();
     std::string err;
     std::vector<std::string> warnings;
-    const bool ok = loadLayerSamples(*gEngine, layer, str(env, path), err, warnings);
+    const bool ok = loadPartSamples(*gEngine, gEditPart.load(), layer, str(env, path), err, warnings);
     r.set("ok", ok);
     if (!ok) r.set("error", err);
     r.set("warnings", warningsJson(warnings));
@@ -186,18 +204,18 @@ JNI(jstring, nativeLoadSamples)(JNIEnv* env, jobject, jint layer, jstring path) 
 JNI(jstring, nativeLoadWavetable)(JNIEnv* env, jobject, jint layer, jstring path) {
     Json r = Json::object();
     std::string err;
-    const bool ok = loadLayerWavetable(*gEngine, layer, str(env, path), err);
+    const bool ok = loadPartWavetable(*gEngine, gEditPart.load(), layer, str(env, path), err);
     r.set("ok", ok);
     if (!ok) r.set("error", err);
     return jstr(env, r.dump(0));
 }
 
 JNI(void, nativeUnloadSamples)(JNIEnv*, jobject, jint layer) {
-    gEngine->setSampleSet(layer, nullptr);
+    gEngine->setPartSampleSet(gEditPart.load(), layer, nullptr);
     gEngine->collectGarbage();
 }
 
-JNI(jstring, nativeSampleSetName)(JNIEnv* env, jobject, jint layer) { return jstr(env, gEngine->sampleSetName(layer)); }
+JNI(jstring, nativeSampleSetName)(JNIEnv* env, jobject, jint layer) { return jstr(env, gEngine->partSampleSetName(gEditPart.load(), layer)); }
 
 // Inspect an SFZ/WAV without loading it into the engine (library screen).
 JNI(jstring, nativeInspectSamples)(JNIEnv* env, jobject, jstring path) {
@@ -436,3 +454,74 @@ JNI(jintArray, nativeFmAlgorithm)(JNIEnv* env, jobject, jint index) {
     env->SetIntArrayRegion(r, 0, 3 + P::kFmOps, v);
     return r;
 }
+
+// ------------------------------------------------------------ multi / parts / scenes
+
+JNI(void, nativeSetMulti)(JNIEnv*, jobject, jboolean on) {
+    gEngine->setMultiTimbral(on);
+    std::lock_guard<std::mutex> lock(gMidiMutex);
+    gMidi.setMultiTimbral(on);
+    if (!on) gEditPart.store(0);
+}
+JNI(jboolean, nativeIsMulti)(JNIEnv*, jobject) { return gEngine->multiTimbral() ? JNI_TRUE : JNI_FALSE; }
+JNI(void, nativeSetEditPart)(JNIEnv*, jobject, jint part) {
+    const int k = std::max(0, std::min(kNumParts - 1, (int)part));
+    gEditPart.store(k);
+    gEngine->selectPart(k);
+}
+JNI(jint, nativeEditPart)(JNIEnv*, jobject) { return gEditPart.load(); }
+JNI(jfloat, nativeGetPartMix)(JNIEnv*, jobject, jint part, jint id) { return gEngine->getPartMix(part, id); }
+
+// Name of the sound of every part ({names[16]}): the parts' layer A sample set or "".
+JNI(jstring, nativeSaveMulti)(JNIEnv* env, jobject, jstring path, jstring name, jstring libRoot) {
+    MultiPreset m = captureMulti(*gEngine, str(env, name), str(env, libRoot));
+    std::string err;
+    if (!saveMultiFile(str(env, path), m, err)) return jstr(env, err);
+    return jstr(env, "");
+}
+
+JNI(jstring, nativeLoadMulti)(JNIEnv* env, jobject, jstring path, jstring libRoot) {
+    Json r = Json::object();
+    MultiPreset m;
+    std::string err;
+    if (!loadMultiFile(str(env, path), m, err)) {
+        r.set("ok", false);
+        r.set("error", err);
+        return jstr(env, r.dump(0));
+    }
+    std::vector<std::string> warnings;
+    applyMulti(*gEngine, m, str(env, libRoot), warnings);
+    {
+        std::lock_guard<std::mutex> lock(gMidiMutex);
+        gMidi.setMultiTimbral(true);
+    }
+    for (int k = 0; k < kNumParts; ++k) songPartForgotten(k);
+    gEditPart.store(gEngine->selectedPart());
+    r.set("ok", true);
+    r.set("name", m.name);
+    Json names = Json::array();
+    for (int k = 0; k < kNumParts; ++k) names.push(m.parts[k].name);
+    r.set("parts", names);
+    r.set("warnings", warningsJson(warnings));
+    return jstr(env, r.dump(0));
+}
+
+// ------------------------------------------------------------ MIDI learn
+
+JNI(void, nativeLearnArm)(JNIEnv*, jobject, jint param) { gLearn.arm(param, gEditPart.load()); }
+JNI(void, nativeLearnCancel)(JNIEnv*, jobject) { gLearn.cancel(); }
+JNI(jint, nativeLearnArmed)(JNIEnv*, jobject) { return gLearn.armedParam(); }
+JNI(jint, nativeLearnLast)(JNIEnv*, jobject) { return gLearn.lastLearned(); }
+JNI(void, nativeLearnRemove)(JNIEnv*, jobject, jint param) { gLearn.removeParam(param); }
+JNI(jstring, nativeLearnDescribe)(JNIEnv* env, jobject, jint param) { return jstr(env, gLearn.describe(param)); }
+JNI(jstring, nativeLearnSave)(JNIEnv* env, jobject, jstring path) {
+    std::string err;
+    return jstr(env, gLearn.save(str(env, path), err) ? "" : err);
+}
+JNI(jstring, nativeLearnLoad)(JNIEnv* env, jobject, jstring path) {
+    std::string err;
+    return jstr(env, gLearn.load(str(env, path), err) ? "" : err);
+}
+
+JNI(void, nativeSetTransport)(JNIEnv*, jobject, jboolean on) { gEngine->setTransport(on); }
+JNI(jboolean, nativeTransport)(JNIEnv*, jobject) { return gEngine->transportPlaying() ? JNI_TRUE : JNI_FALSE; }

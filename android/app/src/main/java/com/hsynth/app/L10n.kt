@@ -60,6 +60,13 @@ object L10n {
         "out += source × via × amount   (via 'none' = 1)" to "出力 += source × via × amount（via が none なら 1）",
         "The vocoder needs an audio input (microphone). Input capture is not wired up in the Android app yet; it works in the desktop build." to
             "ボコーダーには音声入力（マイク）が必要です。Android 版はまだ入力に対応していません（デスクトップ版では使えます）。",
+        "(none)" to "（なし）",
+        "Sound for part %d" to "パート %d の音色", "Store scene %d" to "シーン %d に保存",
+        // multi
+        "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays channel 1." to
+            "マルチモードでは 16 パートを鳴らせます。同じ MIDI チャンネルのパートは重なり、鍵域を分けるとスプリットになります。画面の鍵盤は ch 1 です。",
+        "Tap a scene to recall it. Store, then a scene, saves the current multi there." to
+            "シーンをタップすると呼び出します。Store を押してからシーンをタップすると、今のマルチを保存します。",
         // library
         "user · long-press to delete" to "User · 長押しで削除", "  · long-press to delete" to "  · 長押しで削除",
         "(no song loaded)" to "（曲が読み込まれていません）", "(no MIDI files)\n%s" to "（MIDI ファイルがありません）\n%s",

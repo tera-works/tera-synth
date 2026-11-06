@@ -57,7 +57,7 @@ class PlayPanel(private val a: MainActivity) {
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
 
         // quick knobs
-        val knobs = Hw.Section(a, "Quick controls")
+        val knobs = Hw.Section(a, "Controls")
         val knobRow = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
         for (n in listOf("master.volume", "filter.cutoff", "filter.reso", "amp.attack", "amp.release")) {
             val m = Params.meta.firstOrNull { it.name == n } ?: continue
@@ -66,7 +66,38 @@ class PlayPanel(private val a: MainActivity) {
             knobRow.addView(c.view, LinearLayout.LayoutParams(0, -2, 1f))
         }
         knobRow.gravity = Gravity.CENTER_HORIZONTAL
+        // ARP page: arpeggiator / sequencer on, mode, rate, tempo, transport
+        val arpRow = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        for (n in listOf("arp.on", "arp.mode", "arp.rate", "fx.tempo")) {
+            val m = Params.meta.firstOrNull { it.name == n } ?: continue
+            val c = ParamControl(a, m, knobSize = 46f, lcdWidth = 84f)
+            quick += c
+            arpRow.addView(c.view, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
+        }
+        val run = LedButton(a, "Run").apply {
+            textSize = 12f
+            minHeight = d(30)
+            setOnClickListener { lit = !lit; NativeEngine.nativeSetTransport(lit) }
+        }
+        val pages = listOf(knobRow, arpRow)
+        val tabs = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+        val tabButtons = listOf("Sound", "Arp / Tempo").mapIndexed { i, t ->
+            LedButton(a, t).apply { textSize = 12f; minHeight = d(30) }.also { b ->
+                tabs.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
+            }
+        }
+        fun showPage(i: Int) {
+            pages.forEachIndexed { k, v -> v.visibility = if (k == i) View.VISIBLE else View.GONE }
+            tabButtons.forEachIndexed { k, b -> b.lit = k == i }
+            run.lit = NativeEngine.nativeTransport()
+        }
+        tabButtons.forEachIndexed { i, b -> b.setOnClickListener { showPage(i) } }
+        tabs.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
+        tabs.addView(run, LinearLayout.LayoutParams(-2, -2))
+        knobs.body.addView(tabs, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(4) })
         knobs.body.addView(knobRow, LinearLayout.LayoutParams(-1, -2))
+        knobs.body.addView(arpRow, LinearLayout.LayoutParams(-1, -2))
+        showPage(0)
 
         // keyboard buttons (3 rows); the range shows on the preset LCD
         val keys = Hw.Section(a, "Keyboard")
@@ -80,6 +111,7 @@ class PlayPanel(private val a: MainActivity) {
         hold.onToggle = { on ->
             sustainOn = on
             NativeEngine.control(NativeEngine.Control.SUSTAIN, if (on) 1f else 0f)
+            a.midiOut.cc(64, if (on) 1f else 0f)
         }
         fun row(vararg v: View) = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -132,8 +164,9 @@ class PlayPanel(private val a: MainActivity) {
             addView(keys, LinearLayout.LayoutParams(d(262), -1))
         }
 
-        val bend = ControlStrip(a, "Bend", spring = true, bipolar = true) { NativeEngine.control(NativeEngine.Control.PITCH_BEND, it) }
-        val mod = ControlStrip(a, "Mod", spring = false, bipolar = false) { NativeEngine.control(NativeEngine.Control.MOD_WHEEL, it) }
+        val bend = ControlStrip(a, "Bend", spring = true, bipolar = true) { NativeEngine.control(NativeEngine.Control.PITCH_BEND, it); a.midiOut.bend(it) }
+        val mod = ControlStrip(a, "Mod", spring = false, bipolar = false) { NativeEngine.control(NativeEngine.Control.MOD_WHEEL, it); a.midiOut.cc(1, it) }
+        keyboard.onNote = { on, key, vel -> if (on) a.midiOut.noteOn(key, vel) else a.midiOut.noteOff(key) }
         val bottom = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Hw.PANEL)

@@ -80,7 +80,7 @@ class LibraryPanel(private val a: MainActivity) {
     fun refreshSongs() {}
 
     private fun playSong(f: File) {
-        a.selectTab(3)
+        a.selectTab(4)
         a.player.playFile(f)
     }
 
@@ -102,6 +102,9 @@ class LibraryPanel(private val a: MainActivity) {
     private var presetEntries: List<Library.Entry> = emptyList()
     private var sampleEntries: List<Library.Entry>? = null
     private var scanning = false
+
+    /** Presets from the last scan (scans now if there was none). */
+    fun presetEntries(): List<Library.Entry> = presetEntries.ifEmpty { a.library.presets().also { presetEntries = it } }
 
     /** Rescans in the background (thousands of sample files); the lists update when done. */
     fun refresh() {

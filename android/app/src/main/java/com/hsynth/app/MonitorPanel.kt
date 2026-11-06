@@ -103,6 +103,19 @@ class MonitorPanel(private val a: MainActivity) {
             a.prefs.edit().putBoolean("mpe", c).apply(); NativeEngine.nativeSetMpe(c)
         }, LinearLayout.LayoutParams(-1, -2))
         midi.body.addView(midiText, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+        // MIDI out: the on-screen keyboard is sent to this device as well
+        val outs = a.midiOut.destinations()
+        val savedOut = a.prefs.getString("midiOutName", "") ?: ""
+        val outSel = outs.indexOfFirst { it.second == savedOut } + 1
+        midi.body.addView(labeled("MIDI Out", Ui.spinner(a, listOf(L10n.t("(none)")) + outs.map { it.second }, outSel) {
+            if (it == 0) { a.midiOut.close(); a.prefs.edit().putString("midiOutName", "").apply() }
+            else { a.midiOut.open(outs[it - 1].first); a.prefs.edit().putString("midiOutName", outs[it - 1].second).apply() }
+        }), LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+        midi.body.addView(labeled("Out Channel", Ui.spinner(a, (1..16).map { "$it" }, a.prefs.getInt("midiOutCh", 0)) {
+            a.midiOut.channel = it; a.prefs.edit().putInt("midiOutCh", it).apply()
+        }))
+        a.midiOut.channel = a.prefs.getInt("midiOutCh", 0)
+        if (outSel > 0) a.midiOut.open(outs[outSel - 1].first)
         midi.body.addView(Ui.text(a, "Program Change selects the n-th preset in the library list. " +
             "MIDI 2.0 UMP devices are opened in UMP mode on Android 13+ (per-note pitch bend, per-note controllers).", 12f, Ui.DIM))
         col.addView(midi, Hw.sectionLp(a))

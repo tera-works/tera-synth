@@ -62,6 +62,24 @@ class EditPanel(private val a: MainActivity) {
             layerButtons += b
             layerBox.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
         }
+        // toolbar under the page buttons: layer selector (OSC) ... undo / redo / compare
+        val toolbar = LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(d(8), d(4), d(8), d(2))
+        }
+        toolbar.addView(layerBox, LinearLayout.LayoutParams(-2, -2))
+        toolbar.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
+        val undoB = LedButton(a, "Undo", led = false).apply { textSize = 13f; setOnClickListener { History.undo() } }
+        val redoB = LedButton(a, "Redo", led = false).apply { textSize = 13f; setOnClickListener { History.redo() } }
+        val cmpB = LedButton(a, "Compare").apply { textSize = 13f; setOnClickListener { History.toggleCompare() } }
+        for (b in listOf(undoB, redoB, cmpB)) toolbar.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) })
+        History.onChange = {
+            undoB.alpha = if (History.canUndo()) 1f else 0.45f
+            redoB.alpha = if (History.canRedo()) 1f else 0.45f
+            cmpB.lit = History.comparing
+        }
+        History.onChange?.invoke()
         val scroll = ScrollView(a).apply { addView(content) }
         content.setPadding(d(10), d(8), d(10), d(24))
         view = Ui.column(a).apply {
@@ -70,6 +88,7 @@ class EditPanel(private val a: MainActivity) {
                 setPadding(d(8), d(8), d(8), d(2))
                 addView(bar)
             }, Ui.lp())
+            addView(toolbar, Ui.lp())
             addView(scroll, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         }
         Params.addListener { buildPage() }  // layer types / sample names may have changed
@@ -101,14 +120,12 @@ class EditPanel(private val a: MainActivity) {
     fun buildPage() {
         val p = pages[page]
         pageButtons.forEachIndexed { i, b -> b.lit = i == page }
-        layerBox.visibility = if (p.title == "OSC") View.VISIBLE else View.GONE
+        layerBox.visibility = if (p.title == "OSC") View.VISIBLE else View.INVISIBLE
         layerButtons.forEachIndexed { i, b -> b.lit = i == layer }
         content.removeAllViews()
         controls.clear()
         graphs.clear()
         modMatrix = null
-        (layerBox.parent as? android.view.ViewGroup)?.removeView(layerBox)
-        if (p.title == "OSC") content.addView(layerBox, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = Ui.dp(a, 8) })
         when (p.title) {
             "OSC" -> buildOsc()
             "FX" -> buildFx()

@@ -46,6 +46,11 @@ class MainActivity : Activity() {
     lateinit var libraryPanel: LibraryPanel
     lateinit var monitor: MonitorPanel
     lateinit var player: PlayerPanel
+    lateinit var multi: MultiPanel
+    lateinit var midiOut: MidiOutput
+    /** Name of the sound loaded into each part (for the Multi page and the header). */
+    val partNames = Array(16) { "" }
+    private var learnArmed = -1
 
     private val tabButtons = mutableListOf<LedButton>()
     private lateinit var headerLcd: TextView
@@ -78,6 +83,8 @@ class MainActivity : Activity() {
         NativeEngine.nativeSetQuality(prefs.getInt("quality", 1))
         NativeEngine.nativeSetMpe(prefs.getBoolean("mpe", false))
         midi = MidiInput(this) { monitor.refreshMidi() }
+        midiOut = MidiOutput(this)
+        NativeEngine.nativeLearnLoad(File(filesDir, "midi_map.json").absolutePath)
 
         play = PlayPanel(this)
         val root = LinearLayout(this).apply {
@@ -128,7 +135,8 @@ class MainActivity : Activity() {
         libraryPanel = LibraryPanel(this)
         monitor = MonitorPanel(this)
         player = PlayerPanel(this)
-        listOf("Play" to play.view, "Edit" to edit.view, "Library" to libraryPanel.view, "Player" to player.view, "System" to monitor.view).forEachIndexed { i, (name, v) ->
+        multi = MultiPanel(this)
+        listOf("Play" to play.view, "Edit" to edit.view, "Multi" to multi.view, "Library" to libraryPanel.view, "Player" to player.view, "System" to monitor.view).forEachIndexed { i, (name, v) ->
             val b = LedButton(this, name).apply {
                 textSize = 12.5f
                 letterSpacing = 0f
@@ -174,8 +182,9 @@ class MainActivity : Activity() {
         panels.forEachIndexed { k, v -> v.visibility = if (k == i) View.VISIBLE else View.GONE }
         tabButtons.forEachIndexed { k, b -> b.lit = k == i }
         if (i == 1) edit.refreshValues()
-        if (i == 2) libraryPanel.refresh()
-        if (i == 3) player.refreshPlaylist()
+        if (i == 2) multi.refresh()
+        if (i == 3) libraryPanel.refresh()
+        if (i == 4) player.refreshPlaylist()
     }
 
     override fun onStart() {
@@ -208,7 +217,17 @@ class MainActivity : Activity() {
 
     fun addPresetListener(l: () -> Unit) { presetListeners += l }
 
-    fun loadPreset(file: File) {
+    /** Part the editor (and preset loads) work on. */
+    fun setEditPart(k: Int) {
+        NativeEngine.nativeSetEditPart(k)
+        currentPresetName = partNames[NativeEngine.nativeEditPart()].ifEmpty { currentPresetName }
+        History.reset()
+        Params.notifyChanged()
+        presetListeners.forEach { it() }
+        showPresetInHeader()
+    }
+
+    fun loadPreset(file: File, onDone: () -> Unit = {}) {
         log("loading preset ${file.name}…")
         loader.execute {
             val result = JSONObject(NativeEngine.nativeLoadPreset(file.absolutePath, library.libraryRoot.absolutePath))
@@ -224,15 +243,48 @@ class MainActivity : Activity() {
                 val w = result.optJSONArray("warnings")
                 for (i in 0 until (w?.length() ?: 0)) log("  ${w!!.getString(i)}", Ui.WARN)
                 log("preset \"$currentPresetName\" loaded")
+                partNames[NativeEngine.nativeEditPart()] = currentPresetName
+                History.reset()
                 showPresetInHeader()
+                onDone()
                 Params.notifyChanged()
                 presetListeners.forEach { it() }
             }
         }
     }
 
+    // ------------------------------------------------------------ MIDI learn
+
+    fun learn(meta: ParamMeta) {
+        NativeEngine.nativeLearnArm(meta.id)
+        learnArmed = meta.id
+        ui.removeCallbacks(clearParamDisplay)
+        headerLcd.text = "LEARN ${meta.label}"
+        log("MIDI learn: move a controller for ${meta.label}")
+    }
+
+    fun unlearn(meta: ParamMeta) {
+        NativeEngine.nativeLearnRemove(meta.id)
+        NativeEngine.nativeLearnSave(File(filesDir, "midi_map.json").absolutePath)
+        log("MIDI learn removed: ${meta.label}")
+    }
+
+    private fun pollLearn() {
+        if (learnArmed < 0) return
+        if (NativeEngine.nativeLearnArmed() >= 0) return
+        val p = learnArmed
+        learnArmed = -1
+        if (NativeEngine.nativeLearnLast() == p) {
+            NativeEngine.nativeLearnSave(File(filesDir, "midi_map.json").absolutePath)
+            val m = Params.meta.firstOrNull { it.id == p }
+            log("MIDI learn: ${m?.label ?: p} = ${NativeEngine.nativeLearnDescribe(p)}")
+            Hw.onParamTouched?.invoke(m?.label ?: "", NativeEngine.nativeLearnDescribe(p))
+        } else showPresetInHeader()
+    }
+
     private fun showPresetInHeader() {
-        if (::headerLcd.isInitialized) headerLcd.text = currentPresetName
+        if (!::headerLcd.isInitialized) return
+        headerLcd.text = if (NativeEngine.nativeIsMulti()) "P${NativeEngine.nativeEditPart() + 1} $currentPresetName" else currentPresetName
     }
 
     fun stepPreset(delta: Int) {
@@ -324,6 +376,7 @@ class MainActivity : Activity() {
                 lastXruns = s[13].toInt()
             }
             play.updateStats(s)
+            pollLearn()
             player.updateStats(s)
             if (monitor.view.visibility == View.VISIBLE) monitor.updateStats(s)
             val pc = NativeEngine.nativeTakeProgramChange()

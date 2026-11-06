@@ -348,6 +348,7 @@ class KnobView(ctx: Context, private val label: String, private val bipolar: Boo
     var onChange: ((Float) -> Unit)? = null
     var onReset: (() -> Unit)? = null
     var onTouchState: ((Boolean) -> Unit)? = null
+    var onLongPress: (() -> Unit)? = null
 
     private val d = resources.displayMetrics.density
     private val knob = sizeDp * d
@@ -360,6 +361,7 @@ class KnobView(ctx: Context, private val label: String, private val bipolar: Boo
     private var downV = 0f
     private val gestures = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean { onReset?.invoke(); return true }
+        override fun onLongPress(e: MotionEvent) { if (abs(e.y - downY) < 8 * d) onLongPress?.invoke() }
     })
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
@@ -466,7 +468,8 @@ class KnobView(ctx: Context, private val label: String, private val bipolar: Boo
  * One parameter as a hardware control: knob (float / int), LCD selector
  * (enum, tap for the list) or LED switch (bool). Keeps itself in sync.
  */
-class ParamControl(private val ctx: Context, val meta: ParamMeta, knobSize: Float = 52f, private val onSet: ((ParamControl) -> Unit)? = null) {
+class ParamControl(private val ctx: Context, val meta: ParamMeta, knobSize: Float = 52f, lcdWidth: Float = 116f,
+                   private val onSet: ((ParamControl) -> Unit)? = null) {
     val view: View
     private var knob: KnobView? = null
     private var lcd: TextView? = null
@@ -479,8 +482,9 @@ class ParamControl(private val ctx: Context, val meta: ParamMeta, knobSize: Floa
                 val box = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
                 box.addView(Hw.engraved(ctx, meta.label, 10.5f, tr = false))
                 val l = Hw.lcd(ctx, "", 13f).apply {
-                    minWidth = d(116f)
+                    minWidth = d(lcdWidth)
                     setOnClickListener { choose() }
+                    setOnLongClickListener { learnMenu(); true }
                 }
                 box.addView(l, LinearLayout.LayoutParams(-2, -2).apply { topMargin = d(4f) })
                 lcd = l
@@ -488,7 +492,8 @@ class ParamControl(private val ctx: Context, val meta: ParamMeta, knobSize: Floa
             }
             "bool" -> {
                 val t = ToggleSwitch(ctx, meta.label, tr = false)
-                t.onToggle = { on -> set(if (on) 1f else 0f) }
+                t.onToggle = { on -> History.checkpoint(); set(if (on) 1f else 0f) }
+                t.setOnLongClickListener { learnMenu(); true }
                 toggle = t
                 view = t
             }
@@ -496,8 +501,14 @@ class ParamControl(private val ctx: Context, val meta: ParamMeta, knobSize: Floa
                 val bip = meta.min < 0f && meta.max > 0f
                 val k = KnobView(ctx, meta.label, bip, knobSize)
                 k.onChange = { t -> set(meta.fromNormalized(t), fromKnob = true) }
-                k.onReset = { set(meta.def) }
-                k.onTouchState = { down -> if (down) Hw.onParamTouched?.invoke(meta.label, meta.format(NativeEngine.nativeGetParam(meta.id))) }
+                k.onReset = { History.checkpoint(); set(meta.def) }
+                k.onTouchState = { down ->
+                    if (down) {
+                        History.checkpoint()
+                        Hw.onParamTouched?.invoke(meta.label, meta.format(NativeEngine.nativeGetParam(meta.id)))
+                    }
+                }
+                k.onLongPress = { learnMenu() }
                 knob = k
                 view = k
             }
@@ -509,8 +520,18 @@ class ParamControl(private val ctx: Context, val meta: ParamMeta, knobSize: Floa
         val cur = NativeEngine.nativeGetParam(meta.id).roundToInt()
         AlertDialog.Builder(ctx)
             .setTitle(meta.label)
-            .setSingleChoiceItems(meta.options.toTypedArray(), cur) { dlg, which -> set(which.toFloat()); dlg.dismiss() }
+            .setSingleChoiceItems(meta.options.toTypedArray(), cur) { dlg, which -> History.checkpoint(); set(which.toFloat()); dlg.dismiss() }
             .show()
+    }
+
+    /** Long press: assign / remove a MIDI controller. */
+    private fun learnMenu() {
+        val a = ctx as? MainActivity ?: return
+        val cur = NativeEngine.nativeLearnDescribe(meta.id)
+        val items = if (cur.isEmpty()) arrayOf("MIDI Learn") else arrayOf("MIDI Learn", "Clear MIDI ($cur)")
+        AlertDialog.Builder(ctx).setTitle(meta.label).setItems(items) { _, w ->
+            if (w == 0) a.learn(meta) else a.unlearn(meta)
+        }.show()
     }
 
     fun set(v: Float, fromKnob: Boolean = false) {
