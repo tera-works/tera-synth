@@ -1,12 +1,18 @@
 # CLAUDE.md — HSynth (tera-synth)
 
-Hybrid synthesizer: platform-independent C++17 engine (`engine/`), Windows test host (`desktop/`),
-Android app (`android/`, Kotlin + Oboe). Docs are in `docs/` (Japanese).
+Hybrid synthesizer: platform-independent C++17 engine (`engine/`), desktop host (`desktop/`: Windows and macOS),
+Android app (`android/`, Kotlin + Oboe), iOS app (`ios/`, SwiftUI). Docs are in `docs/` (Japanese).
+
+> **Working on a Mac?** Read `docs/HANDOFF_MAC.md` first (handoff from the Windows session; the first task is
+> getting the iOS app onto the user's iPhone). Apple build notes: `docs/APPLE.md`.
 
 ## Working rules
 - Talk to the user in **Japanese**; docs are written in Japanese. Be concise, results first.
-- **Windows first.** Features are developed and verified on the Windows host; the Android (APK) build is done
-  once at the end (Galaxy S23 port). Do not run gradle or build APKs unless the user asks.
+- Commit or push only when the user asks; end commit messages with
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- On Windows, features are verified on the desktop host and the Galaxy S23 (APK builds when the user asks).
+  On a Mac, the macOS host and the iOS app (see `docs/HANDOFF_MAC.md`).
+- **Never put the MIDI files or the test sounds into an app bundle** (APK / iOS): they are not to be distributed.
 - **Never commit sampled sounds to this repository.** `desktop/data/` (SonicCell / GM recordings, user library) and
   `testdata/` (SoundFonts, Roland instrument definitions, manual-derived lists) are git-ignored test material.
   The sounds live in the private repository **tera-works/tera-synth-assets** (see below); never copy them into this
