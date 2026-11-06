@@ -83,6 +83,19 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) NSArray<NSString*>* midiInputs;
 - (void)refreshMidi;
 
+// audio timing (autotest): peaks since resetPeaks
+@property(nonatomic) BOOL muted;
+@property(nonatomic, readonly) NSString* audioDevice;   // "backend, rate Hz, period x periods"
+@property(nonatomic, readonly) int peakVoices;
+@property(nonatomic, readonly) float cpuLoadPeak;       // engine process() time / block time
+@property(nonatomic, readonly) float callbackLoadMax;   // whole callback time / callback period
+@property(nonatomic, readonly) float callbackUsAvg;
+@property(nonatomic, readonly) int lateCallbacks;       // callback came > 2.5 periods late (likely audible)
+@property(nonatomic, readonly) int callbackFrames;
+- (void)resetPeaks;
+/// Warnings of the last loadPreset (missing samples, ...) or the report of the last loadSong.
+@property(nonatomic, readonly) NSArray<NSString*>* lastWarnings;
+
 @end
 
 NS_ASSUME_NONNULL_END

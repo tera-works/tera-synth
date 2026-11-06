@@ -27,7 +27,16 @@ final class SynthModel: ObservableObject {
         load(preset: engine.presetNames.indices.contains(last) ? last : 0)
     }
 
-    func start() { _ = engine.startAudio() }
+    private var autotestStarted = false
+
+    func start() {
+        _ = engine.startAudio()
+        if (Self.autotestRequested || Self.libtestRequested) && !autotestStarted {
+            autotestStarted = true
+            if Self.libtestRequested { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.runLibtest() } }
+            if Self.autotestRequested { runAutotest() }
+        }
+    }
     func stop() { engine.stopAudio() }
 
     func load(preset i: Int) {

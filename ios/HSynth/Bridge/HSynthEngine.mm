@@ -51,6 +51,7 @@ float toNormalized(const ParamInfo& p, float v) {
     std::vector<SongPart> _songParts;
     std::vector<std::pair<double, double>> _tempos;
     NSString* _songName;
+    NSArray<NSString*>* _lastWarnings;   // preset load warnings / song report (autotest)
 }
 
 - (instancetype)initWithFactoryDir:(NSString*)factoryDir userDir:(NSString*)userDir {
@@ -165,6 +166,7 @@ float toNormalized(const ParamInfo& p, float v) {
     }
     std::vector<std::string> warnings;
     applyPreset(*_engine, p, _libraryDir, warnings);
+    _lastWarnings = [self strings:warnings];
     _engine->setMultiTimbral(false);  // a single preset: leave the song's multi mode
     _midi->setMultiTimbral(false);
     _engine->collectGarbage();
@@ -251,6 +253,7 @@ float toNormalized(const ParamInfo& p, float v) {
     std::vector<std::string> report;
     _songParts.clear();
     prepareSong(*_engine, *song, bank, _libraryDir, _songLoaded, report, &_songParts);
+    _lastWarnings = [self strings:report];
     _midi->setMultiTimbral(true);
     _tempos.clear();
     for (const auto& t : song->tempos) _tempos.push_back({t.time, t.bpm});
@@ -322,5 +325,31 @@ float toNormalized(const ParamInfo& p, float v) {
     return a;
 }
 - (void)refreshMidi { _midi->openAll(); }
+
+- (BOOL)muted { return _audio->muted(); }
+- (void)setMuted:(BOOL)m { _audio->setMuted(m); }
+- (NSString*)audioDevice {
+    const AudioOutStats s = _audio->stats();
+    AVAudioSession* a = [AVAudioSession sharedInstance];
+    return [NSString stringWithFormat:@"%s, %d Hz, period %d x %d (session %.1f ms, output latency %.1f ms)",
+                                      s.backend.c_str(), s.sampleRate, s.periodFrames, s.periods,
+                                      a.IOBufferDuration * 1000.0, a.outputLatency * 1000.0];
+}
+- (int)peakVoices { return _engine->stats().peakVoices; }
+- (float)cpuLoadPeak { return _engine->stats().cpuLoadPeak; }
+- (float)callbackLoadMax { return _audio->stats().callbackLoadMax; }
+- (float)callbackUsAvg { return _audio->stats().callbackUsAvg; }
+- (int)lateCallbacks { return _audio->stats().lateCallbacks; }
+- (int)callbackFrames { return _audio->stats().lastCallbackFrames; }
+- (NSArray<NSString*>*)strings:(const std::vector<std::string>&)v {
+    NSMutableArray* a = [NSMutableArray array];
+    for (const auto& x : v) [a addObject:ns(x)];
+    return a;
+}
+- (NSArray<NSString*>*)lastWarnings { return _lastWarnings ?: @[]; }
+- (void)resetPeaks {
+    _engine->resetPeakStats();
+    _audio->resetPeaks();
+}
 
 @end
