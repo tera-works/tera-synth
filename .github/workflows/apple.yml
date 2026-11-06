@@ -9,7 +9,7 @@ on:
 
 jobs:
   engine-macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -20,7 +20,7 @@ jobs:
         run: ./build/engine/hsynth_tests
 
   desktop-macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -33,7 +33,7 @@ jobs:
           path: build/desktop/HSynth.app
 
   ios:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: XcodeGen
