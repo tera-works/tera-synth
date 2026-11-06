@@ -14,7 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setAudioInput:(BOOL)on;   // microphone for the vocoder / looper (asks for permission)
 
 // playing
-- (void)noteOn:(int)key velocity:(float)velocity;
+- (void)noteOn:(int)key velocity:(float)velocity NS_SWIFT_NAME(noteOn(_:velocity:));
 - (void)noteOff:(int)key;
 - (void)pitchBend:(float)value;   // -1..1
 - (void)modWheel:(float)value;    // 0..1
