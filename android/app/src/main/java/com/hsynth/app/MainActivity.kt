@@ -86,7 +86,37 @@ class MainActivity : Activity() {
         midiOut = MidiOutput(this)
         NativeEngine.nativeLearnLoad(File(filesDir, "midi_map.json").absolutePath)
 
+        buildUi(0)
+        hideSystemBars()
+
+        log("HSynth ${packageManager.getPackageInfo(packageName, 0).versionName} starting")
+        loader.execute {
+            try {
+                library.installFactoryContent(packageManager.getPackageInfo(packageName, 0).longVersionCode)
+            } catch (e: Exception) {
+                ui.post { log("factory content install failed: ${e.message}", Ui.ERR) }
+            }
+            ui.post {
+                if (isDestroyed) return@post
+                libraryPanel.refresh()
+                val last = prefs.getString("lastPreset", null)?.let { File(it) }?.takeIf { it.exists() }
+                loadPreset(last ?: library.presets().firstOrNull()?.file ?: return@post)
+            }
+        }
+        ui.post(statsTick)
+    }
+
+    private var currentTab = 0
+
+    /** Builds every screen for the current orientation. */
+    private fun buildUi(tab: Int) {
+        Params.clearListeners()
+        presetListeners.clear()
+        logListeners.clear()
+        tabButtons.clear()
+        panels.clear()
         play = PlayPanel(this)
+        val portrait = Ui.portrait(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.BG)
@@ -123,8 +153,13 @@ class MainActivity : Activity() {
                 maxLines = 1
             })
         }
-        tabs.addView(logo, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = Ui.dp(this@MainActivity, 8) })
-        tabs.addView(lcdBox, LinearLayout.LayoutParams(Ui.dp(this, 185), -2).apply { marginEnd = Ui.dp(this@MainActivity, 10) })
+        // portrait: logo + LCD on one bar, the mode buttons on a second
+        val headBar = if (portrait) ChassisBar(this).apply {
+            setPadding(Ui.dp(context, 10), Ui.dp(context, 6), Ui.dp(context, 10), Ui.dp(context, 2))
+        } else tabs
+        headBar.addView(logo, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = Ui.dp(this@MainActivity, 8) })
+        headBar.addView(lcdBox, if (portrait) LinearLayout.LayoutParams(0, -2, 1f)
+            else LinearLayout.LayoutParams(Ui.dp(this, 185), -2).apply { marginEnd = Ui.dp(this@MainActivity, 10) })
         Hw.onParamTouched = { label, value ->
             headerLcd.text = "$label  $value"
             ui.removeCallbacks(clearParamDisplay)
@@ -134,41 +169,37 @@ class MainActivity : Activity() {
         edit = EditPanel(this)
         libraryPanel = LibraryPanel(this)
         monitor = MonitorPanel(this)
-        player = PlayerPanel(this)
+        if (!::player.isInitialized) player = PlayerPanel(this)  // keeps playing across rotations
+        (player.view.parent as? android.view.ViewGroup)?.removeView(player.view)
+        player.setPortrait(portrait)
         multi = MultiPanel(this)
         listOf("Play" to play.view, "Edit" to edit.view, "Multi" to multi.view, "Library" to libraryPanel.view, "Player" to player.view, "System" to monitor.view).forEachIndexed { i, (name, v) ->
             val b = LedButton(this, name).apply {
-                textSize = 12.5f
+                textSize = if (portrait) 11f else 12.5f
                 letterSpacing = 0f
-                setPadding(Ui.dp(context, 16), paddingTop, Ui.dp(context, 2), paddingBottom)
+                setPadding(Ui.dp(context, if (portrait) 13 else 16), paddingTop, Ui.dp(context, 2), paddingBottom)
                 setOnClickListener { selectTab(i) }
             }
             tabButtons += b
-            tabs.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = Ui.dp(this@MainActivity, 6) })
+            tabs.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = Ui.dp(this@MainActivity, if (portrait) 3 else 6) })
             panels += v
             content.addView(v, FrameLayout.LayoutParams(-1, -1))
         }
+        if (portrait) root.addView(headBar, Ui.lp())
         root.addView(tabs, Ui.lp())
         root.addView(content, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         setContentView(root)
-        selectTab(0)
-        hideSystemBars()
+        selectTab(tab)
+        showPresetInHeader()
+        logListeners.forEach { it() }
+    }
 
-        log("HSynth ${packageManager.getPackageInfo(packageName, 0).versionName} starting")
-        loader.execute {
-            try {
-                library.installFactoryContent(packageManager.getPackageInfo(packageName, 0).longVersionCode)
-            } catch (e: Exception) {
-                ui.post { log("factory content install failed: ${e.message}", Ui.ERR) }
-            }
-            ui.post {
-                if (isDestroyed) return@post
-                libraryPanel.refresh()
-                val last = prefs.getString("lastPreset", null)?.let { File(it) }?.takeIf { it.exists() }
-                loadPreset(last ?: library.presets().firstOrNull()?.file ?: return@post)
-            }
-        }
-        ui.post(statsTick)
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (::play.isInitialized) play.keyboard.allNotesOff()
+        buildUi(currentTab)
+        Params.notifyChanged()
+        presetListeners.forEach { it() }
     }
 
     private fun hideSystemBars() {
@@ -179,6 +210,7 @@ class MainActivity : Activity() {
     }
 
     fun selectTab(i: Int) {
+        currentTab = i
         panels.forEachIndexed { k, v -> v.visibility = if (k == i) View.VISIBLE else View.GONE }
         tabButtons.forEachIndexed { k, b -> b.lit = k == i }
         if (i == 1) edit.refreshValues()
@@ -252,6 +284,44 @@ class MainActivity : Activity() {
             }
         }
     }
+
+    // ------------------------------------------------------------ audio input / recording
+
+    private val reqMic = 301
+
+    fun setAudioInput(on: Boolean) {
+        if (on && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), reqMic)
+            return
+        }
+        val ok = NativeEngine.nativeSetInput(on)
+        if (on && !ok) log("audio input could not be opened", Ui.ERR)
+        monitor.inputSwitch?.on = on && ok
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == reqMic) {
+            if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) setAudioInput(true)
+            else { log("microphone permission denied", Ui.WARN); monitor.inputSwitch?.on = false }
+        }
+    }
+
+    /** Starts / stops recording the output; returns whether it is recording now. */
+    fun toggleRecording(): Boolean {
+        if (NativeEngine.nativeRecordSeconds() >= 0) {
+            val sec = NativeEngine.nativeRecordStop()
+            log("recording saved (%.1f s): %s".format(sec, lastRecording))
+            return false
+        }
+        val dir = (getExternalFilesDir("recordings") ?: File(filesDir, "recordings")).apply { mkdirs() }
+        val f = File(dir, "HSynth_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".wav")
+        if (!NativeEngine.nativeRecordStart(f.absolutePath)) { log("recording failed to start", Ui.ERR); return false }
+        lastRecording = f.absolutePath
+        log("recording…")
+        return true
+    }
+    private var lastRecording = ""
 
     // ------------------------------------------------------------ MIDI learn
 

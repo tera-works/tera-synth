@@ -68,6 +68,11 @@ object NativeEngine {
     external fun nativeFmAlgorithm(index: Int): IntArray
     external fun nativeSetAllParams(values: FloatArray)
     external fun nativeSetTransport(on: Boolean)
+    external fun nativeSetInput(on: Boolean): Boolean
+    external fun nativeInputPeak(): Float
+    external fun nativeRecordStart(path: String): Boolean
+    external fun nativeRecordStop(): Double
+    external fun nativeRecordSeconds(): Double
     external fun nativeTransport(): Boolean
     external fun nativeSetMulti(on: Boolean)
     external fun nativeIsMulti(): Boolean

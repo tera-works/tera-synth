@@ -20,12 +20,13 @@ class PlayPanel(private val a: MainActivity) {
     private val quick = mutableListOf<ParamControl>()
     private var sustainOn = false
     private var keyValues: List<() -> Unit> = emptyList()
+    private var recButton: LedButton? = null
     val view: LinearLayout
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
         keyboard.firstNote = a.prefs.getInt("firstNote", 48)
-        keyboard.whiteKeyCount = a.prefs.getInt("whiteKeys", 15)
+        keyboard.whiteKeyCount = a.prefs.getInt(keysPref, if (Ui.portrait(a)) 8 else 15)
         keyboard.transpose = a.prefs.getInt("transpose", 0)
         keyboard.slideMode = if (a.prefs.getBoolean("slideBend", false)) KeyboardView.SlideMode.BEND else KeyboardView.SlideMode.GLISS
 
@@ -74,6 +75,12 @@ class PlayPanel(private val a: MainActivity) {
             quick += c
             arpRow.addView(c.view, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
         }
+        val rec = LedButton(a, "Rec").apply {
+            textSize = 12f
+            minHeight = d(30)
+            setOnClickListener { lit = a.toggleRecording() }
+        }
+        recButton = rec
         val run = LedButton(a, "Run").apply {
             textSize = 12f
             minHeight = d(30)
@@ -93,6 +100,7 @@ class PlayPanel(private val a: MainActivity) {
         }
         tabButtons.forEachIndexed { i, b -> b.setOnClickListener { showPage(i) } }
         tabs.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
+        tabs.addView(rec, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
         tabs.addView(run, LinearLayout.LayoutParams(-2, -2))
         knobs.body.addView(tabs, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(4) })
         knobs.body.addView(knobRow, LinearLayout.LayoutParams(-1, -2))
@@ -156,7 +164,14 @@ class PlayPanel(private val a: MainActivity) {
         keys.body.addView(row(slide, hold), LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(5) })
         updateSlide()
 
-        val top = LinearLayout(a).apply {
+        val top = if (Ui.portrait(a)) LinearLayout(a).apply {
+            // portrait: preset + keyboard buttons, then the controls
+            orientation = LinearLayout.VERTICAL
+            setPadding(d(8), d(8), d(8), d(6))
+            addView(preset, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
+            addView(keys, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
+            addView(knobs, LinearLayout.LayoutParams(-1, -2))
+        } else LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(d(8), d(8), d(8), d(6))
             addView(preset, LinearLayout.LayoutParams(d(150), -1).apply { marginEnd = d(8) })
@@ -193,7 +208,8 @@ class PlayPanel(private val a: MainActivity) {
         keyValues.forEach { it() }
     }
 
-    private fun save() = a.prefs.edit().putInt("firstNote", keyboard.firstNote).putInt("whiteKeys", keyboard.whiteKeyCount)
+    private val keysPref get() = if (Ui.portrait(a)) "whiteKeysPortrait" else "whiteKeys"
+    private fun save() = a.prefs.edit().putInt("firstNote", keyboard.firstNote).putInt(keysPref, keyboard.whiteKeyCount)
         .putInt("transpose", keyboard.transpose).apply()
 
     fun updateStats(s: FloatArray) {
@@ -202,6 +218,13 @@ class PlayPanel(private val a: MainActivity) {
         val load = (s[2] * 100).roundToInt()
         val xr = s[13].toInt()
         val audio = if (s[8] > 0.5f) "${s[9].toInt() / 1000.0}k/${s[11].toInt()}" else L10n.t("audio off")
+        val rs = NativeEngine.nativeRecordSeconds()
+        recButton?.lit = rs >= 0
+        if (rs >= 0) {
+            statusText.text = "● REC %d:%02d".format(rs.toInt() / 60, rs.toInt() % 60)
+            statusText.setTextColor(Ui.ERR)
+            return
+        }
         statusText.text = if (s[8] > 0.5f) "VOICE $voices/$maxV  DSP $load%  XRUN ${if (xr < 0) "?" else xr}" else audio
         statusText.setTextColor(if (s[3] > 0.8f || load > 70) Ui.WARN else Hw.LCD_DIM)
     }

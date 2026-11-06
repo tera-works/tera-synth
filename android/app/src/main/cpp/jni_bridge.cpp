@@ -525,3 +525,14 @@ JNI(jstring, nativeLearnLoad)(JNIEnv* env, jobject, jstring path) {
 
 JNI(void, nativeSetTransport)(JNIEnv*, jobject, jboolean on) { gEngine->setTransport(on); }
 JNI(jboolean, nativeTransport)(JNIEnv*, jobject) { return gEngine->transportPlaying() ? JNI_TRUE : JNI_FALSE; }
+
+// ------------------------------------------------------------ audio input / recording
+
+JNI(jboolean, nativeSetInput)(JNIEnv*, jobject, jboolean on) { return gAudio && gAudio->setInputEnabled(on) ? JNI_TRUE : JNI_FALSE; }
+JNI(jfloat, nativeInputPeak)(JNIEnv*, jobject) { return gAudio ? gAudio->inputPeak() : 0.0f; }
+JNI(jboolean, nativeRecordStart)(JNIEnv* env, jobject, jstring path) {
+    return gAudio && gAudio->startRecording(str(env, path)) ? JNI_TRUE : JNI_FALSE;
+}
+JNI(jdouble, nativeRecordStop)(JNIEnv*, jobject) { return gAudio ? gAudio->stopRecording() : 0.0; }
+JNI(jdouble, nativeRecordSeconds)(JNIEnv*, jobject) { return gAudio && gAudio->recording() ? gAudio->recordedSeconds() : -1.0; }
+

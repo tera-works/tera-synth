@@ -88,7 +88,8 @@ class EditPanel(private val a: MainActivity) {
                 setPadding(d(8), d(8), d(8), d(2))
                 addView(bar)
             }, Ui.lp())
-            addView(toolbar, Ui.lp())
+            if (Ui.portrait(a)) addView(HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(toolbar) }, Ui.lp())
+            else addView(toolbar, Ui.lp())
             addView(scroll, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         }
         Params.addListener { buildPage() }  // layer types / sample names may have changed

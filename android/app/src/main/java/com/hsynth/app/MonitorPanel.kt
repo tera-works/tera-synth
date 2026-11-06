@@ -27,6 +27,9 @@ class MonitorPanel(private val a: MainActivity) {
     }
     private val logScroll = ScrollView(a)
     private var outputs: List<AudioDeviceInfo> = emptyList()
+    var inputSwitch: ToggleSwitch? = null
+    private val inputText = Ui.text(a, "", 12f, Ui.DIM, tr = false).apply { typeface = Hw.MONO }
+    private var inPeak = 0f
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
@@ -55,13 +58,13 @@ class MonitorPanel(private val a: MainActivity) {
         logScroll.background = Hw.lcdBg(a)
         logScroll.setPadding(d(8), d(6), d(8), d(6))
         logScroll.addView(logView)
-        messages.body.addView(logScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        messages.body.addView(logScroll)
         messages.body.addView(LedButton(a, "Clear view", led = false).apply { setOnClickListener { logView.text = "" } },
             LinearLayout.LayoutParams(-2, -2).apply { topMargin = d(6) })
-        messages.body.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        logScroll.layoutParams = LinearLayout.LayoutParams(-1, d(260))
         val left = Ui.column(a).apply {
             addView(status, Hw.sectionLp(a))
-            addView(messages, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(messages, LinearLayout.LayoutParams(-1, -2))
         }
         a.addLogListener { logView.text = a.logText(); logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
 
@@ -96,6 +99,10 @@ class MonitorPanel(private val a: MainActivity) {
         audio.body.addView(toggle("Exclusive mode (lower latency when supported)", a.prefs.getBoolean("exclusive", true)) { c ->
             a.prefs.edit().putBoolean("exclusive", c).apply(); a.startAudio()
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+        // audio input (microphone / USB input) for the vocoder and the looper
+        inputSwitch = toggle("Audio Input (mic / USB) for vocoder and looper", false) { c -> a.setAudioInput(c) }
+        audio.body.addView(inputSwitch, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(4) })
+        audio.body.addView(inputText, LinearLayout.LayoutParams(-1, -2))
         col.addView(audio, Hw.sectionLp(a))
 
         val midi = Hw.Section(a, "MIDI input")
@@ -131,10 +138,18 @@ class MonitorPanel(private val a: MainActivity) {
         })
         col.addView(lang, Hw.sectionLp(a))
 
-        view = LinearLayout(a).apply {
+        view = if (Ui.portrait(a)) LinearLayout(a).apply {
+            setPadding(d(10), d(8), d(10), d(8))
+            addView(ScrollView(a).apply {
+                addView(Ui.column(a).apply {
+                    addView(left, Hw.sectionLp(a))
+                    addView(col, LinearLayout.LayoutParams(-1, -2))
+                })
+            }, LinearLayout.LayoutParams(-1, -1))
+        } else LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(d(10), d(8), d(10), d(8))
-            addView(left, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(10) })
+            addView(ScrollView(a).apply { addView(left) }, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(10) })
             addView(ScrollView(a).apply { addView(col) }, LinearLayout.LayoutParams(0, -1, 1f))
         }
         refreshMidi()
@@ -156,6 +171,11 @@ class MonitorPanel(private val a: MainActivity) {
     }
 
     fun updateStats(s: FloatArray) {
+        if (inputSwitch?.on == true) {
+            inPeak = maxOf(NativeEngine.nativeInputPeak(), inPeak * 0.7f)
+            val db = if (inPeak > 1e-5f) 20 * kotlin.math.log10(inPeak) else -99f
+            inputText.text = "IN  %s  %.0f dB".format("█".repeat(((db + 60) / 4).toInt().coerceIn(0, 15)).padEnd(15, '·'), db)
+        } else inputText.text = ""
         val api = when (s[14].toInt()) { 2 -> "AAudio"; 1 -> "OpenSL ES"; else -> "?" }
         val sr = s[9].toInt()
         val buf = s[11].toInt()

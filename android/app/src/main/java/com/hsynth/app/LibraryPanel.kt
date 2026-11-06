@@ -38,17 +38,20 @@ class LibraryPanel(private val a: MainActivity) {
         // presets: filter + actions, then a grid of preset cards
         val presets = Hw.Section(a, "Presets")
         val filters = mutableListOf<LedButton>()
-        val head = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
+        // filters and actions; they wrap onto two lines on narrow screens
+        val head: android.view.ViewGroup = if (Ui.portrait(a)) FlowLayout(a, Ui.dp(a, 6), Ui.dp(a, 6))
+            else LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
         listOf("All", "Factory", "User").forEachIndexed { i, t ->
             val b = LedButton(a, t).apply { textSize = 13.5f; setOnClickListener { presetFilter = i; filters.forEachIndexed { k, x -> x.lit = k == i }; refreshPresets() } }
             b.lit = i == 0
             filters += b
-            head.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) })
+            head.addView(b, if (head is LinearLayout) LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) } else android.view.ViewGroup.LayoutParams(-2, -2))
         }
-        head.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
+        if (head is LinearLayout) head.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
         for ((t, f) in listOf<Pair<String, () -> Unit>>("Save as…" to { promptSave() },
                 "Import…" to { open(REQ_PRESET_IMPORT, "application/json", "*/*") }, "Export…" to { export() }))
-            head.addView(LedButton(a, t, led = false).apply { textSize = 13.5f; setOnClickListener { f() } }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) })
+            head.addView(LedButton(a, t, led = false).apply { textSize = 13.5f; setOnClickListener { f() } },
+                if (head is LinearLayout) LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) } else android.view.ViewGroup.LayoutParams(-2, -2))
         presets.body.addView(head)
         presets.body.addView(ScrollView(a).apply { addView(presetList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
 
@@ -64,7 +67,12 @@ class LibraryPanel(private val a: MainActivity) {
         ))
         samples.body.addView(ScrollView(a).apply { addView(sampleList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
 
-        view = LinearLayout(a).apply {
+        view = if (Ui.portrait(a)) LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(d(10), d(8), d(10), d(8))
+            addView(presets, LinearLayout.LayoutParams(-1, 0, 2f).apply { bottomMargin = d(10) })
+            addView(samples, LinearLayout.LayoutParams(-1, 0, 1f))
+        } else LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(d(10), d(8), d(10), d(8))
             addView(presets, LinearLayout.LayoutParams(0, -1, 2f).apply { marginEnd = d(10) })

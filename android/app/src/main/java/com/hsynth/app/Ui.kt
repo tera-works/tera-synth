@@ -25,6 +25,9 @@ object Ui {
     val WARN = Color.rgb(255, 213, 79)
     val ERR = Color.rgb(239, 83, 80)
 
+    /** Narrow layouts: portrait phones (screens are rebuilt when this changes). */
+    fun portrait(ctx: Context) = ctx.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
     fun dp(ctx: Context, v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
 
     /** tr = false for names (presets, files, parameters) that must not be translated. */

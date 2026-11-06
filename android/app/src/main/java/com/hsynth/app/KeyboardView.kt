@@ -26,7 +26,7 @@ class KeyboardView(context: Context) : View(context) {
     var firstNote = 48              // must be a white key
         set(v) { field = v; allNotesOff(); invalidate() }
     var whiteKeyCount = 15
-        set(v) { field = v.coerceIn(7, 36); allNotesOff(); invalidate() }
+        set(v) { field = v.coerceIn(5, 36); allNotesOff(); invalidate() }
     var slideMode = SlideMode.GLISS
     /** Semitones added to the notes this keyboard plays (the keys shown stay where they are). */
     var transpose = 0

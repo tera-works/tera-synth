@@ -100,7 +100,12 @@ class MultiPanel(private val a: MainActivity) {
         scenes.body.addView(Ui.text(a, "Tap a scene to recall it. Store, then a scene, saves the current multi there.", 12f, Ui.DIM),
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(4) })
 
-        val top = LinearLayout(a).apply {
+        val portrait = Ui.portrait(a)
+        val top = if (portrait) LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(mode, Hw.sectionLp(a))
+            addView(scenes, LinearLayout.LayoutParams(-1, -2))
+        } else LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(mode, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(8) })
             addView(scenes, LinearLayout.LayoutParams(0, -1, 1.6f))
@@ -118,7 +123,9 @@ class MultiPanel(private val a: MainActivity) {
         val col = Ui.column(a).apply {
             setPadding(d(10), d(8), d(10), d(16))
             addView(top, Hw.sectionLp(a))
-            addView(parts, Hw.sectionLp(a))
+            if (portrait) addView(android.widget.HorizontalScrollView(a).apply {
+                addView(parts, android.view.ViewGroup.LayoutParams(d(760), -2))
+            }, Hw.sectionLp(a)) else addView(parts, Hw.sectionLp(a))
         }
         view = Ui.column(a).apply { addView(ScrollView(a).apply { addView(col) }, LinearLayout.LayoutParams(-1, -1)) }
         loadSceneNames()

@@ -62,6 +62,7 @@ object L10n {
             "ボコーダーには音声入力（マイク）が必要です。Android 版はまだ入力に対応していません（デスクトップ版では使えます）。",
         "(none)" to "（なし）",
         "Sound for part %d" to "パート %d の音色", "Store scene %d" to "シーン %d に保存",
+        "Audio Input (mic / USB) for vocoder and looper" to "Audio Input（マイク / USB 入力。ボコーダーとルーパー用）",
         // multi
         "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays channel 1." to
             "マルチモードでは 16 パートを鳴らせます。同じ MIDI チャンネルのパートは重なり、鍵域を分けるとスプリットになります。画面の鍵盤は ch 1 です。",
@@ -132,5 +133,15 @@ object L10n {
         "playing (.*) \\((.*)\\)" to "再生中: $1（$2）",
         "adding songs failed: (.*)" to "曲を追加できませんでした: $1",
         "added (\\d+) song\\(s\\)" to "$1 曲を追加しました",
+        "recording saved \\((.*) s\\): (.*)" to "録音を保存しました（$1 秒）: $2",
+        "recording…" to "録音中…",
+        "recording failed to start" to "録音を開始できませんでした",
+        "audio input could not be opened" to "オーディオ入力を開けませんでした",
+        "microphone permission denied" to "マイクの使用が許可されませんでした",
+        "MIDI learn: move a controller for (.*)" to "MIDI ラーン: $1 に割り当てるコントローラーを動かしてください",
+        "MIDI learn: (.*) = (.*)" to "MIDI ラーン: $1 = $2",
+        "MIDI learn removed: (.*)" to "MIDI ラーンを解除しました: $1",
+        "scene (\\d+) stored" to "シーン $1 を保存しました",
+        "scene (\\d+) recalled" to "シーン $1 を呼び出しました",
     ).map { (re, ja) -> Regex(re) to ja }
 }

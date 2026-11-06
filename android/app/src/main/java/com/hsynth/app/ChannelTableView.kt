@@ -44,7 +44,8 @@ class ChannelTableView(ctx: Context) : View(ctx) {
 
     // fixed row height (the player puts the table in a ScrollView on small screens)
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
-        setMeasuredDimension(MeasureSpec.getSize(widthSpec), (headerH + 16 * 38 * d).toInt())
+        val lpW = layoutParams?.width ?: -1
+        setMeasuredDimension(if (lpW > 0) lpW else MeasureSpec.getSize(widthSpec), (headerH + 16 * 38 * d).toInt())
     }
 
     fun update(st: FloatArray, m: IntArray) {

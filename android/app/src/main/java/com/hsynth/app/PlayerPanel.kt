@@ -48,6 +48,25 @@ class PlayerPanel(private val a: MainActivity) {
     private val tabChannels: LedButton
     private val tabPlaylist: LedButton
 
+    private lateinit var topRow: LinearLayout
+    private lateinit var topLcd: View
+    private lateinit var topTransport: View
+
+    /** Re-arranges the top for the orientation (the player keeps playing). */
+    fun setPortrait(portrait: Boolean) {
+        val d = { v: Int -> Ui.dp(a, v) }
+        topRow.removeAllViews()
+        if (portrait) {
+            topRow.orientation = LinearLayout.VERTICAL
+            topRow.addView(topLcd, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(8) })
+            topRow.addView(topTransport, LinearLayout.LayoutParams(-1, -2))
+        } else {
+            topRow.orientation = LinearLayout.HORIZONTAL
+            topRow.addView(topLcd, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(10) })
+            topRow.addView(topTransport, LinearLayout.LayoutParams(0, -2, 1.05f))
+        }
+    }
+
     private var playlist: List<File> = emptyList()
     private var current = -1
     private var loaded = false
@@ -120,11 +139,10 @@ class PlayerPanel(private val a: MainActivity) {
             addView(volRow, Ui.lp().apply { width = -1 })
         }
         val transportPanel = Hw.Section(a, "Transport").apply { body.addView(right) }
-        val top = LinearLayout(a).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(lcd, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(10) })
-            addView(transportPanel, LinearLayout.LayoutParams(0, -2, 1.05f))
-        }
+        topRow = LinearLayout(a)
+        topLcd = lcd
+        topTransport = transportPanel
+        setPortrait(Ui.portrait(a))
         // tabs
         tabChannels = LedButton(a, "Channels").apply { setOnClickListener { showTab(0) } }
         tabPlaylist = LedButton(a, L10n.f("Playlist (%d)", 0), tr = false).apply { setOnClickListener { showTab(1) } }
@@ -135,13 +153,16 @@ class PlayerPanel(private val a: MainActivity) {
             addView(tbtn("Open Songs", 13f) { pickFiles() })
         }
         playlistScroll.addView(playlistCol)
-        tableScroll.addView(table)
+        // the table keeps its landscape width and scrolls sideways in portrait
+        tableScroll.addView(android.widget.HorizontalScrollView(a).apply {
+            addView(table, android.view.ViewGroup.LayoutParams(maxOf(Ui.dp(a, 760), a.resources.displayMetrics.widthPixels - Ui.dp(a, 20)), -2))
+        })
         content.addView(tableScroll, FrameLayout.LayoutParams(-1, -1))
         content.addView(playlistScroll, FrameLayout.LayoutParams(-1, -1))
         view = Ui.column(a).apply {
             setPadding(d(10), d(8), d(10), d(2))
-            addView(top, Ui.lp().apply { width = -1 })
-            addView(tabs)
+            addView(topRow, Ui.lp().apply { width = -1 })
+            addView(android.widget.HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(tabs) })
             addView(content, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         }
         showTab(0)

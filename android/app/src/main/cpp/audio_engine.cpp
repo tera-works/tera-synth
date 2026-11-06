@@ -7,6 +7,7 @@
 #include <android/log.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <thread>
 
@@ -74,6 +75,7 @@ bool AudioEngine::openLocked() {
         stream_->setBufferSizeInFrames(burst * 2);
         tuner_ = std::make_unique<oboe::LatencyTuner>(*stream_);
     }
+    if (wantInput_ && !inStream_) openInputLocked();
     r = stream_->requestStart();
     if (r != oboe::Result::OK) {
         LOGE("requestStart failed: %s", oboe::convertToText(r));
@@ -95,9 +97,139 @@ void AudioEngine::stop() {
         stream_->close();
         stream_.reset();
     }
+    if (inStream_) {
+        inStream_->stop();
+        inStream_->close();
+        inStream_.reset();
+    }
     tuner_.reset();
     closeHintSession();  // the callback thread has ended with the stream
 }
+
+// ------------------------------------------------------------ input
+
+oboe::DataCallbackResult AudioEngine::InputCallback::onAudioReady(oboe::AudioStream* s, void* data, int32_t n) {
+    const float* in = static_cast<const float*>(data);
+    const int ch = s->getChannelCount();
+    float mono[512];
+    float pk = 0.0f;
+    for (int done = 0; done < n;) {
+        const int m = std::min(n - done, 512);
+        for (int i = 0; i < m; ++i) {
+            mono[i] = in[(size_t)(done + i) * ch];
+            pk = std::max(pk, std::fabs(mono[i]));
+        }
+        owner->inRing_.write(mono, (size_t)m);
+        done += m;
+    }
+    if (pk > owner->inPeak_.load(std::memory_order_relaxed)) owner->inPeak_.store(pk, std::memory_order_relaxed);
+    return oboe::DataCallbackResult::Continue;
+}
+
+bool AudioEngine::openInputLocked() {
+    if (!stream_) return false;
+    inCb_.owner = this;
+    oboe::AudioStreamBuilder b;
+    b.setDirection(oboe::Direction::Input)
+        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+        ->setSharingMode(oboe::SharingMode::Shared)
+        ->setFormat(oboe::AudioFormat::Float)
+        ->setFormatConversionAllowed(true)
+        ->setChannelCount(oboe::ChannelCount::Mono)
+        ->setChannelConversionAllowed(true)
+        ->setSampleRate(stream_->getSampleRate())
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
+        ->setInputPreset(oboe::InputPreset::Unprocessed)
+        ->setDataCallback(&inCb_);
+    oboe::Result r = b.openStream(inStream_);
+    if (r != oboe::Result::OK) {
+        LOGE("input open failed: %s", oboe::convertToText(r));
+        inStream_.reset();
+        return false;
+    }
+    inRing_.clear();
+    if (inStream_->requestStart() != oboe::Result::OK) {
+        inStream_->close();
+        inStream_.reset();
+        return false;
+    }
+    LOGI("input: %d Hz, %d ch", inStream_->getSampleRate(), inStream_->getChannelCount());
+    return true;
+}
+
+bool AudioEngine::setInputEnabled(bool on) {
+    std::lock_guard<std::mutex> lock(lock_);
+    wantInput_ = on;
+    if (!on) {
+        if (inStream_) {
+            auto s = inStream_;
+            inStream_.reset();  // the output callback stops reading first
+            engine_.setInputBuffer(nullptr, nullptr);
+            s->stop();
+            s->close();
+        }
+        return true;
+    }
+    if (inStream_) return true;
+    return openInputLocked();
+}
+
+// ------------------------------------------------------------ recording
+
+namespace {
+void put32(FILE* f, uint32_t v) { fwrite(&v, 4, 1, f); }
+void put16(FILE* f, uint16_t v) { fwrite(&v, 2, 1, f); }
+void wavHeader(FILE* f, int rate, uint32_t frames) {
+    const uint32_t bytes = frames * 2 * 4;
+    fseek(f, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, f); put32(f, 36 + bytes); fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f); put32(f, 16); put16(f, 3 /* IEEE float */); put16(f, 2);
+    put32(f, (uint32_t)rate); put32(f, (uint32_t)rate * 8); put16(f, 8); put16(f, 32);
+    fwrite("data", 1, 4, f); put32(f, bytes);
+}
+}  // namespace
+
+bool AudioEngine::startRecording(const std::string& path) {
+    if (recording_.load()) return false;
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        recRate_ = stream_ ? stream_->getSampleRate() : requestedRate_;
+    }
+    recFile_ = fopen(path.c_str(), "wb");
+    if (!recFile_) return false;
+    wavHeader(recFile_, recRate_, 0);
+    recFrames_.store(0);
+    recRing_.clear();
+    recording_.store(true);
+    writer_ = std::thread([this] { writerLoop(); });
+    return true;
+}
+
+void AudioEngine::writerLoop() {
+    std::vector<float> buf(48000);
+    while (true) {
+        const bool more = recording_.load();
+        size_t n;
+        while ((n = recRing_.read(buf.data(), buf.size() & ~(size_t)1)) > 0) {
+            fwrite(buf.data(), sizeof(float), n, recFile_);
+            recFrames_.fetch_add((int64_t)(n / 2));
+        }
+        if (!more) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+double AudioEngine::stopRecording() {
+    if (!recording_.exchange(false)) return 0.0;
+    if (writer_.joinable()) writer_.join();
+    const int64_t frames = recFrames_.load();
+    wavHeader(recFile_, recRate_, (uint32_t)frames);
+    fclose(recFile_);
+    recFile_ = nullptr;
+    return (double)frames / recRate_;
+}
+
+double AudioEngine::recordedSeconds() const { return (double)recFrames_.load() / recRate_; }
 
 namespace {
 // NDK performance hint API, resolved at run time (minSdk 28; the API is 31+)
@@ -203,9 +335,26 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream* stream, vo
     float* out = static_cast<float*>(audioData);
     const int channels = stream->getChannelCount();
     int done = 0;
+    const bool input = inStream_ != nullptr;
+    if (input) {
+        // keep the input latency bounded: drop what piled up beyond 4 callbacks
+        const size_t backlog = inRing_.available();
+        if (backlog > (size_t)numFrames * 4) inRing_.skip(backlog - (size_t)numFrames * 2);
+    }
     while (done < numFrames) {
         const int n = std::min(numFrames - done, hsynth::kMaxBlockSize);
+        if (input) {
+            const size_t got = inRing_.read(inL_, (size_t)n);
+            for (size_t i = got; i < (size_t)n; ++i) inL_[i] = 0.0f;
+            std::copy(inL_, inL_ + n, inR_);
+            engine_.setInputBuffer(inL_, inR_);
+        }
         engine_.process(left_, right_, n);
+        if (recording_.load(std::memory_order_relaxed)) {
+            float inter[2 * hsynth::kMaxBlockSize];
+            for (int i = 0; i < n; ++i) { inter[2 * i] = left_[i]; inter[2 * i + 1] = right_[i]; }
+            recRing_.write(inter, (size_t)n * 2);  // a full ring drops (the writer is far behind)
+        }
         float* o = out + (size_t)done * channels;
         if (channels == 2) {
             for (int i = 0; i < n; ++i) {
