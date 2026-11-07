@@ -58,8 +58,8 @@ targets:
       properties:
         CFBundleDisplayName: HSynth
         # version: CFBundleShortVersionString = the release tag (v0.3.0); CFBundleVersion must grow with every release
-        CFBundleShortVersionString: "0.3.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.3.1"
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         UIBackgroundModes: [audio]
         UIRequiresFullScreen: true
