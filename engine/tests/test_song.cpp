@@ -209,3 +209,41 @@ TEST(song_meters_seek_chase_and_end) {
     CHECK(e.songEndCount() == ends + 1);
     CHECK(!e.songPlaying());
 }
+
+// bend ranges (RPN 0) and controllers come back after a seek and after a pause
+TEST(song_chase_rpn_bend_range_and_resume) {
+    auto song = std::make_unique<Song>();
+    auto ctl = [](int cc, int v) {
+        Event e = Event::control(EventType::Controller, v / 127.0f, cc);
+        e.channel = 0;
+        return e;
+    };
+    Event bend = Event::control(EventType::PitchBend, 0.5f);
+    bend.channel = 0;
+    song->events = {{0.0, ctl(101, 0)}, {0.0, ctl(100, 0)}, {0.0, ctl(6, 12)}, {0.0, ctl(7, 32)},
+                    {0.1, ctl(101, 127)}, {0.1, ctl(100, 127)}, {0.2, bend}, {5.0, ctl(7, 100)}};
+    song->channelUsed[0] = true;
+    song->length = 5.0;
+    Engine e;
+    e.prepare(48000);
+    e.setMultiTimbral(true);
+    e.setSong(std::move(song));
+    std::vector<float> L(480), R(480);
+    auto check = [&](const char* what) {
+        Engine::PartMeter m[kNumParts];
+        e.partMeters(m);
+        INFO("%s: volume %.3f\n", what, m[0].volume);
+        CHECK_NEAR(m[0].volume, 32.0 / 127.0, 1e-4);
+        CHECK_NEAR(e.debugPitchBendSemis(0), 6.0, 1e-4);  // half of 12 st
+    };
+    e.songSeek(1.0);
+    e.songPlay(true);
+    for (int b = 0; b < 5; ++b) e.process(L.data(), R.data(), 480);
+    check("after seek");
+    e.songPlay(false);  // pause: controllers reset
+    for (int b = 0; b < 2; ++b) e.process(L.data(), R.data(), 480);
+    CHECK_NEAR(e.debugPitchBendSemis(0), 0.0, 1e-4);
+    e.songPlay(true);   // resume where it was
+    for (int b = 0; b < 2; ++b) e.process(L.data(), R.data(), 480);
+    check("after resume");
+}

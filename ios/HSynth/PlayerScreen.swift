@@ -1,3 +1,4 @@
+import MediaPlayer
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -22,11 +23,64 @@ final class PlayerModel: ObservableObject {
     private var lastEnd = -1
     private var levels = [Float](repeating: 0, count: 16)
     private var timer: Timer?
+    /// The app is in the background (no meters; the song keeps playing).
+    var background = false
+    private var shownTitle: String?
+    private var shownPlaying: Bool?
+    private var shownPos = 0.0
+    /// Starts the audio output if it was stopped (set by SynthModel; lock screen play).
+    var ensureAudio: (() -> Void)?
 
     init(engine: HSynthEngine) {
         self.engine = engine
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
+        setupRemoteCommands()
+    }
+
+    var title: String? { files.indices.contains(current) ? files[current].deletingPathExtension().lastPathComponent : nil }
+
+    /// Lock screen / Control Center / headphone buttons.
+    private func setupRemoteCommands() {
+        let c = MPRemoteCommandCenter.shared()
+        c.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            self.ensureAudio?()
+            if !self.engine.songPlaying { self.togglePlay() }
+            return .success
+        }
+        c.pauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            if self.engine.songPlaying { self.engine.songPlay(false) }
+            return .success
+        }
+        c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.ensureAudio?(); self?.togglePlay(); return .success }
+        c.nextTrackCommand.addTarget { [weak self] _ in self?.next(manual: true); return .success }
+        c.previousTrackCommand.addTarget { [weak self] _ in self?.prev(); return .success }
+        c.changePlaybackPositionCommand.addTarget { [weak self] e in
+            guard let self, let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            self.engine.songSeek(e.positionTime)
+            return .success
+        }
+    }
+
+    private func updateNowPlaying() {
+        let t = title
+        // iOS runs the clock itself; refresh on changes and after a jump
+        let jumped = abs(position - shownPos) > 2.0
+        shownPos += playing ? 1.0 / 30 : 0
+        guard t != shownTitle || playing != shownPlaying || jumped else { return }
+        shownTitle = t
+        shownPlaying = playing
+        shownPos = position
+        guard let t else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: t,
+            MPMediaItemPropertyArtist: "HSynth",
+            MPMediaItemPropertyPlaybackDuration: length,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
+            MPNowPlayingInfoPropertyPlaybackRate: playing ? 1.0 : 0.0,
+        ]
     }
 
     var midiDir: URL { URL(fileURLWithPath: engine.midiDir) }
@@ -102,6 +156,14 @@ final class PlayerModel: ObservableObject {
         position = seeking ? position : engine.songPosition
         length = engine.songLength
         playing = engine.songPlaying
+        updateNowPlaying()
+        let ends = engine.songEndCount
+        if lastEnd < 0 { lastEnd = ends }
+        if ends != lastEnd {
+            lastEnd = ends
+            if repeatMode == .one { engine.songSeek(0); engine.songPlay(true) } else { next(manual: false) }
+        }
+        if background { return }  // nothing to draw
         bpm = engine.songTempo(at: position)
         let m = engine.partMeters().map { $0.floatValue }
         if m.count == 16 * 9 {
@@ -111,12 +173,6 @@ final class PlayerModel: ObservableObject {
             meters = mm
         }
         masks = engine.noteMasks().map { $0.uint32Value }
-        let ends = engine.songEndCount
-        if lastEnd < 0 { lastEnd = ends }
-        if ends != lastEnd {
-            lastEnd = ends
-            if repeatMode == .one { engine.songSeek(0); engine.songPlay(true) } else { next(manual: false) }
-        }
     }
 }
 

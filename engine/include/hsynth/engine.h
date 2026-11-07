@@ -211,6 +211,8 @@ public:
         uint32_t notes[4] = {};  // keys sounding (bit k of word k/32)
     };
     void partMeters(PartMeter* out) const;  // kNumParts entries; reading resets the level peaks
+    // bend of a part in semitones as of the last block (tests; not thread-safe)
+    float debugPitchBendSemis(int part) const { return parts_[part].ctx.pitchBendSemis; }
     double songPosition() const { return statSongPos_.load(std::memory_order_relaxed); }
     double songLength() const { return songLen_.load(std::memory_order_relaxed); }
 
@@ -227,6 +229,11 @@ private:
         const float* p = nullptr;  // parameter array (part 0: p_)
         VoiceContext ctx;
         float pitchBend = 0.0f;
+        // bend range set by MIDI (RPN 0, semitones; -1 = the part's master.bendrange).
+        // Moving master.bendrange clears it (knobBend remembers the value it was set at).
+        float rpnBend = -1.0f;
+        float knobBend = -1.0f;
+        uint8_t rpnMsb = 127, rpnLsb = 127;  // selected RPN (127/127 = none)
         bool sustain = false;
         Lfo lfo2;
         Rng rng;                   // lfo2 S&H of parts 1..15 (part 0 uses the engine rng)
@@ -319,6 +326,7 @@ private:
     void songUpdate();               // block start: swaps / seeks / start-stop
     void runSong(int frameOffset, int frames);
     void songNotesOff();
+    void songChase();                // controllers, bend and bend ranges in force at songIdx_
     std::atomic<bool> transport_{false};
     std::atomic<int> statSeqStep_[kNumParts];
     // send / return buses (A = reverb, B = delay)

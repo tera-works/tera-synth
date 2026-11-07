@@ -173,7 +173,7 @@ class PlayerPanel(private val a: MainActivity) {
 
     // ------------------------------------------------------------ state
 
-    private fun lengthSec() = NativeEngine.nativeSongState()[1]
+    fun lengthSec() = NativeEngine.nativeSongState()[1]
 
     private fun fmt(s: Double): String {
         val t = s.toInt().coerceAtLeast(0)
@@ -197,7 +197,8 @@ class PlayerPanel(private val a: MainActivity) {
     }
 
     private fun tick() {
-        if (view.visibility == View.VISIBLE) {
+        val shown = view.visibility == View.VISIBLE && a.visible  // no drawing in the background
+        if (shown) {
             val st = NativeEngine.nativePlayerState()
             val masks = NativeEngine.nativeNoteMasks()
             table.update(st, masks)
@@ -231,7 +232,7 @@ class PlayerPanel(private val a: MainActivity) {
                 }
             }
         }
-        view.postDelayed({ tick() }, if (view.visibility == View.VISIBLE) 33L else 250L)
+        view.postDelayed({ tick() }, if (shown) 33L else 250L)
     }
 
     private fun showTab(i: Int) {
@@ -324,7 +325,12 @@ class PlayerPanel(private val a: MainActivity) {
         }
     }
 
-    private fun togglePlay() {
+    /** A song is loaded and playing (background playback, notification). */
+    val isPlaying: Boolean get() = loaded && NativeEngine.nativeSongState()[2] > 0.5
+    val title: String? get() = playlist.getOrNull(current)?.nameWithoutExtension
+    fun positionSec(): Double = NativeEngine.nativeSongState()[0]
+
+    fun togglePlay() {
         if (!loaded) {
             playIndex(if (current >= 0) current else 0)
             return
@@ -333,12 +339,12 @@ class PlayerPanel(private val a: MainActivity) {
         NativeEngine.nativeSongPlay(!playing)
     }
 
-    private fun stop() {
+    fun stop() {
         NativeEngine.nativeSongPlay(false)
         NativeEngine.nativeSongSeek(0.0)
     }
 
-    private fun prev() {
+    fun prev() {
         val pos = NativeEngine.nativeSongState()[0]
         if (loaded && pos > 3.0 || playlist.isEmpty()) {
             NativeEngine.nativeSongSeek(0.0)
@@ -347,7 +353,7 @@ class PlayerPanel(private val a: MainActivity) {
         playIndex(if (current <= 0) playlist.size - 1 else current - 1)
     }
 
-    private fun next(manual: Boolean) {
+    fun next(manual: Boolean) {
         if (playlist.isEmpty()) return
         val n = current + 1
         if (n >= playlist.size) {

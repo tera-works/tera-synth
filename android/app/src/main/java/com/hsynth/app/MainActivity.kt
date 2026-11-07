@@ -35,6 +35,11 @@ object AppServices {
 }
 
 class MainActivity : Activity() {
+    companion object {
+        /** The running activity (PlaybackService controls the player through it). */
+        @Volatile var instance: MainActivity? = null
+            private set
+    }
     val loader get() = AppServices.loader   // file I/O, sample decoding (process-wide)
     val ui = Handler(Looper.getMainLooper())
     lateinit var library: Library
@@ -65,9 +70,15 @@ class MainActivity : Activity() {
         private set
     private val presetListeners = mutableListOf<() -> Unit>()
     private var audioRunning = false
+    /** Between onStart and onStop. */
+    var visible = false
+        private set
+    private var pausedSince = 0L   // background, song paused: when (stops the audio after a while)
+    val isPlayerReady get() = ::player.isInitialized
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instance = this
         // phones are played in landscape only; tablets (600 dp and wider) may rotate
         if (resources.configuration.smallestScreenWidthDp < 600)
             requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -224,12 +235,50 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        startAudio()
-        midi.start()
+        visible = true
+        if (!audioRunning) {  // still running when a song played in the background
+            startAudio()
+            midi.start()
+        }
     }
 
     override fun onStop() {
         super.onStop()
+        visible = false
+        pausedSince = 0L
+        // a song is playing: keep going in the background (PlaybackService holds the process)
+        if (PlaybackService.running && player.isPlaying) {
+            play.keyboard.allNotesOff()
+            return
+        }
+        stopAudio()
+    }
+
+    /** From the notification's Close: stop the song, the audio and the service. */
+    fun stopBackgroundPlayback() {
+        PlaybackService.stop(this)
+        if (!visible && audioRunning) stopAudio()
+    }
+
+    /** Starts / stops PlaybackService as songs play (stats tick, every 250 ms). */
+    private fun updateBackgroundPlayback() {
+        if (!isPlayerReady) return
+        val playing = player.isPlaying
+        if (playing) {
+            pausedSince = 0L
+            // a foreground service may only be started while the app is visible
+            if (!PlaybackService.running && visible) runCatching { PlaybackService.start(this) }
+            return
+        }
+        if (!PlaybackService.running) return
+        if (visible) { PlaybackService.stop(this); return }
+        // paused in the background: keep the notification (to resume) for 10 minutes
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (pausedSince == 0L) pausedSince = now
+        else if (now - pausedSince > 10 * 60_000L) stopBackgroundPlayback()
+    }
+
+    private fun stopAudio() {
         if (NativeEngine.nativeRecordSeconds() >= 0) {
             val sec = NativeEngine.nativeRecordStop()
             log("recording saved (%.1f s): %s".format(sec, lastRecording))
@@ -465,12 +514,16 @@ class MainActivity : Activity() {
                 }
             }
             NativeEngine.nativeCollectGarbage()
+            updateBackgroundPlayback()
             ui.postDelayed(this, 250)
         }
     }
 
     override fun onDestroy() {
         ui.removeCallbacks(statsTick)
+        if (instance === this) instance = null
+        PlaybackService.stop(this)
+        if (audioRunning) stopAudio()
         super.onDestroy()
     }
 }

@@ -634,6 +634,31 @@ void Engine::partEvent(int part, const Event& e) {
                 case 64: partEvent(part, Event::control(EventType::Sustain, e.value)); break;
                 case 91: ps.ccRev = clampf(e.value, 0.0f, 1.0f); break;
                 case 93: ps.ccCho = clampf(e.value, 0.0f, 1.0f); break;
+                // RPN 0 = pitch bend sensitivity (CC101/100 select, CC6 semitones, CC38 cents)
+                case 101: ps.rpnMsb = (uint8_t)std::lround(clampf(e.value, 0.0f, 1.0f) * 127.0f); break;
+                case 100: ps.rpnLsb = (uint8_t)std::lround(clampf(e.value, 0.0f, 1.0f) * 127.0f); break;
+                case 98: case 99: ps.rpnMsb = ps.rpnLsb = 127; break;  // an NRPN deselects the RPN
+                case 6:
+                case 38:
+                    if (ps.rpnMsb == 0 && ps.rpnLsb == 0) {
+                        const float v = std::round(clampf(e.value, 0.0f, 1.0f) * 127.0f);
+                        ps.knobBend = ps.p[P::BendRange];  // the knob's value now; moving it later wins
+                        const float cur = ps.rpnBend >= 0.0f ? ps.rpnBend : ps.p[P::BendRange];
+                        // CC6 sets the semitones (and clears the cents), CC38 the cents
+                        ps.rpnBend = e.controller == 6 ? std::min(v, 48.0f)
+                                                       : std::floor(cur) + std::min(v, 99.0f) / 100.0f;
+                    }
+                    break;
+                case 121:  // reset all controllers (RP-015: not volume, pan, sends or RPN values)
+                    ps.pitchBend = 0.0f;
+                    ps.ctx.modWheel = 0.0f;
+                    ps.ctx.chanPressure = 0.0f;
+                    ps.ctx.expression = 1.0f;
+                    if (multiActive_) ps.ccExpr = 1.0f;
+                    if (ps.sustain) { ps.sustain = false; releaseSustained(part); }
+                    ps.pedal = 0.0f;
+                    ps.rpnMsb = ps.rpnLsb = 127;
+                    break;
                 case 120: arpStop(part); seqStop(part); ps.stackSize = 0; for (auto& v : voices_) if (v.part == part) v.hardStop(); break;
                 case 123: arpStop(part); seqStop(part); ps.stackSize = 0; for (auto& v : voices_) if (v.active() && v.part == part) v.release(); break;
                 default: break;
@@ -869,6 +894,72 @@ void Engine::songNotesOff() {
         ps.pedal = 0.0f;
         ps.ccRev = 0.0f;
         ps.ccCho = 0.0f;
+        ps.rpnBend = -1.0f;
+        ps.rpnMsb = ps.rpnLsb = 127;
+    }
+}
+
+void Engine::songChase() {
+    // the latest value of every controller / bend / pressure before songIdx_,
+    // so volumes, pans and bends are right after a jump or a pause
+    static constexpr int kSlots = 131;  // 128 CCs, bend, channel pressure, (spare)
+    bool seen[16][kSlots] = {};
+    for (size_t i = songIdx_; i-- > 0;) {
+        const Event& ev = song_->events[i].event;
+        int slot = -1;
+        if (ev.type == EventType::Controller) slot = ev.controller & 127;
+        else if (ev.type == EventType::PitchBend) slot = 128;
+        else if (ev.type == EventType::ChannelPressure) slot = 129;
+        else if (ev.type == EventType::ModWheel) slot = 1;
+        else if (ev.type == EventType::Sustain) slot = 64;
+        const int ch = ev.channel & 15;
+        if (slot == 121) {  // a reset: what came before it on these controllers no longer counts
+            for (int s : {1, 11, 64, 128, 129}) seen[ch][s] = true;
+            continue;
+        }
+        // RPN / NRPN messages only mean something in order (below); 120-127 are commands
+        if (slot < 0 || slot == 6 || slot == 38 || (slot >= 98 && slot <= 101) || slot >= 120 && slot < 128) continue;
+        if (seen[ch][slot]) continue;
+        seen[ch][slot] = true;
+        if (slot != 64) handleEvent(ev);  // no sustain: nothing is held after a jump
+    }
+    // bend ranges: replay the RPN selection in order
+    int msb[16], lsb[16];
+    float range[16];
+    for (int c = 0; c < 16; ++c) { msb[c] = lsb[c] = 127; range[c] = -1.0f; }
+    for (size_t i = 0; i < songIdx_; ++i) {
+        const Event& ev = song_->events[i].event;
+        if (ev.type != EventType::Controller) continue;
+        const int ch = ev.channel & 15;
+        const int v = (int)std::lround(clampf(ev.value, 0.0f, 1.0f) * 127.0f);
+        switch (ev.controller) {
+            case 101: msb[ch] = v; break;
+            case 100: lsb[ch] = v; break;
+            case 98: case 99: case 121: msb[ch] = lsb[ch] = 127; break;
+            case 6: if (msb[ch] == 0 && lsb[ch] == 0) range[ch] = (float)std::min(v, 48); break;
+            case 38:
+                if (msb[ch] == 0 && lsb[ch] == 0) range[ch] = std::floor(std::max(range[ch], 2.0f)) + std::min(v, 99) / 100.0f;
+                break;
+            default: break;
+        }
+    }
+    auto cc = [&](int c, int num, float v) {
+        Event e = Event::control(EventType::Controller, v / 127.0f, num);
+        e.channel = (uint8_t)c;
+        handleEvent(e);
+    };
+    for (int c = 0; c < 16; ++c) {
+        if (range[c] >= 0.0f) {
+            const float semis = std::floor(range[c]);
+            cc(c, 101, 0);
+            cc(c, 100, 0);
+            cc(c, 6, semis);
+            cc(c, 38, std::round((range[c] - semis) * 100.0f));
+        }
+        if (range[c] >= 0.0f || msb[c] != 127 || lsb[c] != 127) {  // the selection the song left
+            cc(c, 101, (float)msb[c]);
+            cc(c, 100, (float)lsb[c]);
+        }
     }
 }
 
@@ -906,26 +997,11 @@ void Engine::songUpdate() {
                                              [](const SongEvent& a, double v) { return a.time < v; }) -
                             song_->events.begin());
         statSongPos_.store(t, std::memory_order_relaxed);
-        // chase: the latest value of every controller / bend / pressure before the
-        // new position, so volumes and pans are right after a jump
-        static constexpr int kSlots = 131;  // 128 CCs, bend, channel pressure, (spare)
-        bool seen[16][kSlots] = {};
-        for (size_t i = songIdx_; i-- > 0;) {
-            const Event& ev = song_->events[i].event;
-            int slot = -1;
-            if (ev.type == EventType::Controller) slot = ev.controller & 127;
-            else if (ev.type == EventType::PitchBend) slot = 128;
-            else if (ev.type == EventType::ChannelPressure) slot = 129;
-            else if (ev.type == EventType::ModWheel) slot = 1;
-            else if (ev.type == EventType::Sustain) slot = 64;
-            if (slot < 0 || slot == 120 || slot == 121 || (slot >= 123 && slot < 128)) continue;
-            const int ch = ev.channel & 15;
-            if (seen[ch][slot]) continue;
-            seen[ch][slot] = true;
-            if (slot != 64) handleEvent(ev);  // no sustain: nothing is held after a jump
-        }
+        songChase();
     }
     const bool play = songPlay_.load(std::memory_order_relaxed);
+    // resuming in the middle: stopping reset the controllers (songNotesOff)
+    if (play && !songWasPlaying_ && seek < 0 && songIdx_ > 0) songChase();
     if (songWasPlaying_ && !play) songNotesOff();
     songWasPlaying_ = play;
 }
@@ -1568,7 +1644,11 @@ void Engine::process(float* L, float* R, int n) {
         ps.ctx.quality = quality_.load(std::memory_order_relaxed);
         ps.ctx.masterTune = p_[P::MasterTune] * 0.01f;
         ps.ctx.pitchBendNorm = ps.pitchBend;
-        ps.ctx.pitchBendSemis = ps.pitchBend * ps.p[P::BendRange];
+        if (ps.p[P::BendRange] != ps.knobBend) {  // the user moved the knob (or a preset loaded)
+            ps.knobBend = ps.p[P::BendRange];
+            ps.rpnBend = -1.0f;
+        }
+        ps.ctx.pitchBendSemis = ps.pitchBend * (ps.rpnBend >= 0.0f ? ps.rpnBend : ps.p[P::BendRange]);
         ps.ctx.pedal = ps.pedal;
     }
     VoiceContext& ctx0 = parts_[0].ctx;

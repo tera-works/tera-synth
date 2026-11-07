@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// Shared engine state for the views.
@@ -12,6 +13,9 @@ final class SynthModel: ObservableObject {
     @Published var lcdOverride: String? = nil
     private var timer: Timer?
     private var lcdClear: DispatchWorkItem?
+    private var audioOn = false
+    private var background = false
+    private var idleSince: Date?
 
     init() {
         let factory = Bundle.main.resourcePath ?? ""
@@ -22,6 +26,19 @@ final class SynthModel: ObservableObject {
             guard let self else { return }
             self.voices = Int(self.engine.activeVoices)
             self.cpu = self.engine.cpuLoad
+            self.checkBackgroundIdle()
+        }
+        player.ensureAudio = { [weak self] in self?.start() }
+        // a phone call or another app took the audio: pause the song, restart the audio afterwards
+        NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            if type == .began {
+                self.engine.songPlay(false)
+            } else if !self.background || self.audioOn {
+                self.engine.stopAudio()
+                self.audioOn = self.engine.startAudio()
+            }
         }
         let last = UserDefaults.standard.integer(forKey: "lastPreset")
         load(preset: engine.presetNames.indices.contains(last) ? last : 0)
@@ -30,14 +47,39 @@ final class SynthModel: ObservableObject {
     private var autotestStarted = false
 
     func start() {
-        _ = engine.startAudio()
+        if !audioOn { audioOn = engine.startAudio() }
         if (Self.autotestRequested || Self.libtestRequested) && !autotestStarted {
             autotestStarted = true
             if Self.libtestRequested { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.runLibtest() } }
             if Self.autotestRequested { runAutotest() }
         }
     }
-    func stop() { engine.stopAudio() }
+    func stop() {
+        engine.stopAudio()
+        audioOn = false
+    }
+
+    /// Scene phase: a playing song keeps going in the background (UIBackgroundModes audio);
+    /// otherwise the audio stops as before.
+    func enterBackground() {
+        background = true
+        player.background = true
+        idleSince = nil
+        if !engine.songPlaying { stop() }
+    }
+    func enterForeground() {
+        background = false
+        player.background = false
+        start()
+    }
+
+    /// Paused in the background for 10 minutes: stop the audio (iOS then suspends the app).
+    private func checkBackgroundIdle() {
+        guard background, audioOn else { return }
+        if engine.songPlaying { idleSince = nil; return }
+        if idleSince == nil { idleSince = Date() }
+        else if Date().timeIntervalSince(idleSince!) > 600 { stop() }
+    }
 
     func load(preset i: Int) {
         engine.songPlay(false)  // a preset replaces the song's sounds
@@ -78,7 +120,7 @@ struct HSynthApp: App {
                 .persistentSystemOverlays(.hidden)
         }
         .onChange(of: phase) { p in
-            if p == .active { model.start() } else if p == .background { model.stop() }
+            if p == .active { model.enterForeground() } else if p == .background { model.enterBackground() }
         }
     }
 }

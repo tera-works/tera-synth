@@ -338,3 +338,34 @@ TEST(engine_wavetable_layer) {
     for (size_t i = 4800; i < 40000; ++i) diff += std::fabs(L[i] - R[i]);
     CHECK(diff > 1.0);
 }
+
+// RPN 0 (pitch bend sensitivity) from MIDI overrides master.bendrange until the knob moves
+TEST(engine_rpn_bend_range) {
+    Engine e;
+    e.prepare(48000);
+    sineVoice(e);
+    e.setParam(P::BendRange, 2);
+    auto cc = [](int n, int v) { return Event::control(EventType::Controller, v / 127.0f, n); };
+    RenderJob job;
+    job.seconds = 1.0;
+    job.events.push_back({0.0, cc(101, 0)});
+    job.events.push_back({0.0, cc(100, 0)});
+    job.events.push_back({0.0, cc(6, 12)});
+    job.events.push_back({0.0, cc(38, 0)});
+    job.events.push_back({0.0, cc(101, 127)});
+    job.events.push_back({0.0, cc(100, 127)});
+    job.events.push_back({0.0, cc(6, 1)});  // no RPN selected: ignored
+    job.events.push_back({0.0, Event::control(EventType::PitchBend, 8191.0f / 8192.0f)});
+    job.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});  // A3 + 12 st = 440
+    std::vector<float> L, R;
+    renderOffline(e, job, L, R);
+    CHECK_NEAR(zeroCrossFreq(L, 48000, 9600, 40000), 440.0, 1.0);
+    // moving the knob takes the bend range back
+    e.setParam(P::BendRange, 7);
+    RenderJob job2;
+    job2.seconds = 1.0;
+    job2.events.push_back({0.0, Event::control(EventType::PitchBend, -1.0f)});
+    job2.events.push_back({0.0, Event::noteOn(2, 76, 1.0f)});  // E5 - 7 st = A4
+    renderOffline(e, job2, L, R);
+    CHECK_NEAR(zeroCrossFreq(L, 48000, 9600, 40000), 440.0, 1.0);
+}
