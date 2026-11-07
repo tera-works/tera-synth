@@ -2,12 +2,25 @@ import MediaPlayer
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// MIDI file player state: playlist (Documents/midi), transport, repeat, meters.
+/// A named song list (file names in Documents/midi, in play order).
+struct Playlist: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var songs: [String]
+}
+
+/// MIDI file player state: song lists (all of Documents/midi, or a playlist), transport, repeat, meters.
 final class PlayerModel: ObservableObject {
     enum Repeat: String { case off = "Repeat: off", all = "Repeat: all", one = "Repeat: one" }
 
     let engine: HSynthEngine
+    /// The songs that play, in order: the active playlist, or every song.
     @Published var files: [URL] = []
+    @Published var allFiles: [URL] = []
+    @Published var playlists: [Playlist] = []
+    @Published var activeList: UUID? = nil
+    /// Channel volumes set by hand (nil = as the song sets it); kept from song to song.
+    @Published var volume = [Float?](repeating: nil, count: 16)
     @Published var current = -1
     @Published var position = 0.0
     @Published var length = 0.0
@@ -35,6 +48,7 @@ final class PlayerModel: ObservableObject {
 
     init(engine: HSynthEngine) {
         self.engine = engine
+        loadLists()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
         setupRemoteCommands()
@@ -91,9 +105,106 @@ final class PlayerModel: ObservableObject {
         let fm = FileManager.default
         let items = (try? fm.contentsOfDirectory(at: midiDir, includingPropertiesForKeys: nil)) ?? []
         let cur = files.indices.contains(current) ? files[current] : nil
-        files = items.filter { ["mid", "midi"].contains($0.pathExtension.lowercased()) }
+        allFiles = items.filter { ["mid", "midi"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        if let list = activePlaylist {
+            files = list.songs.compactMap { name in allFiles.first { $0.lastPathComponent == name } }
+        } else {
+            files = allFiles
+        }
         current = cur.flatMap { files.firstIndex(of: $0) } ?? -1
+    }
+
+    // ------------------------------------------------------------ playlists
+
+    var activePlaylist: Playlist? { playlists.first { $0.id == activeList } }
+
+    private var listsURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("playlists.json")
+    }
+
+    private struct ListsFile: Codable {
+        var active: UUID?
+        var lists: [Playlist]
+    }
+
+    private func loadLists() {
+        guard let data = try? Data(contentsOf: listsURL),
+              let f = try? JSONDecoder().decode(ListsFile.self, from: data) else { return }
+        playlists = f.lists
+        activeList = f.lists.contains { $0.id == f.active } ? f.active : nil
+    }
+
+    private func saveLists() {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted]
+        if let data = try? enc.encode(ListsFile(active: activeList, lists: playlists)) {
+            try? data.write(to: listsURL, options: .atomic)
+        }
+    }
+
+    /// Plays from this list from now on (nil = every song).
+    func selectList(_ id: UUID?) {
+        activeList = id
+        refresh()
+        saveLists()
+    }
+
+    func newList(_ name: String) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        let list = Playlist(name: n.isEmpty ? "Playlist \(playlists.count + 1)" : n, songs: [])
+        playlists.append(list)
+        selectList(list.id)
+    }
+
+    func renameList(_ id: UUID, _ name: String) {
+        guard let i = playlists.firstIndex(where: { $0.id == id }) else { return }
+        let n = name.trimmingCharacters(in: .whitespaces)
+        if !n.isEmpty { playlists[i].name = n }
+        saveLists()
+    }
+
+    func deleteList(_ id: UUID) {
+        playlists.removeAll { $0.id == id }
+        selectList(activeList == id ? nil : activeList)
+    }
+
+    func addSongs(_ names: [String], to id: UUID) {
+        guard let i = playlists.firstIndex(where: { $0.id == id }) else { return }
+        playlists[i].songs.append(contentsOf: names)
+        refresh()
+        saveLists()
+    }
+
+    /// Removes the song at a position of the playlist (positions as in `files`).
+    func removeSong(at pos: Int, from id: UUID) {
+        guard let i = playlists.firstIndex(where: { $0.id == id }), files.indices.contains(pos) else { return }
+        guard let k = songIndex(in: playlists[i], ofFile: pos) else { return }
+        playlists[i].songs.remove(at: k)
+        if current == pos { current = -1 } else if current > pos { current -= 1 }
+        refresh()
+        saveLists()
+    }
+
+    /// Moves the song at a position one place up (-1) or down (+1).
+    func moveSong(at pos: Int, by d: Int, in id: UUID) {
+        guard let i = playlists.firstIndex(where: { $0.id == id }), files.indices.contains(pos),
+              files.indices.contains(pos + d), let a = songIndex(in: playlists[i], ofFile: pos),
+              let b = songIndex(in: playlists[i], ofFile: pos + d) else { return }
+        playlists[i].songs.swapAt(a, b)
+        if current == pos { current = pos + d } else if current == pos + d { current = pos }
+        refresh()
+        saveLists()
+    }
+
+    /// Index in list.songs of the n-th song that exists (songs whose file is gone are skipped in `files`).
+    private func songIndex(in list: Playlist, ofFile n: Int) -> Int? {
+        var seen = -1
+        for (k, name) in list.songs.enumerated() where allFiles.contains(where: { $0.lastPathComponent == name }) {
+            seen += 1
+            if seen == n { return k }
+        }
+        return nil
     }
 
     /// Copies chosen files into Documents/midi (kept on this device only).
@@ -150,9 +261,18 @@ final class PlayerModel: ObservableObject {
         message = repeatMode.rawValue
     }
 
+    /// Mute / solo, and the channel volumes set by hand (a new song resets the mixer).
     func applyMutes() {
         let anySolo = solo.contains(true)
-        for k in 0..<16 { engine.setPartMix(Int32(k), id: 2, value: mute[k] || (anySolo && !solo[k]) ? 1 : 0) }
+        for k in 0..<16 {
+            engine.setPartMix(Int32(k), id: 2, value: mute[k] || (anySolo && !solo[k]) ? 1 : 0)
+            if let v = volume[k] { engine.setPartMix(Int32(k), id: 0, value: v) }
+        }
+    }
+
+    func setVolume(_ k: Int, _ v: Float) {
+        volume[k] = v
+        engine.setPartMix(Int32(k), id: 0, value: v)
     }
 
     private func tick() {
@@ -184,6 +304,12 @@ struct PlayerScreen: View {
     @ObservedObject var player: PlayerModel
     @State private var showPlaylist = false
     @State private var importing = false
+    @State private var editingList = false
+    @State private var adding = false
+    @State private var naming = false
+    @State private var renaming = false
+    @State private var deleting = false
+    @State private var listName = ""
 
     private func fmt(_ s: Double) -> String { String(format: "%d:%02d", Int(max(0, s)) / 60, Int(max(0, s)) % 60) }
 
@@ -230,6 +356,7 @@ struct PlayerScreen: View {
                 HwButton(title: "Reset Mix") {
                     player.mute = Array(repeating: false, count: 16)
                     player.solo = Array(repeating: false, count: 16)
+                    player.volume = Array(repeating: nil, count: 16)
                     for k in 0..<16 { model.engine.setPartMix(Int32(k), id: 0, value: 1) }
                     player.applyMutes()
                 }
@@ -240,33 +367,119 @@ struct PlayerScreen: View {
         }
         .padding(8)
         .onAppear { player.refresh() }
+        .sheet(isPresented: $adding) {
+            if let list = player.activePlaylist {
+                AddSongsSheet(player: player, list: list)
+            }
+        }
+        .alert("New playlist", isPresented: $naming) {
+            TextField("Name", text: $listName)
+            Button("Create") { player.newList(listName) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Rename playlist", isPresented: $renaming) {
+            TextField("Name", text: $listName)
+            Button("Rename") { if let id = player.activeList { player.renameList(id, listName) } }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Delete this playlist?", isPresented: $deleting) {
+            Button("Delete", role: .destructive) {
+                if let id = player.activeList { player.deleteList(id) }
+                editingList = false
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("曲のファイルは消えません。プレイリストだけを削除します。")
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: [UTType.midi, UTType(filenameExtension: "mid") ?? .data],
                       allowsMultipleSelection: true) { result in
             if case let .success(urls) = result { player.importFiles(urls) }
         }
     }
 
+    /// Song lists on the left (every song, then the playlists), the songs of the active one on the right.
     private var playlist: some View {
-        ScrollView {
-            if player.files.isEmpty {
-                Text("No songs yet.\nAdd .mid files with \"Open Songs\", or copy them into HSynth/midi with the Files app or Finder.")
-                    .font(.system(size: 13)).foregroundColor(Hw.engrave).padding()
-            }
-            LazyVStack(spacing: 4) {
-                ForEach(player.files.indices, id: \.self) { i in
-                    Button { player.play(index: i) } label: {
-                        HStack {
-                            Text(String(format: "%3d", i + 1)).font(.system(size: 13, design: .monospaced)).foregroundColor(Hw.engrave)
-                            Text(player.files[i].deletingPathExtension().lastPathComponent)
-                                .font(.system(size: 15, weight: i == player.current ? .bold : .regular))
-                                .foregroundColor(i == player.current ? Hw.lcdFg : .white)
-                            Spacer()
-                        }
-                        .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 3).fill(i == player.current ? Hw.lcdBg : Hw.key))
+        HStack(alignment: .top, spacing: 8) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    listButton("All Songs", count: player.allFiles.count, active: player.activeList == nil) {
+                        editingList = false
+                        player.selectList(nil)
                     }
-                    .buttonStyle(.plain)
+                    ForEach(player.playlists) { list in
+                        listButton(list.name, count: list.songs.count, active: player.activeList == list.id) {
+                            editingList = false
+                            player.selectList(list.id)
+                        }
+                    }
+                    HwButton(title: "+ New Playlist") {
+                        listName = ""
+                        naming = true
+                    }
                 }
+            }
+            .frame(width: 210)
+            VStack(spacing: 6) {
+                if player.activePlaylist != nil {
+                    HStack(spacing: 6) {
+                        HwButton(title: "Add Songs…") { adding = true }
+                        HwButton(title: "Edit", lit: editingList) { editingList.toggle() }
+                        HwButton(title: "Rename") {
+                            listName = player.activePlaylist?.name ?? ""
+                            renaming = true
+                        }
+                        HwButton(title: "Delete") { deleting = true }
+                        Spacer()
+                    }
+                }
+                ScrollView {
+                    if player.files.isEmpty {
+                        Text(player.activePlaylist == nil
+                             ? "No songs yet.\nAdd .mid files with \"Open Songs\", or copy them into HSynth/midi with the Files app or Finder."
+                             : "このプレイリストには曲がありません。「Add Songs…」で追加してください。")
+                            .font(.system(size: 13)).foregroundColor(Hw.engrave).padding()
+                    }
+                    LazyVStack(spacing: 4) {
+                        ForEach(player.files.indices, id: \.self) { i in songRow(i) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func listButton(_ name: String, count: Int, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Circle().fill(active ? Hw.led : Hw.ledOff).frame(width: 7, height: 7)
+                Text(name).font(.system(size: 14, weight: .semibold)).foregroundColor(active ? Hw.lcdFg : .white).lineLimit(1)
+                Spacer()
+                Text("\(count)").font(.system(size: 12, design: .monospaced)).foregroundColor(Hw.engrave)
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 3).fill(active ? Hw.lcdBg : Hw.key))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func songRow(_ i: Int) -> some View {
+        HStack(spacing: 6) {
+            Button { player.play(index: i) } label: {
+                HStack {
+                    Text(String(format: "%3d", i + 1)).font(.system(size: 13, design: .monospaced)).foregroundColor(Hw.engrave)
+                    Text(player.files[i].deletingPathExtension().lastPathComponent)
+                        .font(.system(size: 15, weight: i == player.current ? .bold : .regular))
+                        .foregroundColor(i == player.current ? Hw.lcdFg : .white)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 3).fill(i == player.current ? Hw.lcdBg : Hw.key))
+            }
+            .buttonStyle(.plain)
+            if editingList, let id = player.activeList {
+                HwButton(title: "▲") { player.moveSong(at: i, by: -1, in: id) }.opacity(i > 0 ? 1 : 0.3)
+                HwButton(title: "▼") { player.moveSong(at: i, by: 1, in: id) }.opacity(i < player.files.count - 1 ? 1 : 0.3)
+                HwButton(title: "✕") { player.removeSong(at: i, from: id) }
             }
         }
     }
@@ -276,7 +489,7 @@ struct PlayerScreen: View {
         return ScrollView {
             VStack(spacing: 2) {
                 HStack(spacing: 6) {
-                    ForEach([("", 26), ("CH", 26), ("Sound / GM", 170), ("Level", 70), ("Vol", 54), ("Solo", 40)], id: \.0) { t, w in
+                    ForEach([("", 26), ("CH", 26), ("Sound / GM", 170), ("Level", 70), ("Vol", 130), ("Solo", 40)], id: \.0) { t, w in
                         Text(t.uppercased()).font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave).frame(width: CGFloat(w), alignment: .leading)
                     }
                     Text("KEYBOARD").font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave)
@@ -297,8 +510,14 @@ struct PlayerScreen: View {
                         }
                         .frame(width: 170, alignment: .leading)
                         meterBar(player.meters[k * 9]).frame(width: 70, height: 8)
-                        Text("\(Int(e.partMix(Int32(k), id: 0) * 100))").font(.system(size: 12, design: .monospaced)).foregroundColor(Hw.lcdFg)
-                            .frame(width: 54)
+                        HStack(spacing: 4) {
+                            Slider(value: Binding(get: { Double(player.volume[k] ?? e.partMix(Int32(k), id: 0)) },
+                                                  set: { player.setVolume(k, Float($0)) }), in: 0...1)
+                                .tint(Hw.led)
+                            Text("\(Int((player.volume[k] ?? e.partMix(Int32(k), id: 0)) * 100))")
+                                .font(.system(size: 12, design: .monospaced)).foregroundColor(Hw.lcdFg).frame(width: 30)
+                        }
+                        .frame(width: 130)
                         Button { player.solo[k].toggle(); player.applyMutes() } label: {
                             Text("S").font(.system(size: 12, weight: .bold)).foregroundColor(player.solo[k] ? .black : .white)
                                 .frame(width: 32, height: 24).background(RoundedRectangle(cornerRadius: 3).fill(player.solo[k] ? Hw.led : Hw.key))
@@ -345,5 +564,54 @@ struct MiniKeys: View {
                 } else { wi += 1 }
             }
         }
+    }
+}
+
+/// Picks songs to append to a playlist (a song may be added more than once).
+struct AddSongsSheet: View {
+    @ObservedObject var player: PlayerModel
+    let list: Playlist
+    @Environment(\.dismiss) private var dismiss
+    @State private var picked: [String] = []
+    @State private var search = ""
+
+    var body: some View {
+        let names = player.allFiles.map { $0.lastPathComponent }
+            .filter { search.isEmpty || $0.localizedCaseInsensitiveContains(search) }
+        VStack(spacing: 8) {
+            HStack {
+                Text("Add to \(list.name)").font(.system(size: 16, weight: .bold)).foregroundColor(.white)
+                Spacer()
+                HwButton(title: "Cancel") { dismiss() }
+                HwButton(title: "Add \(picked.count)", lit: !picked.isEmpty) {
+                    player.addSongs(picked, to: list.id)
+                    dismiss()
+                }
+            }
+            TextField("Search", text: $search)
+                .textFieldStyle(.plain).font(.system(size: 15, design: .monospaced)).foregroundColor(Hw.lcdFg)
+                .padding(8).background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
+            Text("タップした順に追加されます。もう一度タップすると外れます。")
+                .font(.system(size: 11)).foregroundColor(Hw.engrave).frame(maxWidth: .infinity, alignment: .leading)
+            List(names, id: \.self) { n in
+                Button {
+                    if let i = picked.firstIndex(of: n) { picked.remove(at: i) } else { picked.append(n) }
+                } label: {
+                    HStack {
+                        Text((n as NSString).deletingPathExtension).foregroundColor(.white)
+                        Spacer()
+                        if let i = picked.firstIndex(of: n) {
+                            Text("\(i + 1)").font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(Hw.led)
+                        } else if list.songs.contains(n) {
+                            Text("in list").font(.system(size: 11)).foregroundColor(Hw.engrave)
+                        }
+                    }
+                }
+                .listRowBackground(Hw.panel)
+            }
+            .listStyle(.plain)
+        }
+        .padding(12)
+        .background(Hw.chassis.ignoresSafeArea())
     }
 }

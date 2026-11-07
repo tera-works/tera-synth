@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hsynth/engine.h"
@@ -64,6 +65,13 @@ public:
     bool recording() const { return recording_.load(); }
     double recordedSeconds() const;
 
+    // Recording straight to a WAV file (32-bit float stereo), any length: the
+    // audio thread fills a ring, a writer thread appends it to the file.
+    bool startFileRecording(const std::string& path, std::string& error);
+    double stopFileRecording();  // seconds written (the header is completed)
+    bool fileRecording() const { return fileRec_.load(); }
+    double fileRecordSeconds() const;
+
     void audioCallback(float* out, const float* in, uint32_t frames, uint32_t channels, uint32_t inChannels);
 
 private:
@@ -85,6 +93,14 @@ private:
     std::vector<float> recBuf_;
     std::atomic<size_t> recPos_{0};
     std::atomic<bool> recording_{false};
+    // file recording
+    void fileWriter();
+    std::vector<float> fileRing_;              // interleaved stereo, power of two
+    std::atomic<size_t> ringWrite_{0}, ringRead_{0};
+    std::atomic<bool> fileRec_{false}, fileQuit_{false};
+    std::atomic<uint64_t> fileFrames_{0};
+    std::thread fileThread_;
+    void* fileHandle_ = nullptr;               // FILE*
     std::atomic<bool> muted_{false};
 
     std::atomic<float> cbUsAvg_{0}, cbUsMax_{0}, cbLoadMax_{0};

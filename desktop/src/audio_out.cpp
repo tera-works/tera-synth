@@ -1,10 +1,12 @@
 #include "audio_out.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <thread>
 
+#include "hsynth/fileio.h"
 #include "miniaudio.h"
 
 struct AudioOut::Impl {
@@ -34,6 +36,7 @@ AudioOut::AudioOut(hsynth::Engine& engine) : impl_(std::make_unique<Impl>()), en
 }
 
 AudioOut::~AudioOut() {
+    stopFileRecording();  // joins the writer thread, completes the file
     stop();
     if (impl_->contextOk) ma_context_uninit(&impl_->context);
 }
@@ -174,6 +177,18 @@ void AudioOut::audioCallback(float* out, const float* in, uint32_t frames, uint3
                 recBuf_[rp++] = right_[i];
             }
         }
+        if (fileRec_.load(std::memory_order_acquire)) {
+            // ring full (the writer fell behind): the frames are dropped, never waited for
+            const size_t cap = fileRing_.size();
+            size_t w = ringWrite_.load(std::memory_order_relaxed);
+            const size_t r = ringRead_.load(std::memory_order_acquire);
+            for (int i = 0; i < n && w - r + 2 <= cap; ++i) {
+                fileRing_[w & (cap - 1)] = left_[i];
+                fileRing_[(w + 1) & (cap - 1)] = right_[i];
+                w += 2;
+            }
+            ringWrite_.store(w, std::memory_order_release);
+        }
         done += (uint32_t)n;
     }
     scopePos_.store(sp, std::memory_order_release);
@@ -247,3 +262,93 @@ size_t AudioOut::stopRecording(std::vector<float>& out) {
 }
 
 double AudioOut::recordedSeconds() const { return (double)recPos_.load() / 2.0 / (double)sampleRate_; }
+
+namespace {
+void put32(FILE* f, uint32_t v) {
+    const uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+    std::fwrite(b, 1, 4, f);
+}
+void put16(FILE* f, uint16_t v) {
+    const uint8_t b[2] = {(uint8_t)v, (uint8_t)(v >> 8)};
+    std::fwrite(b, 1, 2, f);
+}
+// 32-bit float stereo WAV header; sizes are filled in when the recording stops
+void wavHeader(FILE* f, int rate, uint64_t frames) {
+    const uint64_t data = frames * 8;
+    const uint32_t d32 = data > 0xFFFFFFF0ull ? 0xFFFFFFF0u : (uint32_t)data;
+    std::fwrite("RIFF", 1, 4, f);
+    put32(f, 36 + d32);
+    std::fwrite("WAVEfmt ", 1, 8, f);
+    put32(f, 16);
+    put16(f, 3);  // IEEE float
+    put16(f, 2);
+    put32(f, (uint32_t)rate);
+    put32(f, (uint32_t)rate * 8);
+    put16(f, 8);
+    put16(f, 32);
+    std::fwrite("data", 1, 4, f);
+    put32(f, d32);
+}
+}  // namespace
+
+bool AudioOut::startFileRecording(const std::string& path, std::string& error) {
+    if (fileRec_.load()) return true;
+    FILE* f = hsynth::fopenUtf8(path, "wb");
+    if (!f) {
+        error = "cannot write " + path;
+        return false;
+    }
+    wavHeader(f, sampleRate_, 0);
+    size_t cap = 1;
+    while (cap < (size_t)sampleRate_ * 2 * 4) cap <<= 1;  // about 4 s of stereo
+    fileRing_.assign(cap, 0.0f);
+    ringWrite_.store(0);
+    ringRead_.store(0);
+    fileFrames_.store(0);
+    fileHandle_ = f;
+    fileQuit_.store(false);
+    fileThread_ = std::thread([this] { fileWriter(); });
+    fileRec_.store(true, std::memory_order_release);
+    return true;
+}
+
+void AudioOut::fileWriter() {
+    FILE* f = static_cast<FILE*>(fileHandle_);
+    const size_t cap = fileRing_.size();
+    std::vector<float> chunk;
+    for (;;) {
+        const bool quit = fileQuit_.load(std::memory_order_acquire);
+        const size_t w = ringWrite_.load(std::memory_order_acquire);
+        size_t r = ringRead_.load(std::memory_order_relaxed);
+        if (w > r) {
+            chunk.resize(w - r);
+            for (size_t i = 0; i < chunk.size(); ++i) chunk[i] = fileRing_[(r + i) & (cap - 1)];
+            std::fwrite(chunk.data(), sizeof(float), chunk.size(), f);
+            fileFrames_.fetch_add((w - r) / 2, std::memory_order_relaxed);
+            ringRead_.store(w, std::memory_order_release);
+        }
+        if (quit) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
+double AudioOut::stopFileRecording() {
+    if (!fileRec_.load()) return 0.0;
+    fileRec_.store(false, std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // a running callback finishes its block
+    fileQuit_.store(true, std::memory_order_release);
+    if (fileThread_.joinable()) fileThread_.join();
+    FILE* f = static_cast<FILE*>(fileHandle_);
+    fileHandle_ = nullptr;
+    const uint64_t frames = fileFrames_.load();
+    if (f) {
+        std::fseek(f, 0, SEEK_SET);
+        wavHeader(f, sampleRate_, frames);
+        std::fclose(f);
+    }
+    fileRing_.clear();
+    fileRing_.shrink_to_fit();
+    return (double)frames / (double)sampleRate_;
+}
+
+double AudioOut::fileRecordSeconds() const { return (double)fileFrames_.load() / (double)sampleRate_; }

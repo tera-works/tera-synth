@@ -115,7 +115,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setQuality:(int)quality;                         // 0 low, 1 normal, 2 high
 @property(nonatomic, readonly) BOOL audioInputOn;
 
-// recording (output after the effects, to Documents/recordings, at most 5 minutes)
+// recording (output after the effects, written to Documents/recordings while it runs, any length)
 - (void)startRecording;
 /// Seconds recorded so far, -1 when not recording.
 @property(nonatomic, readonly) double recordSeconds;
@@ -134,6 +134,18 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) NSArray<NSString*>* midiOutputs;
 @property(nonatomic, readonly) NSString* midiOutput;      // "" = off
 - (BOOL)openMidiOutput:(NSString*)name;                   // "" closes
+
+// arpeggiator / sequencer transport (Run), sequencer step of the edit part (-1 = stopped)
+@property(nonatomic) BOOL transportRunning;
+@property(nonatomic, readonly) int seqStep;
+/// FM algorithm for the diagram: [operators, carrier mask, feedback operator, modulator mask of op 1..8]
+- (NSArray<NSNumber*>*)fmAlgorithm:(int)index;
+
+// scenes (whole multis): the part names are kept in the file
+- (BOOL)saveScene:(NSString*)path name:(NSString*)name partNames:(NSArray<NSString*>*)names
+    NS_SWIFT_NAME(saveScene(_:name:partNames:));
+/// [scene name, part 1 name, ..., part 16 name] or nil
+- (nullable NSArray<NSString*>*)loadScene:(NSString*)path;
 
 @end
 

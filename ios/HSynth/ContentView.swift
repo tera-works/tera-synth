@@ -81,6 +81,7 @@ struct PlayScreen: View {
                             }
                         }
                     }
+                    ArpPanel()
                     Panel(title: "Keyboard") {
                         HStack {
                             stepper("Octave", value: "\((firstNote - 48) / 12)") {
@@ -172,6 +173,11 @@ struct EditScreen: View {
                                 if g == "Amp Env" { EnvGraph(prefix: "amp") }
                                 if g == "Mod Env" { EnvGraph(prefix: "env2") }
                                 if g == "Filter" { FilterGraph() }
+                                if g == "LFO" { LfoGraph() }
+                                if g == "Sequencer" { SeqEditor() }
+                                if g == "MSEG" { MsegEditor() }
+                                if g == "Layer A / FM" { FmAlgoView(layer: "a") }
+                                if g == "Mod Matrix" { ModMatrixSummary() }
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 8)], alignment: .leading, spacing: 8) {
                                     ForEach(ids, id: \.self) { ParamControl(param: $0) }
                                 }

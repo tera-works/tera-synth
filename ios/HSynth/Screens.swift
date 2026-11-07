@@ -255,6 +255,9 @@ struct MultiScreen: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
+            ScrollView(.horizontal, showsIndicators: false) {
+                SceneBar().padding(.horizontal, 8)
+            }
             ScrollView([.vertical, .horizontal]) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
@@ -400,7 +403,7 @@ struct SystemScreen: View {
                         Lcd(text: recSeconds >= 0 ? String(format: "REC %.1f s", recSeconds)
                                                   : (lastRecording.isEmpty ? "—" : lastRecording), size: 13)
                     }
-                    Text("出力（エフェクトのあと）を最大 5 分まで録音し、「ファイル」アプリの HSynth > recordings に WAV で保存します。")
+                    Text("出力（エフェクトのあと）を録音し、録りながら「ファイル」アプリの HSynth > recordings に WAV で保存します。長さの上限はありません。")
                         .font(.system(size: 11)).foregroundColor(Hw.engrave)
                 }
                 Panel(title: "Settings") {
@@ -471,6 +474,430 @@ struct SystemScreen: View {
             model.start()
             e.startRecording()
             recSeconds = 0
+        }
+    }
+}
+
+// ---------------------------------------------------------------- more editors
+
+/// LFO 1 waveform (two cycles) and its rate.
+struct LfoGraph: View {
+    @EnvironmentObject var model: SynthModel
+
+    var body: some View {
+        let e = model.engine
+        let waveId = e.paramId("lfo1.wave"), rateId = e.paramId("lfo1.rate")
+        TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+            Canvas { c, size in
+                guard waveId >= 0 else { return }
+                let wave = Int(e.paramValue(waveId).rounded())
+                let w = size.width, h = size.height
+                let sh: [Double] = [0.6, -0.3, 0.9, -0.8, 0.2, -0.5, 0.75, -0.1]
+                var p = Path()
+                let n = 160
+                for i in 0...n {
+                    let ph = (Double(i) / Double(n) * 2).truncatingRemainder(dividingBy: 1)
+                    var v: Double
+                    switch wave {
+                    case 1: v = ph < 0.5 ? ph * 4 - 1 : 3 - ph * 4
+                    case 2: v = 1 - ph * 2
+                    case 3: v = ph < 0.5 ? 1 : -1
+                    case 4: v = sh[min(7, Int(Double(i) / Double(n) * 8))]
+                    default: v = sin(ph * 2 * Double.pi)
+                    }
+                    let pt = CGPoint(x: CGFloat(i) / CGFloat(n) * w, y: h / 2 - CGFloat(v) * (h / 2 - 6))
+                    if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                }
+                c.stroke(p, with: .color(Hw.lcdFg), lineWidth: 2)
+                if rateId >= 0 {
+                    c.draw(Text(e.formatParam(rateId)).font(.system(size: 11, design: .monospaced)).foregroundColor(Hw.lcdDim),
+                           at: CGPoint(x: w - 44, y: 10))
+                }
+            }
+        }
+        .frame(height: 70)
+        .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
+    }
+}
+
+/// Step sequencer: drag the bars for velocity (bottom = rest), the note row up / down for pitch.
+struct SeqEditor: View {
+    @EnvironmentObject var model: SynthModel
+    @State private var tick = 0
+    @State private var noteStep = -1
+    @State private var noteStart: Float = 60
+    @State private var velDragging = false
+
+    private static let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+    private func pid(_ step: Int, _ field: String) -> Int32 { model.engine.paramId("seq.s\(step + 1).\(field)") }
+
+    private func noteName(_ v: Float) -> String {
+        let note = Int(v.rounded())
+        return Self.names[((note % 12) + 12) % 12] + "\(note / 12 - 1)"
+    }
+
+    var body: some View {
+        let e = model.engine
+        let stepsId = e.paramId("seq.steps")
+        let n = max(1, min(32, Int(stepsId >= 0 ? e.paramValue(stepsId) : 16)))
+        let _ = tick
+        VStack(spacing: 4) {
+            GeometryReader { g in
+                let w = g.size.width / CGFloat(n)
+                HStack(spacing: 0) {
+                    ForEach(0..<n, id: \.self) { s in
+                        Text(noteName(e.paramValue(pid(s, "note"))))
+                            .font(.system(size: n > 16 ? 8 : 10, design: .monospaced)).foregroundColor(Hw.lcdFg)
+                            .frame(width: w, height: 24)
+                            .background(Rectangle().fill(s % 4 == 0 ? Color(white: 0.13) : Hw.lcdBg))
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { d in
+                        if noteStep < 0 {
+                            noteStep = min(n - 1, max(0, Int(d.startLocation.x / w)))
+                            noteStart = e.paramValue(pid(noteStep, "note"))
+                            model.checkpoint()
+                        }
+                        let v = min(127, max(0, (noteStart - Float(d.translation.height / 8)).rounded()))
+                        e.setParam(pid(noteStep, "note"), value: v)
+                        model.show("Step \(noteStep + 1)  " + noteName(v))
+                        tick += 1
+                    }
+                    .onEnded { _ in noteStep = -1 })
+            }
+            .frame(height: 24)
+            GeometryReader { g in
+                let w = g.size.width / CGFloat(n), h = g.size.height
+                TimelineView(.periodic(from: .now, by: 0.05)) { _ in
+                    Canvas { c, _ in
+                        let playing = Int(e.seqStep)
+                        for s in 0..<n {
+                            let vel = CGFloat(e.paramValue(pid(s, "vel")))
+                            let r = CGRect(x: CGFloat(s) * w + 1, y: h - vel * h, width: max(1, w - 2), height: vel * h)
+                            c.fill(Path(r), with: .color(s == playing ? Hw.led : Hw.lcdFg.opacity(0.85)))
+                            if vel <= 0 {
+                                c.fill(Path(CGRect(x: CGFloat(s) * w + 1, y: h - 2, width: max(1, w - 2), height: 2)),
+                                       with: .color(s == playing ? Hw.led : Hw.lcdDim))
+                            }
+                        }
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { d in
+                        if !velDragging {
+                            velDragging = true
+                            model.checkpoint()
+                        }
+                        let s = min(n - 1, max(0, Int(d.location.x / w)))
+                        let v = Float(min(1, max(0, 1 - d.location.y / h)))
+                        e.setParam(pid(s, "vel"), value: v < 0.05 ? 0 : v)
+                        tick += 1
+                    }
+                    .onEnded { _ in velDragging = false })
+            }
+            .frame(height: 110)
+            .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
+            Text("棒を上下にドラッグすると強さ（いちばん下は休符）、上の音名を上下にドラッグすると音の高さが変わります。")
+                .font(.system(size: 11)).foregroundColor(Hw.engrave).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .id(model.revision)
+    }
+}
+
+/// MSEG: the points (time from the previous one, level); drag a point to move it.
+struct MsegEditor: View {
+    @EnvironmentObject var model: SynthModel
+    @State private var tick = 0
+    @State private var dragPoint = -1
+
+    private func pid(_ p: Int, _ field: String) -> Int32 { model.engine.paramId("mseg.p\(p + 1).\(field)") }
+
+    var body: some View {
+        let e = model.engine
+        let countId = e.paramId("mseg.points")
+        let n = max(2, min(8, Int(countId >= 0 ? e.paramValue(countId) : 4)))
+        let _ = tick
+        var times: [Double] = []
+        for i in 0..<n { times.append((times.last ?? 0) + Double(e.paramValue(pid(i, "time")))) }
+        let total = max(0.5, (times.last ?? 1) * 1.15)
+        return GeometryReader { g in
+            let w = g.size.width, h = g.size.height
+            let pts = (0..<n).map { i in
+                CGPoint(x: CGFloat(times[i] / total) * w, y: (1 - CGFloat(e.paramValue(pid(i, "level")))) * (h - 12) + 6)
+            }
+            Canvas { c, _ in
+                var p = Path()
+                for (i, pt) in pts.enumerated() {
+                    if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                }
+                c.stroke(p, with: .color(Hw.lcdFg), lineWidth: 2)
+                for (i, pt) in pts.enumerated() {
+                    c.fill(Path(ellipseIn: CGRect(x: pt.x - 6, y: pt.y - 6, width: 12, height: 12)),
+                           with: .color(i == dragPoint ? Hw.led : Hw.lcdFg))
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { d in
+                    if dragPoint < 0 {
+                        var best = 0
+                        var bestD = Double.greatestFiniteMagnitude
+                        for (i, pt) in pts.enumerated() {
+                            let dd = hypot(Double(pt.x - d.startLocation.x), Double(pt.y - d.startLocation.y))
+                            if dd < bestD {
+                                bestD = dd
+                                best = i
+                            }
+                        }
+                        dragPoint = best
+                        model.checkpoint()
+                    }
+                    let i = dragPoint
+                    let level = Float(min(1, max(0, 1 - (d.location.y - 6) / (h - 12))))
+                    e.setParam(pid(i, "level"), value: level)
+                    let t = Double(min(w, max(0, d.location.x)) / w) * total
+                    let prev = i > 0 ? times[i - 1] : 0
+                    e.setParam(pid(i, "time"), value: Float(max(0, min(10, t - prev))))
+                    model.show("P\(i + 1)  " + e.formatParam(pid(i, "time")) + "  " + e.formatParam(pid(i, "level")))
+                    tick += 1
+                }
+                .onEnded { _ in dragPoint = -1 })
+        }
+        .frame(height: 120)
+        .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
+        .id(model.revision)
+    }
+}
+
+/// FM algorithm of a layer: operators (carriers at the bottom, lit) and who modulates whom.
+struct FmAlgoView: View {
+    @EnvironmentObject var model: SynthModel
+    let layer: String  // "a", "b", "c"
+
+    var body: some View {
+        let e = model.engine
+        let algoId = e.paramId(layer + ".fm.algo")
+        TimelineView(.periodic(from: .now, by: 0.3)) { _ in
+            Canvas { c, size in
+                guard algoId >= 0 else { return }
+                let a = e.fmAlgorithm(Int32(e.paramValue(algoId).rounded())).map { $0.intValue }
+                guard a.count >= 11 else { return }
+                let ops = max(1, min(8, a[0]))
+                let carriers = a[1], fb = a[2]
+                let mods = Array(a[3..<11])
+                // depth: carriers 0, a modulator one more than the deepest operator it feeds
+                var depth = [Int](repeating: -1, count: ops)
+                for i in 0..<ops where carriers & (1 << i) != 0 { depth[i] = 0 }
+                for _ in 0..<ops {
+                    for t in 0..<ops where depth[t] >= 0 {
+                        for m in 0..<ops where mods[t] & (1 << m) != 0 && m != t {
+                            depth[m] = max(depth[m], depth[t] + 1)
+                        }
+                    }
+                }
+                let maxDepth = max(0, depth.max() ?? 0)
+                var pos = [CGPoint](repeating: .zero, count: ops)
+                for d in 0...maxDepth {
+                    let row = (0..<ops).filter { depth[$0] == d }
+                    for (k, i) in row.enumerated() {
+                        let x = size.width * CGFloat(k + 1) / CGFloat(row.count + 1)
+                        let y = size.height - 18 - CGFloat(d) * (size.height - 36) / CGFloat(max(1, maxDepth))
+                        pos[i] = CGPoint(x: x, y: y)
+                    }
+                }
+                for t in 0..<ops where depth[t] >= 0 {
+                    for m in 0..<ops where mods[t] & (1 << m) != 0 && m != t && depth[m] >= 0 {
+                        var l = Path()
+                        l.move(to: pos[m])
+                        l.addLine(to: pos[t])
+                        c.stroke(l, with: .color(Hw.lcdDim), lineWidth: 1.5)
+                    }
+                }
+                for i in 0..<ops where depth[i] >= 0 {
+                    let r = CGRect(x: pos[i].x - 14, y: pos[i].y - 11, width: 28, height: 22)
+                    let isCarrier = carriers & (1 << i) != 0
+                    c.fill(Path(roundedRect: r, cornerRadius: 3), with: .color(isCarrier ? Hw.led : Color(white: 0.35)))
+                    c.draw(Text("\(i + 1)").font(.system(size: 12, weight: .bold)).foregroundColor(.black), at: pos[i])
+                    if i == fb {
+                        c.stroke(Path(ellipseIn: CGRect(x: pos[i].x + 12, y: pos[i].y - 18, width: 12, height: 12)),
+                                 with: .color(Hw.led), lineWidth: 1.5)
+                    }
+                }
+            }
+        }
+        .frame(height: 130)
+        .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
+    }
+}
+
+/// The mod matrix slots in use: source (x via) -> destination, with the amount as a bar.
+struct ModMatrixSummary: View {
+    @EnvironmentObject var model: SynthModel
+
+    private struct Row {
+        let text: String
+        let amount: Float
+    }
+
+    private func rows() -> [Row] {
+        let e = model.engine
+        var out: [Row] = []
+        for s in 1...16 {
+            let src = e.paramId("mod\(s).src"), via = e.paramId("mod\(s).via")
+            let dst = e.paramId("mod\(s).dst"), amt = e.paramId("mod\(s).amt")
+            guard src >= 0, dst >= 0, amt >= 0, e.paramValue(src) > 0.5, e.paramValue(dst) > 0.5 else { continue }
+            let v = via >= 0 && e.paramValue(via) > 0.5 ? " x " + e.formatParam(via) : ""
+            out.append(Row(text: "#\(s)  " + e.formatParam(src) + v + "  ->  " + e.formatParam(dst), amount: e.paramValue(amt)))
+        }
+        return out
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.3)) { _ in
+            let list = rows()
+            VStack(alignment: .leading, spacing: 3) {
+                if list.isEmpty {
+                    Text("(no routings)").font(.system(size: 12, design: .monospaced)).foregroundColor(Hw.lcdDim)
+                }
+                ForEach(list.indices, id: \.self) { i in
+                    HStack(spacing: 8) {
+                        Text(list[i].text).font(.system(size: 12, design: .monospaced)).foregroundColor(Hw.lcdFg).lineLimit(1)
+                        Spacer()
+                        AmountBar(value: list[i].amount).frame(width: 120, height: 8)
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
+        }
+    }
+}
+
+/// -1..1 as a bar from the middle.
+struct AmountBar: View {
+    let value: Float
+    var body: some View {
+        Canvas { c, size in
+            c.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.16)))
+            let a = CGFloat(max(-1, min(1, value)))
+            let mid = size.width / 2
+            let r = a >= 0 ? CGRect(x: mid, y: 0, width: a * mid, height: size.height)
+                           : CGRect(x: mid + a * mid, y: 0, width: -a * mid, height: size.height)
+            c.fill(Path(r), with: .color(a >= 0 ? Hw.led : Color.cyan))
+        }
+    }
+}
+
+// ---------------------------------------------------------------- play: arp / tempo
+
+/// Arpeggiator and tempo on the Play screen, with Run (the arp / sequencer clock).
+struct ArpPanel: View {
+    @EnvironmentObject var model: SynthModel
+    @State private var running = false
+    private let names = ["arp.on", "arp.mode", "arp.rate", "arp.octaves", "arp.latch", "fx.tempo"]
+
+    var body: some View {
+        let e = model.engine
+        Panel(title: "Arp / Tempo") {
+            HStack(alignment: .top, spacing: 6) {
+                ForEach(names, id: \.self) { n in
+                    let pid = e.paramId(n)
+                    if pid >= 0 { ParamControl(param: pid) }
+                }
+                VStack(spacing: 4) {
+                    HwButton(title: "Run", lit: running) {
+                        e.transportRunning = !e.transportRunning
+                        running = e.transportRunning
+                    }
+                    Text("CLOCK").font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave)
+                }
+            }
+        }
+        .onAppear { running = e.transportRunning }
+    }
+}
+
+// ---------------------------------------------------------------- multi: scenes
+
+extension SynthModel {
+    func scenePath(_ n: Int) -> String {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("scenes")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("scene\(n + 1).json").path
+    }
+
+    func storeScene(_ n: Int, name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let nm = trimmed.isEmpty ? "Scene \(n + 1)" : trimmed
+        let ok = engine.saveScene(scenePath(n), name: nm, partNames: partNames)
+        if ok {
+            var names = UserDefaults.standard.stringArray(forKey: "sceneNames") ?? []
+            while names.count < 8 { names.append("") }
+            names[n] = nm
+            UserDefaults.standard.set(names, forKey: "sceneNames")
+            show("Stored \(nm)")
+        }
+        return ok
+    }
+
+    func recallScene(_ n: Int) {
+        guard FileManager.default.fileExists(atPath: scenePath(n)),
+              let r = engine.loadScene(scenePath(n)), r.count >= 17 else {
+            show("Scene \(n + 1) is empty")
+            return
+        }
+        if comparing { compare() }
+        engine.songPlay(false)
+        multi = true
+        for k in 0..<16 { partNames[k] = r[k + 1] }
+        editPart = Int(engine.editPart)
+        let shown = partNames[editPart].isEmpty ? "Init" : partNames[editPart]
+        presetName = "\(editPart + 1): \(shown)"
+        soundLoaded()
+        show("Scene \(r[0])")
+    }
+}
+
+/// The 8 scene buttons of the Multi screen (Store, then a button, saves the whole multi there).
+struct SceneBar: View {
+    @EnvironmentObject var model: SynthModel
+    @State private var storeMode = false
+    @State private var naming = false
+    @State private var target = 0
+    @State private var name = ""
+    @State private var names = UserDefaults.standard.stringArray(forKey: "sceneNames") ?? []
+
+    private func label(_ n: Int) -> String { n < names.count && !names[n].isEmpty ? names[n] : "\(n + 1)" }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("SCENES").font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave)
+            ForEach(0..<8, id: \.self) { n in
+                HwButton(title: label(n)) {
+                    if storeMode {
+                        target = n
+                        name = n < names.count ? names[n] : ""
+                        naming = true
+                    } else {
+                        model.recallScene(n)
+                    }
+                }
+            }
+            HwButton(title: "Store", lit: storeMode) { storeMode.toggle() }
+        }
+        .alert("Store scene \(target + 1)", isPresented: $naming) {
+            TextField("Name", text: $name)
+            Button("Store") {
+                _ = model.storeScene(target, name: name)
+                names = UserDefaults.standard.stringArray(forKey: "sceneNames") ?? []
+                storeMode = false
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 }

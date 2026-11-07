@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "audio_out.h"
+#include "hsynth/dsp/fm.h"
 #include "hsynth/engine.h"
 #include "hsynth/fileio.h"
 #include "hsynth/gm_bank.h"
@@ -59,6 +60,7 @@ float toNormalized(const ParamInfo& p, float v) {
     MidiLearn _learn;
     std::unique_ptr<MidiOut> _midiOut;
     int _editPart;
+    NSString* _recordPath;
 }
 
 - (instancetype)initWithFactoryDir:(NSString*)factoryDir userDir:(NSString*)userDir {
@@ -454,29 +456,71 @@ float toNormalized(const ParamInfo& p, float v) {
 
 // ---------------------------------------------------------------- recording
 
-- (void)startRecording { _audio->startRecording(300.0); }
-- (double)recordSeconds { return _audio->recording() ? _audio->recordedSeconds() : -1.0; }
-- (nullable NSString*)stopRecording {
-    std::vector<float> inter;
-    const size_t frames = _audio->stopRecording(inter);
-    if (frames == 0) return nil;
-    std::vector<float> l(frames), r(frames);
-    for (size_t i = 0; i < frames; ++i) {
-        l[i] = inter[i * 2];
-        r[i] = inter[i * 2 + 1];
-    }
+- (void)startRecording {
     NSString* dir = ns(_userDir + "/recordings");
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     NSDateFormatter* f = [[NSDateFormatter alloc] init];
     f.dateFormat = @"yyyyMMdd-HHmmss";
-    NSString* path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"HSynth %@.wav", [f stringFromDate:[NSDate date]]]];
-    const int rate = _audio->stats().sampleRate > 0 ? _audio->stats().sampleRate : 48000;
+    _recordPath = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"HSynth %@.wav", [f stringFromDate:[NSDate date]]]];
     std::string err;
-    if (!writeWav(str(path), l, &r, rate, true, err)) {
+    if (!_audio->startFileRecording(str(_recordPath), err)) {
         NSLog(@"HSynth recording: %s", err.c_str());
+        _recordPath = nil;
+    }
+}
+- (double)recordSeconds { return _audio->fileRecording() ? _audio->fileRecordSeconds() : -1.0; }
+- (nullable NSString*)stopRecording {
+    if (!_audio->fileRecording()) return nil;
+    const double sec = _audio->stopFileRecording();
+    NSString* path = _recordPath;
+    _recordPath = nil;
+    if (sec <= 0.0 && path) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
         return nil;
     }
     return path;
+}
+
+// ---------------------------------------------------------------- transport / diagrams / scenes
+
+- (BOOL)transportRunning { return _engine->transportPlaying(); }
+- (void)setTransportRunning:(BOOL)on { _engine->setTransport(on); }
+- (int)seqStep { return _engine->seqPosition(_editPart); }
+
+- (NSArray<NSNumber*>*)fmAlgorithm:(int)index {
+    const FmAlgorithm& a = hsynth::fmAlgorithm(std::max(0, std::min(kNumFmAlgorithms - 1, index)));
+    NSMutableArray* r = [NSMutableArray arrayWithObjects:@(a.numOps), @(a.carriers), @(a.feedbackOp), nil];
+    for (int i = 0; i < P::kFmOps; ++i) [r addObject:@(a.modulators[i])];
+    return r;
+}
+
+- (BOOL)saveScene:(NSString*)path name:(NSString*)name partNames:(NSArray<NSString*>*)names {
+    MultiPreset m = captureMulti(*_engine, str(name), _libraryDir);
+    for (int k = 0; k < kNumParts && k < (int)names.count; ++k) m.parts[k].name = str(names[(NSUInteger)k]);
+    std::string err;
+    if (!saveMultiFile(str(path), m, err)) {
+        NSLog(@"HSynth scene: %s", err.c_str());
+        return NO;
+    }
+    return YES;
+}
+
+- (nullable NSArray<NSString*>*)loadScene:(NSString*)path {
+    MultiPreset m;
+    std::string err;
+    if (!loadMultiFile(str(path), m, err)) {
+        _lastWarnings = @[ ns(err) ];
+        return nil;
+    }
+    std::vector<std::string> warnings;
+    applyMulti(*_engine, m, _libraryDir, warnings);
+    _midi->setMultiTimbral(true);
+    for (auto& s : _songLoaded) s.clear();  // the parts hold the scene's sounds now
+    _editPart = _engine->selectedPart();
+    _lastWarnings = [self strings:warnings];
+    NSMutableArray* r = [NSMutableArray arrayWithObject:ns(m.name)];
+    for (int k = 0; k < kNumParts; ++k) [r addObject:ns(m.parts[k].name)];
+    return r;
 }
 
 // ---------------------------------------------------------------- MIDI learn / out
