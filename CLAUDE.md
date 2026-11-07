@@ -37,6 +37,7 @@ cmake -S desktop -B desktop/build -G Ninja && cmake --build desktop/build
 desktop/build/hsynth_desktop.exe --autotest desktop/autotest_out/run   # 音を出し、report.txt とスクリーンショットを書く
 ```
 macOS 版と iOS アプリは `docs/APPLE.md` を参照。
+iOS アプリの AltStore での配布（公開リポジトリ tera-works/tera-synth-ios）は `docs/ALTSTORE.md`。
 内蔵プリセットとデモ用サンプルは `engine/build/hsynth_assets android/app/src/main/assets` で作る。
 
 ## テスト用の音源（非公開の assets リポジトリ）

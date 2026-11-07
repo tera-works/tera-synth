@@ -21,3 +21,9 @@ ios/HSynth.xcodeproj/
 ios/build/
 DerivedData/
 *.xcuserstate
+
+# iOS distribution (ios-distribution/): generated packages
+dist/
+site/
+.ios-build/
+__pycache__/

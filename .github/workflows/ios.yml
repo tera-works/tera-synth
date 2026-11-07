@@ -1,0 +1,32 @@
+# Unsigned IPA for AltStore (ios-distribution/, docs/ALTSTORE.md).
+# This repository is private: the build runs here, and the release is published
+# to the public repository tera-works/tera-synth-ios from a PC with
+# `python ios-distribution/scripts/publish_public.py vX.Y.Z` (it downloads this
+# run's artifact). Builds on version tags and on demand only (macOS minutes).
+name: iOS distribution
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-distribution-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: XcodeGen
+        run: brew install xcodegen && cd ios && xcodegen
+      - run: python3 ios-distribution/scripts/distribute.py build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-package
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
