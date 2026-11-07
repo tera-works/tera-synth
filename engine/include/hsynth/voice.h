@@ -40,6 +40,7 @@ struct VoiceContext {
     float masterTune = 0.0f;       // semitones (master.tune)
     double beat = 0.0;             // tempo position (beats) at the start of this control block (motion lanes)
     float pedal = 0.0f;            // sustain pedal 0..1 of the part (half pedal)
+    float superKnob = 0.0f;        // perf.super (same for every part), mod source "super"
     const SampleSet* sampleSets[kNumLayers] = {};
     uint32_t seq[kNumLayers] = {};    // round-robin counters (SFZ seq_position)
     int keyswitch[kNumLayers] = {-1, -1, -1};  // active SFZ keyswitch per layer (-1 = default)
@@ -193,6 +194,18 @@ private:
         WtOsc wt;
         PcmPlayer pcm[kMaxRegionsPerLayer];
         int pcmCount = 0;
+        // granular: grains read from the layer's sample (the region for the key)
+        struct Grain {
+            double pos = 0.0, step = 1.0;
+            float age = 0.0f, len = 1.0f, gl = 0.0f, gr = 0.0f;
+            bool on = false;
+        };
+        static constexpr int kGrains = 24;
+        Grain grains[kGrains];
+        const Region* grRegion = nullptr;
+        double grBaseRatio = 1.0;    // pitch of the region at the voice's key
+        float grTimer = 0.0f;        // samples to the next grain
+        double grScan = 0.0;         // position moved by scanning (fraction of the sample)
         float dt1 = 0, dt2 = 0;      // current oscillator increments (ramped)
         float gain = 0;              // smoothed layer gain
         bool finished = false;
@@ -240,7 +253,8 @@ private:
     Rng rng_;
     Rng rng3_{0x5EEDu};  // LFO3 sample & hold (separate stream: the main one feeds noise / phases)
     VoiceFilter filterL_, filterR_;
-    std::unique_ptr<float[]> combMem_;  // comb filter delay lines (L, R), allocated in prepare()
+    VoiceFilter filter2L_, filter2R_;   // second filter (filter2.*)
+    std::unique_ptr<float[]> combMem_;  // comb filter delay lines (L, R, filter 2 L, R), allocated in prepare()
     VoiceFx vfx_;
     float ampGain_ = 0.0f;           // smoothed
     float panL_ = 1.0f, panR_ = 1.0f;

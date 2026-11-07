@@ -404,3 +404,87 @@ TEST(song_program_change_keeps_sounding_notes) {
     CHECK_NEAR(next, 880.0, 2.0);
     CHECK(e.partProgram(0) == 5);
 }
+
+// phrase recorder: a note recorded in the first pass loops; an overdub adds one
+// and Undo removes it; quantize moves note-on and note-off together; SMF export
+TEST(song_phrase_recorder) {
+    Engine e;
+    e.prepare(48000);
+    e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Sine);
+    e.setParam(P::layer(0, P::VaMix), 0.0f);
+    e.setParam(P::FilterType, (float)FilterType::Off);
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    e.setParam(P::mod(0, P::ModAmt), 0.0f);
+    e.setParam(P::AmpSustain, 1.0f);
+    e.setParam(P::AmpRelease, 0.005f);  // tempo 120: 1 beat = 0.5 s
+    const int block = 480;              // 10 ms
+    std::vector<float> L(48000 * 6), R(L.size());
+    size_t pos = 0;
+    auto run = [&](double untilSec) {
+        while (pos + block <= L.size() && (double)pos / 48000.0 < untilSec) {
+            e.process(L.data() + pos, R.data() + pos, block);
+            pos += block;
+        }
+    };
+    e.phraseRecord();
+    run(0.1);
+    e.sendEvent(Event::noteOn(1, 69, 0.9f));   // 0.1 s = beat 0.2
+    run(0.5);
+    e.sendEvent(Event::noteOff(1, 69));        // 0.5 s = beat 1.0
+    run(1.0);
+    e.phrasePlay();                            // 2 beats elapsed -> one bar (4 beats = 2 s)
+    run(1.02);
+    CHECK(e.phraseState() == Engine::PhraseState::Playing);
+    CHECK_NEAR(e.phraseLength(), 4.0, 1e-9);
+    run(3.0);                                  // the loop restarts at 2.0 s: the note again at 2.1 .. 2.5 s
+    const double gap = rms(L, (size_t)(1.2 * 48000), (size_t)(1.9 * 48000));
+    const double again = rms(L, (size_t)(2.15 * 48000), (size_t)(2.45 * 48000));
+    INFO("phrase: silence %.4f, looped note %.4f, %d events\n", gap, again, e.phraseEventCount());
+    CHECK(gap < 0.001);
+    CHECK(again > 0.05);
+    CHECK(e.phraseEventCount() == 2);
+    // overdub a second note, then undo it
+    e.phraseRecord();
+    run(3.02);
+    CHECK(e.phraseState() == Engine::PhraseState::Overdub);
+    e.sendEvent(Event::noteOn(2, 72, 0.9f));
+    run(3.3);
+    e.sendEvent(Event::noteOff(2, 72));
+    run(3.4);
+    e.phraseRecord();  // overdub off
+    run(3.42);
+    CHECK(e.phraseEventCount() == 4);
+    e.phraseUndo();
+    run(3.44);
+    CHECK(e.phraseEventCount() == 2);
+    // snapshot, quantize to the beat, replace
+    e.requestPhraseSnapshot();
+    run(3.46);
+    std::vector<Engine::PhraseEvent> ev;
+    double len = 0.0;
+    CHECK(e.takePhraseSnapshot(ev, len));
+    CHECK(ev.size() == 2);
+    if (ev.size() == 2) {
+        quantizePhrase(ev, len, 1.0);
+        INFO("quantized: on %.3f off %.3f\n", ev[0].beat, ev[1].beat);
+        CHECK_NEAR(ev[0].beat, 0.0, 1e-6);            // 0.2 -> 0
+        CHECK_NEAR(ev[1].beat - ev[0].beat, 0.8, 0.02);  // the length stays
+    }
+    e.replacePhrase(ev, len);
+    run(3.48);
+    CHECK(e.phraseEventCount() == 2);
+    // export and read back
+    const std::string mid = (std::filesystem::temp_directory_path() / "hsynth_phrase.mid").generic_string();
+    std::string err;
+    CHECK(writePhraseSmf(mid, ev, len, 120.0, 2, err));
+    Song song;
+    CHECK(loadSmf(mid, song, err));
+    INFO("exported: %d notes, %.2f s\n", song.noteCount, song.length);
+    CHECK(song.noteCount == 2);  // two repeats
+    e.phraseStop();
+    run(3.5);
+    CHECK(e.phraseState() == Engine::PhraseState::Stopped);
+    e.phraseClear();
+    run(3.52);
+    CHECK(e.phraseState() == Engine::PhraseState::Empty);
+}

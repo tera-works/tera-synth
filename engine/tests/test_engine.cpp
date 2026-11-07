@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -9,6 +10,7 @@
 #include "analysis.h"
 #include "hsynth/engine.h"
 #include "hsynth/host_utils.h"
+#include "hsynth/wav.h"
 #include "test.h"
 
 using namespace hsynth;
@@ -368,4 +370,180 @@ TEST(engine_rpn_bend_range) {
     job2.events.push_back({0.0, Event::noteOn(2, 76, 1.0f)});  // E5 - 7 st = A4
     renderOffline(e, job2, L, R);
     CHECK_NEAR(zeroCrossFreq(L, 48000, 9600, 40000), 440.0, 1.0);
+}
+
+// second filter: serial low-pass after low-pass darkens more than one; parallel
+// balance 1 is filter 2 alone
+TEST(engine_dual_filter) {
+    auto render = [](auto setup) {
+        Engine e;
+        e.prepare(48000);
+        e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Saw);
+        e.setParam(P::layer(0, P::VaMix), 0.0f);
+        e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+        e.setParam(P::mod(0, P::ModAmt), 0.0f);
+        e.setParam(P::FilterType, (float)FilterType::LP12);
+        e.setParam(P::FilterCutoff, 2000);
+        e.setParam(P::FilterEnvAmt, 0);
+        e.setParam(P::FilterKeytrack, 0);
+        e.setParam(P::AmpSustain, 1.0f);
+        setup(e);
+        RenderJob job;
+        job.seconds = 0.5;
+        job.events.push_back({0.0, Event::noteOn(1, 45, 1.0f)});
+        std::vector<float> L, R;
+        renderOffline(e, job, L, R);
+        return rms(L, 4800, 24000);
+    };
+    const double one = render([](Engine&) {});
+    const double serial = render([](Engine& e) {
+        e.setParam(P::Filter2Type, (float)FilterType::LP12);
+        e.setParam(P::Filter2Cutoff, 300);
+        e.setParam(P::Filter2Keytrack, 0);
+    });
+    const double parallelHp = render([](Engine& e) {
+        e.setParam(P::Filter2Type, (float)FilterType::HP);
+        e.setParam(P::Filter2Cutoff, 8000);
+        e.setParam(P::Filter2Keytrack, 0);
+        e.setParam(P::FilterRouting, 1);
+        e.setParam(P::FilterBalance, 1);
+    });
+    INFO("rms: one filter %.4f, serial %.4f, parallel HP only %.4f\n", one, serial, parallelHp);
+    CHECK(serial < one * 0.9);
+    CHECK(parallelHp < one * 0.5);
+    CHECK(parallelHp > 0.0001);
+}
+
+// scale lock moves keys into the scale; chord mode plays a chord per key and the
+// note-off releases exactly those notes
+TEST(engine_scale_lock_and_chord) {
+    Engine e;
+    e.prepare(48000);
+    e.setParam(P::ScaleLock, 1);
+    e.setParam(P::ScaleRoot, 0);   // C
+    e.setParam(P::ScaleType, 0);   // major
+    e.setParam(P::ChordMode, 1);   // major triad
+    e.setParam(P::AmpRelease, 0.001f);
+    std::vector<float> L(480), R(480);
+    e.sendEvent(Event::noteOn(7, 61, 0.8f));  // C#4 -> C4; triad C E G (diatonic)
+    e.process(L.data(), R.data(), 480);
+    Engine::PartMeter m[kNumParts];
+    e.partMeters(m);
+    const uint32_t w = m[0].notes[1];  // keys 32..63
+    const uint32_t w2 = m[0].notes[2]; // keys 64..95
+    INFO("held: %08x %08x\n", w, w2);
+    CHECK((w >> (60 - 32)) & 1u);       // C4
+    CHECK((w2 >> (64 - 64)) & 1u);      // E4
+    CHECK((w2 >> (67 - 64)) & 1u);      // G4
+    CHECK(!((w >> (61 - 32)) & 1u));    // not C#4
+    e.setParam(P::ChordMode, 0);        // switched off while the key is held
+    e.sendEvent(Event::noteOff(7, 61));
+    for (int b = 0; b < 20; ++b) e.process(L.data(), R.data(), 480);
+    e.partMeters(m);
+    CHECK(m[0].voices == 0);            // every chord note was released
+}
+
+// the Super Knob is one value for all parts, a mod source in each
+TEST(engine_super_knob_source) {
+    Engine e;
+    e.prepare(48000);
+    sineVoice(e);
+    e.setParam(P::mod(1, P::ModSrc), (float)ModSource::Super);
+    e.setParam(P::mod(1, P::ModDst), (float)ModDest::Pitch);
+    e.setParam(P::mod(1, P::ModAmt), 0.5f);  // +12 semitones at full knob
+    e.setParam(P::SuperKnob, 1.0f);
+    CHECK(!isPartParam(P::SuperKnob));
+    RenderJob job;
+    job.seconds = 0.5;
+    job.events.push_back({0.0, Event::noteOn(1, 57, 1.0f)});  // A3 + 12 = 440
+    std::vector<float> L, R;
+    renderOffline(e, job, L, R);
+    CHECK_NEAR(zeroCrossFreq(L, 48000, 4800, 20000), 440.0, 2.0);
+}
+
+// granular layer: grains of a 440 Hz sine (root A4) played at A4 keep the pitch;
+// an octave up doubles it; output finite, stereo spread
+TEST(engine_granular_layer) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "hsynth_tests" / "granular";
+    fs::create_directories(dir);
+    const std::string wav = (dir / "sine440.wav").generic_string();
+    std::vector<float> s(48000 * 2);
+    for (size_t i = 0; i < s.size(); ++i) s[i] = 0.5f * std::sin(2.0 * 3.14159265358979 * 440.0 * (double)i / 48000.0);
+    std::string err;
+    CHECK(writeWav(wav, s, nullptr, 48000, true, err, 69));
+    for (int octave = 0; octave < 2; ++octave) {
+        Engine e;
+        e.prepare(48000);
+        e.setParam(P::FilterType, (float)FilterType::Off);
+        e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+        e.setParam(P::mod(0, P::ModAmt), 0.0f);
+        e.setParam(P::AmpSustain, 1.0f);
+        e.setParam(P::layer(0, P::LType), (float)LayerType::Granular);
+        e.setParam(P::layer(0, P::GrSize), 0.1f);
+        e.setParam(P::layer(0, P::GrDensity), 20.0f);
+        e.setParam(P::layer(0, P::GrPosRand), 0.0f);
+        e.setParam(P::layer(0, P::GrPitchRand), 0.0f);
+        std::vector<std::string> warnings;
+        CHECK(loadLayerSamples(e, 0, wav, err, warnings));
+        RenderJob job;
+        job.seconds = 1.0;
+        job.events.push_back({0.0, Event::noteOn(1, 69 + 12 * octave, 1.0f)});
+        std::vector<float> L, R;
+        renderOffline(e, job, L, R);
+        CHECK(allFinite(L) && allFinite(R));
+        const double level = rms(L, 9600, 48000);
+        const double f = zeroCrossFreq(L, 48000, 9600, 48000);
+        double diff = 0.0;
+        for (size_t i = 0; i < L.size(); ++i) diff = std::max(diff, (double)std::fabs(L[i] - R[i]));
+        INFO("octave %d: rms %.4f, %.1f Hz, L/R differ %d\n", octave, level, f, (int)(diff > 1e-4));
+        CHECK(level > 0.02);
+        CHECK_NEAR(f, 440.0 * (1 << octave), 440.0 * (1 << octave) * 0.05);
+    }
+}
+
+// sampling: trim the silence around a recording, normalise, find a loop in a
+// steady tone, save it as an instrument and play it from the SFZ
+TEST(engine_sampling_helpers) {
+    const int sr = 48000;
+    std::vector<float> l(sr * 3, 0.0f), r(sr * 3, 0.0f);
+    for (int i = sr / 2; i < sr * 2; ++i) {  // 0.5 .. 2.0 s: 220 Hz at 0.25
+        const float v = 0.25f * (float)std::sin(2.0 * 3.14159265358979 * 220.0 * (double)i / sr);
+        l[(size_t)i] = v;
+        r[(size_t)i] = v * 0.8f;
+    }
+    int64_t start = 0, end = 0;
+    sampleBounds(l, r, -40.0f, start, end);
+    INFO("bounds %.3f .. %.3f s\n", (double)start / sr, (double)end / sr);
+    CHECK(std::llabs(start - sr / 2) < 200);
+    CHECK(std::llabs(end - sr * 2) < 200);
+    const float g = normalizeGain(l, r, start, end, -1.0f);
+    CHECK_NEAR(g * 0.25f, std::pow(10.0f, -1.0f / 20.0f), 0.01f);
+    int64_t ls = 0, le = 0;
+    CHECK(findLoop(l, r, start, end, ls, le));
+    const double periods = (double)(le - ls) * 220.0 / sr;
+    INFO("loop %lld .. %lld (%.3f periods)\n", (long long)ls, (long long)le, periods);
+    CHECK(std::fabs(periods - std::round(periods)) < 0.02);  // a whole number of periods: seamless
+    const std::string dir = (std::filesystem::temp_directory_path() / "hsynth_tests" / "sampled").generic_string();
+    std::string sfz, err;
+    CHECK(saveSampledInstrument(dir, "tone", l, r, sr, start, end, g, ls, le, 57, sfz, err));
+    Engine e;
+    e.prepare(48000);
+    e.setParam(P::layer(0, P::LType), (float)LayerType::PCM);
+    e.setParam(P::FilterType, (float)FilterType::Off);
+    e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+    e.setParam(P::mod(0, P::ModAmt), 0.0f);
+    e.setParam(P::AmpSustain, 1.0f);
+    std::vector<std::string> warnings;
+    CHECK(loadLayerSamples(e, 0, sfz, err, warnings));
+    RenderJob job;
+    job.seconds = 3.0;  // longer than the sample: the loop keeps it going
+    job.events.push_back({0.0, Event::noteOn(1, 69, 1.0f)});  // root A3 (57) played at A4: 440 Hz
+    std::vector<float> L, R;
+    renderOffline(e, job, L, R);
+    const double f = zeroCrossFreq(L, 48000, 24000, 48000 * 3 - 1000);
+    const double tail = rms(L, 48000 * 2, 48000 * 3 - 1000);
+    INFO("played back: %.1f Hz, level at 2..3 s %.4f\n", f, tail);
+    CHECK_NEAR(f, 440.0, 3.0);
+    CHECK(tail > 0.1);
 }

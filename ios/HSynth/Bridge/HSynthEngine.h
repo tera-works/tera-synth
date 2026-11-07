@@ -152,6 +152,40 @@ NS_ASSUME_NONNULL_BEGIN
 /// Loads it as the whole sound (single mode). The preset's name, or nil on failure.
 - (nullable NSString*)loadSoundFile:(NSString*)path;
 
+// phrase recorder: what is played live, as a loop (Engine::phraseRecord ...)
+- (void)phraseRecord;
+- (void)phrasePlay;
+- (void)phraseStop;
+- (void)phraseClear;
+- (void)phraseUndo;
+@property(nonatomic) int phraseBars;                      // 0 = the length is set by Play
+@property(nonatomic, readonly) int phraseState;           // 0 empty, 1 recording, 2 playing, 3 overdub, 4 stopped
+@property(nonatomic, readonly) double phraseLength;       // beats
+@property(nonatomic, readonly) double phrasePosition;     // beats
+@property(nonatomic, readonly) int phraseEventCount;
+/// Moves the notes to the grid (beats, 0.25 = 1/16). NO if the audio is not running.
+- (BOOL)phraseQuantize:(double)grid;
+/// Writes the phrase as a MIDI file (repeated). nil on success, else the error.
+- (nullable NSString*)phraseExport:(NSString*)path repeats:(int)repeats NS_SWIFT_NAME(phraseExport(_:repeats:));
+
+// sampling: record the audio input (or the output) and make an instrument of it
+- (void)startSampling:(BOOL)fromInput;                    // at most 30 s
+@property(nonatomic, readonly) double samplingSeconds;    // -1 when not sampling
+- (BOOL)stopSampling;                                     // keeps the take
+@property(nonatomic, readonly) long long takeFrames;
+@property(nonatomic, readonly) int takeRate;
+/// Peak of each of `points` slices of the take (0..1).
+- (NSArray<NSNumber*>*)takeWaveform:(int)points;
+/// [start, end] in frames: where the sound is (within 40 dB of the peak).
+- (NSArray<NSNumber*>*)takeBounds;
+/// [loop start, loop end] in frames inside the range, or nil if no seamless loop was found.
+- (nullable NSArray<NSNumber*>*)takeFindLoopFrom:(long long)start to:(long long)end NS_SWIFT_NAME(takeFindLoop(from:to:));
+/// Saves the range as library/user/sampled/<name> (normalised if asked, loop if loopEnd > loopStart)
+/// and loads it into a layer of the edit part. nil on success, else the error.
+- (nullable NSString*)saveTake:(NSString*)name start:(long long)start end:(long long)end normalize:(BOOL)normalize
+                     loopStart:(long long)loopStart loopEnd:(long long)loopEnd rootKey:(int)rootKey layer:(int)layer
+    NS_SWIFT_NAME(saveTake(_:start:end:normalize:loopStart:loopEnd:rootKey:layer:));
+
 @end
 
 NS_ASSUME_NONNULL_END

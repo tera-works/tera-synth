@@ -197,6 +197,37 @@ public:
     // increments every time a song reaches its end on its own (playlists advance on it)
     uint32_t songEndCount() const { return songEnds_.load(std::memory_order_relaxed); }
 
+    // ---- phrase recorder (any non-audio thread) ----
+    // Records what is played live (keyboard, MIDI in: notes, controllers, bend,
+    // pressure; not songs, arps or sequencers) as a loop in beats, at the rack
+    // tempo, and plays it back into the parts: Record starts the first pass,
+    // Play closes it (length rounded to bars, or set beforehand with
+    // setPhraseBars) and loops it, Record while playing overdubs (each overdub is
+    // a pass that Undo removes). Notes held when a pass ends get their note-off.
+    enum class PhraseState : int { Empty = 0, Recording, Playing, Overdub, Stopped };
+    struct PhraseEvent {
+        double beat = 0.0;  // position in the loop
+        Event event;
+        uint16_t pass = 0;
+    };
+    static constexpr int kMaxPhraseEvents = 8192;
+    void phraseRecord();   // Empty: record the first pass; Playing: overdub on; Overdub: off; Stopped: overdub from the top
+    void phrasePlay();     // Recording: close the first pass and loop; Stopped: play from the top
+    void phraseStop();
+    void phraseClear();
+    void phraseUndo();     // the last pass (the first pass: everything)
+    void setPhraseBars(int bars) { phraseBars_.store(std::max(0, std::min(64, bars))); }  // 0 = set by Play
+    int phraseBars() const { return phraseBars_.load(); }
+    PhraseState phraseState() const { return (PhraseState)phraseStateA_.load(std::memory_order_relaxed); }
+    double phraseLength() const { return phraseLenA_.load(std::memory_order_relaxed); }    // beats (0 until closed)
+    double phrasePosition() const { return phrasePosA_.load(std::memory_order_relaxed); }  // beats
+    int phraseEventCount() const { return phraseCountA_.load(std::memory_order_relaxed); }
+    // Copy of the phrase (quantize, export): request, then take it after the next audio block.
+    void requestPhraseSnapshot() { snapReq_.store(true, std::memory_order_release); }
+    bool takePhraseSnapshot(std::vector<PhraseEvent>& out, double& lengthBeats);
+    // Replaces the phrase (e.g. quantized); it keeps playing from the same position.
+    void replacePhrase(const std::vector<PhraseEvent>& events, double lengthBeats);
+
     // ---- song program changes (any non-audio thread) ----
     // Mid-song program changes switch a part's sound without loading anything on
     // the audio thread: the host (SongProgramLoader, gm_bank.h) loads the next
@@ -259,6 +290,18 @@ private:
         const float* p = nullptr;  // parameter array (part 0: p_)
         VoiceContext ctx;
         float pitchBend = 0.0f;
+        // scale lock / chord mode: the notes each held key started (released with it)
+        struct PerfNote {
+            bool used = false;
+            uint32_t id = 0;     // the key's note id (0: matched by key)
+            uint8_t key = 0;
+            uint8_t count = 0;
+            uint8_t keys[6] = {};
+            uint32_t ids[6] = {};
+        };
+        static constexpr int kPerfNotes = 32;
+        PerfNote perf[kPerfNotes];
+        bool inPerf = false;
         // bend range set by MIDI (RPN 0, semitones; -1 = the part's master.bendrange).
         // Moving master.bendrange clears it (knobBend remembers the value it was set at).
         float rpnBend = -1.0f;
@@ -347,8 +390,42 @@ private:
     StagedProgram* stage_[kNumParts] = {};   // audio thread
     SpscQueue<StagedProgram*> retiredStages_{64};
     std::atomic<int> appliedProg_[kNumParts], songProg_[kNumParts], stagedProg_[kNumParts];
+    // phrase recorder (audio thread unless noted)
+    enum PhraseCmd : int { CmdRecord = 1, CmdPlay, CmdStop, CmdClear, CmdUndo };
+    SpscQueue<int> phraseCmds_{64};
+    std::atomic<int> phraseBars_{0};
+    std::vector<PhraseEvent> phrase_;        // sorted by beat, capacity kMaxPhraseEvents
+    PhraseState phraseState_ = PhraseState::Empty;
+    double phraseLen_ = 0.0, phrasePos_ = 0.0;
+    size_t phraseIdx_ = 0;                   // next event to play
+    uint16_t phrasePass_ = 0;
+    struct HeldNote { uint32_t id; uint8_t key, channel; };
+    static constexpr int kPhraseHeld = 64;
+    HeldNote recHeld_[kPhraseHeld];          // recorded note-ons of this pass without a note-off yet
+    int recHeldCount_ = 0;
+    HeldNote playHeld_[kPhraseHeld];         // notes the playback started that sound now
+    int playHeldCount_ = 0;
+    std::atomic<int> phraseStateA_{0}, phraseCountA_{0};
+    std::atomic<double> phraseLenA_{0.0}, phrasePosA_{0.0};
+    std::atomic<bool> snapReq_{false}, snapReady_{false};
+    std::vector<PhraseEvent> snapBuf_;       // capacity kMaxPhraseEvents
+    double snapLen_ = 0.0;
+    struct PhraseSwap {
+        std::vector<PhraseEvent> events;
+        double length = 0.0;
+    };
+    std::atomic<PhraseSwap*> pendingPhrase_{nullptr};
+    SpscQueue<PhraseSwap*> retiredPhrases_{8};
+    void phraseBlockStart();                 // commands, snapshot, swap
+    void phraseCapture(const Event& e);      // a live event while recording
+    void phraseInsert(const PhraseEvent& pe, bool atPlayhead);
+    void phraseClosePass(double offBeat);    // note-offs for notes held when a pass ends
+    void phraseDispatch(const Event& e);
+    void phraseSilence();                    // ends the notes the playback started
+    void runPhrase(int frames);              // one control block
     void takeStagedPrograms();               // block start
     void songProgramChange(int part, int program);
+    void performanceNote(int part, const Event& e);  // scale lock / chord mode
     void applyStage(int part);
     // notes sounding at a program change keep their sound: a copy of the old part
     // parameters (ghost) and the old sample sets (held) until they end

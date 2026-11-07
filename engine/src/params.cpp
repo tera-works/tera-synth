@@ -12,7 +12,7 @@ namespace hsynth {
 
 namespace {
 
-const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt", "organ"};
+const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt", "organ", "granular"};
 const std::vector<std::string> kVaWaveNames = {"saw", "square", "pulse", "triangle", "sine", "supersaw"};
 const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch", "ladder", "comb+", "comb-", "formant"};
 const std::vector<std::string> kVfxNames = {"off", "saturate", "fold", "crush", "ring"};
@@ -20,7 +20,7 @@ const std::vector<std::string> kLfoWaveNames = {"sine", "triangle", "saw", "squa
 const std::vector<std::string> kModSourceNames = {
     "none", "velocity", "key", "ampenv", "env2", "lfo1", "lfo2", "modwheel", "pitchbend",
     "chanpressure", "notepressure", "notetimbre", "notex", "notepitch", "random", "breath", "expression", "cc1", "cc2", "cc3", "cc4", "lfo3", "env3", "constant", "relvelocity", "notetimbre+-",
-    "macro1", "macro2", "macro3", "macro4", "motion1", "motion2", "motion3", "motion4", "mseg"};
+    "macro1", "macro2", "macro3", "macro4", "motion1", "motion2", "motion3", "motion4", "mseg", "super"};
 const std::vector<std::string> kModDestNames = {
     "none", "pitch", "a.level", "b.level", "c.level", "morph", "a.pitch", "b.pitch", "c.pitch",
     "va.pw", "va.mix", "va.noise", "fm.index", "fm.feedback", "cutoff", "resonance", "drive",
@@ -28,7 +28,13 @@ const std::vector<std::string> kModDestNames = {
     "a.pan", "b.pan", "c.pan", "fm.op1.level", "fm.op2.level", "fm.op3.level", "fm.op4.level",
     "amp.attack", "amp.decay", "amp.release", "unison.detune", "vfx.mix", "lfo3.rate", "fm.op5.level", "fm.op6.level",
     "fm.op7.level", "fm.op8.level", "fm.modpitch", "va.osc2pitch", "va.detune", "filter.envamt", "env2.time", "env3.time",
-    "lfo1.depth", "lfo3.depth", "mod1.amt", "mod2.amt", "mod3.amt", "mod4.amt", "wt.detune", "wt.spread", "vfx.ratio"};
+    "lfo1.depth", "lfo3.depth", "mod1.amt", "mod2.amt", "mod3.amt", "mod4.amt", "wt.detune", "wt.spread", "vfx.ratio",
+    "cutoff2", "grain.pos"};
+const std::vector<std::string> kScaleNames = {"major", "minor", "dorian", "phrygian", "lydian", "mixolydian",
+                                              "harmonic minor", "melodic minor", "major penta", "minor penta", "blues",
+                                              "whole tone", "chromatic"};
+const std::vector<std::string> kChordNames = {"off", "major", "minor", "7", "maj7", "m7", "sus2", "sus4", "power",
+                                              "octave", "dim", "aug", "add9", "m9"};
 const std::vector<std::string> kFmWaveNames = {"sine", "half", "abs", "quarter", "alt", "altabs", "square", "saw"};
 
 struct Builder {
@@ -178,6 +184,22 @@ std::vector<ParamInfo> build() {
     b.fl(P::SeqGate, "seq.gate", "Sequencer", "Gate", 0.05f, 1, 0.8f);
     b.fl(P::SeqSwing, "seq.swing", "Sequencer", "Swing", 0, 0.5f, 0);
     b.in(P::SeqTranspose, "seq.transpose", "Sequencer", "Transpose", -24, 24, 0, "st");
+    // second filter
+    b.en(P::Filter2Type, "filter2.type", "Filter 2", "Type", kFilterNames, 0);
+    b.ex(P::Filter2Cutoff, "filter2.cutoff", "Filter 2", "Cutoff", 20, 20000, 2000, "Hz");
+    b.fl(P::Filter2Reso, "filter2.reso", "Filter 2", "Resonance", 0, 1, 0.15f);
+    b.fl(P::Filter2Drive, "filter2.drive", "Filter 2", "Drive", 0, 1, 0);
+    b.fl(P::Filter2Keytrack, "filter2.keytrack", "Filter 2", "Key Track", 0, 1, 0.5f);
+    b.fl(P::Filter2EnvAmt, "filter2.envamt", "Filter 2", "Env2 Amount", -1, 1, 0);
+    b.en(P::FilterRouting, "filter.routing", "Filter 2", "Routing", {"serial", "parallel"}, 0);
+    b.fl(P::FilterBalance, "filter.balance", "Filter 2", "Parallel Balance", 0, 1, 0.5f);
+    // performance
+    b.bo(P::ScaleLock, "scale.lock", "Performance", "Scale Lock", false);
+    b.en(P::ScaleRoot, "scale.root", "Performance", "Key", {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}, 0);
+    b.en(P::ScaleType, "scale.type", "Performance", "Scale", kScaleNames, 0);
+    b.en(P::ChordMode, "chord.mode", "Performance", "Chord", kChordNames, 0);
+    b.in(P::ChordInversion, "chord.inversion", "Performance", "Inversion", 0, 3, 0);
+    b.fl(P::SuperKnob, "perf.super", "Performance", "Super Knob", 0, 1, 0);
     for (int s = 0; s < kSeqSteps; ++s) {
         const std::string n = "seq.s" + std::to_string(s + 1), l = "Step " + std::to_string(s + 1) + " ";
         b.in(seqStep(s, SeqNote), n + ".note", "Sequencer", l + "Note", 0, 127, 60);
@@ -276,6 +298,15 @@ std::vector<ParamInfo> build() {
         b.fl(layer(l, OrgPercLevel), n + ".organ.perclevel", go, "Perc Level", 0, 1, 0.6f);
         b.fl(layer(l, OrgClick), n + ".organ.click", go, "Key Click", 0, 1, 0.3f);
         b.fl(layer(l, OrgLeak), n + ".organ.leak", go, "Leakage", 0, 1, 0.2f);
+
+        const std::string gg = g + " / Granular";
+        b.ex(layer(l, GrSize), n + ".grain.size", gg, "Grain Size", 0.005f, 0.5f, 0.08f, "s");
+        b.ex(layer(l, GrDensity), n + ".grain.density", gg, "Density", 1, 120, 25, "/s");
+        b.fl(layer(l, GrPos), n + ".grain.pos", gg, "Position", 0, 1, 0.3f);
+        b.fl(layer(l, GrPosRand), n + ".grain.posrand", gg, "Pos Jitter", 0, 1, 0.05f);
+        b.fl(layer(l, GrPitchRand), n + ".grain.pitchrand", gg, "Pitch Jitter", 0, 12, 0, "st");
+        b.fl(layer(l, GrSpread), n + ".grain.spread", gg, "Stereo Spread", 0, 1, 0.5f);
+        b.fl(layer(l, GrScan), n + ".grain.scan", gg, "Scan", -2, 2, 0, "x");
     }
 
     // Part insert effects: copies of the rack metadata of the insert blocks,

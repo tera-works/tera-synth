@@ -59,7 +59,7 @@ public:
     void copyScope(float* left, float* right, int n) const;
 
     // Recording to memory (UI thread starts/stops, audio thread writes).
-    void startRecording(double seconds);
+    void startRecording(double seconds, bool fromInput = false);  // fromInput: the audio input (sampling)
     // Returns recorded frames (interleaved stereo in out) and stops recording.
     size_t stopRecording(std::vector<float>& out);
     bool recording() const { return recording_.load(); }
@@ -93,6 +93,7 @@ private:
     std::vector<float> recBuf_;
     std::atomic<size_t> recPos_{0};
     std::atomic<bool> recording_{false};
+    std::atomic<bool> recInput_{false};
     // file recording
     void fileWriter();
     std::vector<float> fileRing_;              // interleaved stereo, power of two

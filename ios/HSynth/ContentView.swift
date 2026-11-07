@@ -13,8 +13,9 @@ struct ContentView: View {
                 case 2: MultiScreen()
                 case 3: LiveScreen(sets: model.sets)
                 case 4: PlayerScreen(player: model.player)
-                case 5: LibraryScreen(tab: $tab)
-                case 6: SystemScreen()
+                case 5: SampleScreen()
+                case 6: LibraryScreen(tab: $tab)
+                case 7: SystemScreen()
                 default: PlayScreen()
                 }
             }
@@ -39,7 +40,7 @@ struct ContentView: View {
             Spacer(minLength: 4)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    ForEach(Array(["Play", "Edit", "Multi", "Live", "Player", "Library", "System"].enumerated()), id: \.offset) { i, t in
+                    ForEach(Array(["Play", "Edit", "Multi", "Live", "Player", "Sample", "Library", "System"].enumerated()), id: \.offset) { i, t in
                         HwButton(title: t, lit: tab == i) { tab = i }
                     }
                 }
@@ -83,6 +84,8 @@ struct PlayScreen: View {
                         }
                     }
                     ArpPanel()
+                    PerformPanel()
+                    PhrasePanel()
                     Panel(title: "Keyboard") {
                         HStack {
                             stepper("Octave", value: "\((firstNote - 48) / 12)") {
@@ -129,12 +132,12 @@ struct EditScreen: View {
 
     private let pages: [(String, [String])] = [
         ("OSC", ["Layer A", "Layer A / VA", "Layer A / FM", "Layer A / PCM", "Layer A / WT", "Layer A / Organ",
-                 "Layer B", "Layer B / VA", "Layer C", "Layer C / VA"]),
-        ("Filter", ["Filter", "Voice FX"]),
+                 "Layer A / Granular", "Layer B", "Layer B / VA", "Layer B / Granular", "Layer C", "Layer C / VA"]),
+        ("Filter", ["Filter", "Filter 2", "Voice FX"]),
         ("Env", ["Amp Env", "Mod Env", "Env 3"]),
         ("LFO", ["LFO"]),
         ("Mod", ["Mod Matrix", "Macros", "Controllers"]),
-        ("Arp / Seq", ["Arpeggiator", "Sequencer"]),
+        ("Arp / Seq", ["Arpeggiator", "Sequencer", "Performance"]),
         ("Motion", ["MSEG", "Motion 1", "Motion 2", "Motion 3", "Motion 4"]),
         ("FX", ["FX Chain", "Send FX", "Sends", "FX Mod"]),
         ("Voice", ["Voice", "Tuning", "Master"]),

@@ -32,11 +32,11 @@ class EditPanel(private val a: MainActivity) {
 
     private val pages = listOf(
         Page("OSC", emptyList()),  // layer common + the engine of the layer's type, built by buildOsc()
-        Page("Filter", listOf("Filter", "Voice FX")),
+        Page("Filter", listOf("Filter", "Filter 2", "Voice FX")),
         Page("Env", listOf("Amp Env", "Mod Env", "Env 3")),
         Page("LFO", listOf("LFO")),
         Page("Mod", listOf("Mod Matrix", "Macros", "Controllers")),
-        Page("Arp / Seq", listOf("Arpeggiator", "Sequencer")),
+        Page("Arp / Seq", listOf("Arpeggiator", "Sequencer", "Performance")),
         Page("Motion", listOf("MSEG", "Motion 1", "Motion 2", "Motion 3", "Motion 4")),
         Page("FX", emptyList()),   // chain editor, built by buildFx()
         Page("Voice", listOf("Voice", "Tuning", "Master")),
@@ -189,7 +189,7 @@ class EditPanel(private val a: MainActivity) {
         }
         val d = { v: Int -> Ui.dp(a, v) }
         val extra: View? = when (type.lowercase()) {
-            "pcm" -> sampleRow(L10n.f("Samples: %s", NativeEngine.nativeSampleSetName(layer).ifEmpty { L10n.t("(none)") }),
+            "pcm", "granular" -> sampleRow(L10n.f("Samples: %s", NativeEngine.nativeSampleSetName(layer).ifEmpty { L10n.t("(none)") }),
                 "Choose…" to { a.libraryPanel.pickSamplesFor(layer) },
                 "Unload" to { NativeEngine.nativeUnloadSamples(layer); buildPage() })
             "wt" -> sampleRow(L10n.f("User table: %s", NativeEngine.nativeSampleSetName(layer).ifEmpty { L10n.t("(none)") }),

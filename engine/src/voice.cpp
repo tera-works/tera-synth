@@ -368,9 +368,11 @@ void Voice::prepare(float sampleRate) {
         l.organ.setSampleRate(sampleRate);
     }
     if (!combMem_) {
-        combMem_.reset(new float[2 * Comb::kSize]());
+        combMem_.reset(new float[4 * Comb::kSize]());
         filterL_.setCombBuffer(combMem_.get());
         filterR_.setCombBuffer(combMem_.get() + Comb::kSize);
+        filter2L_.setCombBuffer(combMem_.get() + 2 * Comb::kSize);
+        filter2R_.setCombBuffer(combMem_.get() + 3 * Comb::kSize);
     }
     active_ = false;
 }
@@ -418,6 +420,8 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     startDelay = 0;
     releaseAt = -1;
     filterR_.reset();
+    filter2L_.reset();
+    filter2R_.reset();
     vfx_.reset();
 
     const int vel127 = std::max(1, std::min(127, (int)std::lround(velocity_ * 127.0f)));
@@ -453,6 +457,29 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
             case LayerType::WT:
                 ly.wt.reset(rng_, (int)p[P::layer(l, P::WtUnison)]);
                 break;
+            case LayerType::Granular: {
+                ly.grRegion = nullptr;
+                for (auto& g : ly.grains) g.on = false;
+                ly.grTimer = 0.0f;
+                ly.grScan = 0.0;
+                const SampleSet* set = ctx.sampleSets[l];
+                const Region* regs[1];
+                RegionQuery q;
+                q.key = key_;
+                q.vel127 = vel127;
+                q.rand01 = random_;
+                q.seq = ctx.seq[l];
+                q.keyswitch = ctx.keyswitch[l];
+                if (set && set->findRegions(q, regs, 1) > 0 && regs[0]->sample && regs[0]->sample->frames > 64) {
+                    const Region* r = regs[0];
+                    ly.grRegion = r;
+                    ly.grBaseRatio = std::exp2(((double)(key_ - r->keycenter) * r->pitchKeytrack / 100.0 + r->transpose) / 12.0 +
+                                               r->tune / 1200.0);
+                } else {
+                    ly.finished = true;
+                }
+                break;
+            }
             case LayerType::PCM: {
                 const SampleSet* set = ctx.sampleSets[l];
                 const Region* regs[kMaxRegionsPerLayer];
@@ -575,6 +602,7 @@ void Voice::steal() {
 
 void Voice::stopLayer(int l) {
     Layer& ly = layers_[l];
+    ly.grRegion = nullptr;
     for (auto& pl : ly.pcm) pl.stop();
     for (int i = 0; i < kMaxReleaseRegions; ++i)
         if (relLayer_[i] == l) relPcm_[i].stop();
@@ -598,6 +626,7 @@ bool Voice::usesSet(const SampleSet* set) const {
     auto in = [&](const PcmPlayer& pl) { return lo && pl.active() && pl.region() >= lo && pl.region() < hi; };
     for (int l = 0; l < kNumLayers; ++l) {
         if (sets_[l] == set) return true;
+        if (lo && layers_[l].grRegion >= lo && layers_[l].grRegion < hi) return true;
         for (const auto& pl : layers_[l].pcm)
             if (in(pl)) return true;
     }
@@ -613,6 +642,10 @@ int Voice::dropSet(const SampleSet* set) {
     auto in = [&](const PcmPlayer& pl) { return pl.active() && pl.region() >= lo && pl.region() < hi; };
     int n = 0;
     for (int l = 0; l < kNumLayers; ++l) {
+        if (layers_[l].grRegion >= lo && layers_[l].grRegion < hi) {
+            layers_[l].grRegion = nullptr;
+            ++n;
+        }
         for (auto& pl : layers_[l].pcm)
             if (in(pl)) { pl.stop(); ++n; }
         if (sets_[l] == set) sets_[l] = nullptr;
@@ -623,6 +656,7 @@ int Voice::dropSet(const SampleSet* set) {
 }
 
 void Voice::fadeLayer(int l) {
+    layers_[l].grRegion = nullptr;  // grains stop at once (the set is retired)
     for (auto& pl : layers_[l].pcm) pl.fadeOut();
     for (int i = 0; i < kMaxReleaseRegions; ++i)
         if (relLayer_[i] == l) relPcm_[i].fadeOut();
@@ -664,6 +698,7 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
         case ModSource::Lfo3: return lfo3Value_ * lfo3Depth_;
         case ModSource::Env3: return env3_.level();
         case ModSource::Constant: return 1.0f;
+        case ModSource::Super: return ctx.superKnob;
         case ModSource::ReleaseVelocity: return releaseVel_;
         case ModSource::NoteTimbreBi: return noteTimbre_ * 2.0f - 1.0f;
         case ModSource::Macro1:
@@ -824,6 +859,18 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const bool hq = ctx.quality >= 2;
     filterL_.set(ftype, cutoff, reso, drive, sr, fmorph, hq);
     if (stereo_) filterR_.copyCoefsFrom(filterL_);
+    // second filter: serial after the first, or parallel beside it
+    const auto ftype2 = (FilterType)(int)p[P::Filter2Type];
+    const bool f2on = ftype2 != FilterType::Off;
+    const bool f2parallel = p[P::FilterRouting] > 0.5f;
+    const float f2bal = clampf(p[P::FilterBalance], 0.0f, 1.0f);
+    if (f2on) {
+        const float oct2 = p[P::Filter2Keytrack] * (float)(key_ - 60) / 12.0f + p[P::Filter2EnvAmt] * e2 * 6.0f +
+                           D(ModDest::Cutoff2) * 5.0f;
+        const float cutoff2 = p[P::Filter2Cutoff] * fastExp2(clampf(oct2, -12.0f, 12.0f));
+        filter2L_.set(ftype2, cutoff2, clampf(p[P::Filter2Reso], 0.0f, 1.0f), clampf(p[P::Filter2Drive], 0.0f, 1.0f), sr, fmorph, hq);
+        if (stereo_) filter2R_.copyCoefsFrom(filter2L_);
+    }
     const auto vfxType = (VfxType)(int)p[P::VfxType];
     if (vfxType != VfxType::Off)
         vfx_.set(vfxType, p[P::VfxAmount] + D(ModDest::VfxAmount), p[P::VfxMix] + D(ModDest::VfxMix),
@@ -959,6 +1006,70 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 ly.organ.render(tmp, n, midiToHz(lpitch) / sr, rng_);
                 break;
             }
+            case LayerType::Granular: {
+                std::fill(tmp, tmp + n, 0.0f);
+                std::fill(tmpR, tmpR + n, 0.0f);
+                const Region* r = ly.grRegion;
+                if (!r) {
+                    ly.finished = true;
+                    break;
+                }
+                layerStereo = true;
+                const Sample* s = r->sample;
+                // a streamed sample has only its head in memory: grains stay inside it
+                const int64_t avail = s->streamed ? std::min<int64_t>(s->frames, s->preloadFrames) : s->frames;
+                const double framesD = (double)std::max<int64_t>(2, avail - 2);
+                const float* c0 = s->channel(0);
+                const float* c1 = s->channel(s->channels > 1 ? 1 : 0);
+                const float size = std::max(0.002f, p[P::layer(l, P::GrSize)]);
+                const float density = std::max(0.5f, p[P::layer(l, P::GrDensity)]);
+                const float posRand = p[P::layer(l, P::GrPosRand)];
+                const float pitchRand = p[P::layer(l, P::GrPitchRand)];
+                const float spread = p[P::layer(l, P::GrSpread)];
+                ly.grScan += (double)p[P::layer(l, P::GrScan)] * (double)n / sr * s->sampleRate / framesD;
+                ly.grScan -= std::floor(ly.grScan);
+                double pos = (double)p[P::layer(l, P::GrPos)] + (double)D(ModDest::GrainPos) + ly.grScan;
+                pos -= std::floor(pos);
+                const double ratio = ly.grBaseRatio * std::exp2((double)(lpitch - (float)key_) / 12.0) * s->sampleRate / sr;
+                const float lenFrames = size * sr;
+                const float norm = 1.0f / std::sqrt(std::max(1.0f, density * size));
+                for (int i = 0; i < n; ++i) {
+                    ly.grTimer -= 1.0f;
+                    if (ly.grTimer <= 0.0f) {
+                        for (auto& gr : ly.grains) {
+                            if (gr.on) continue;
+                            double start = (pos + (double)(rng_.bipolar() * posRand * 0.5f)) * framesD;
+                            start = std::min(framesD - 1.0, std::max(0.0, start));
+                            gr.pos = start;
+                            gr.step = ratio * std::exp2((double)(rng_.bipolar() * pitchRand) / 12.0);
+                            gr.age = 0.0f;
+                            gr.len = lenFrames;
+                            const float gp = rng_.bipolar() * spread;
+                            gr.gl = norm * std::min(1.0f, 1.0f - gp);
+                            gr.gr = norm * std::min(1.0f, 1.0f + gp);
+                            gr.on = true;
+                            break;
+                        }
+                        ly.grTimer += sr / density * (0.8f + 0.4f * rng_.unipolar());
+                    }
+                    float sl = 0.0f, sr2 = 0.0f;
+                    for (auto& gr : ly.grains) {
+                        if (!gr.on) continue;
+                        const int64_t k = (int64_t)gr.pos;
+                        const float fr = (float)(gr.pos - (double)k);
+                        const float x = gr.age / gr.len;
+                        const float w = 4.0f * x * (1.0f - x);  // parabolic window
+                        sl += (c0[k] + (c0[k + 1] - c0[k]) * fr) * w * gr.gl;
+                        sr2 += (c1[k] + (c1[k + 1] - c1[k]) * fr) * w * gr.gr;
+                        gr.pos += gr.step;
+                        gr.age += 1.0f;
+                        if (gr.age >= gr.len || gr.pos >= framesD || gr.pos < 0.0) gr.on = false;
+                    }
+                    tmp[i] = sl;
+                    tmpR[i] = sr2;
+                }
+                break;
+            }
             case LayerType::PCM: {
                 std::fill(tmp, tmp + n, 0.0f);
                 std::fill(tmpR, tmpR + n, 0.0f);
@@ -999,6 +1110,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
 
     if (stereo && !stereo_) {
         filterR_.copyFrom(filterL_);  // continue from the mono state without a click
+        filter2R_.copyFrom(filter2L_);
         stereo_ = true;
     }
 
@@ -1015,6 +1127,17 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         const float env = ampEnv_.process() * a;
         float l = filterL_.process(bufL[i]);
         float r = stereo_ ? filterR_.process(bufR[i]) : l;
+        if (f2on) {
+            if (f2parallel) {
+                const float l2 = filter2L_.process(bufL[i]);
+                const float r2 = stereo_ ? filter2R_.process(bufR[i]) : l2;
+                l = l * (1.0f - f2bal) + l2 * f2bal;
+                r = r * (1.0f - f2bal) + r2 * f2bal;
+            } else {
+                l = filter2L_.process(l);
+                r = stereo_ ? filter2R_.process(r) : l;
+            }
+        }
         if (vfx_.active()) {
             vfx_.advance();
             l = vfx_.process(l, 0);

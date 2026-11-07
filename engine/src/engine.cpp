@@ -72,6 +72,8 @@ Engine::Engine()
     for (int t = 0; t < 2; ++t) {
         pendingIr_[t].store(nullptr);
     }
+    phrase_.reserve(kMaxPhraseEvents);
+    snapBuf_.reserve(kMaxPhraseEvents);
     for (auto& s : statSeqStep_) s.store(-1);
     for (int k = 0; k < kNumParts; ++k) {
         meterPeak_[k].store(0.0f);
@@ -116,6 +118,7 @@ Engine::~Engine() {
         delete h;
         h = nullptr;
     }
+    delete pendingPhrase_.exchange(nullptr);
     collectGarbage();
 }
 
@@ -271,6 +274,8 @@ void Engine::collectGarbage() {
     }
     fx::ConvIr* ir;
     while (retiredIr_.pop(ir)) delete ir;
+    PhraseSwap* ps;
+    while (retiredPhrases_.pop(ps)) delete ps;
     StagedProgram* st;
     while (retiredStages_.pop(st)) {
         if (st->appliedPart >= 0 && !st->keepSound) {
@@ -618,8 +623,117 @@ void Engine::releaseSustained(int part) {
         if (v.active() && v.part == part && v.sustained && !v.hold) v.release();
 }
 
+namespace {
+// scale lock: pitch classes of each ScaleType, as bit masks from the root
+constexpr uint16_t kScaleMasks[] = {
+    0xAB5,  // major 0 2 4 5 7 9 11
+    0x5AD,  // minor 0 2 3 5 7 8 10
+    0x6AD,  // dorian
+    0x5AB,  // phrygian
+    0xAD5,  // lydian
+    0x6B5,  // mixolydian
+    0x9AD,  // harmonic minor 0 2 3 5 7 8 11
+    0xAAD,  // melodic minor 0 2 3 5 7 9 11
+    0x295,  // major pentatonic 0 2 4 7 9
+    0x4A9,  // minor pentatonic 0 3 5 7 10
+    0x4E9,  // blues 0 3 5 6 7 10
+    0x555,  // whole tone
+    0xFFF,  // chromatic
+};
+// chord mode: intervals of each ChordType (index 0 = off)
+struct ChordDef {
+    int count;
+    int iv[6];
+};
+constexpr ChordDef kChords[] = {
+    {1, {0}},              {3, {0, 4, 7}},         {3, {0, 3, 7}},       {4, {0, 4, 7, 10}}, {4, {0, 4, 7, 11}},
+    {4, {0, 3, 7, 10}},    {3, {0, 2, 7}},         {3, {0, 5, 7}},       {3, {0, 7, 12}},    {2, {0, 12}},
+    {3, {0, 3, 6}},        {3, {0, 4, 8}},         {4, {0, 4, 7, 14}},   {5, {0, 3, 7, 10, 14}},
+};
+
+int quantizeToScale(int key, int root, int type) {
+    const int t = std::max(0, std::min((int)(sizeof kScaleMasks / sizeof kScaleMasks[0]) - 1, type));
+    const uint16_t mask = kScaleMasks[t];
+    for (int d = 0; d <= 6; ++d)
+        for (int s : {-d, d}) {  // the nearest scale note, the lower one on a tie
+            const int k = key + s;
+            const int pc = ((k - root) % 12 + 12) % 12;
+            if (mask & (1u << pc)) return std::max(0, std::min(127, k));
+        }
+    return key;
+}
+}  // namespace
+
+void Engine::performanceNote(int part, const Event& e) {
+    PartState& ps = parts_[part];
+    if (e.type == EventType::NoteOn && e.value > 0.0f) {
+        PartState::PerfNote* slot = nullptr;
+        for (auto& pn : ps.perf)
+            if (!pn.used) { slot = &pn; break; }
+        if (!slot) slot = &ps.perf[0];  // all in use: reuse (its notes keep going until a note-off finds them)
+        const bool lock = ps.p[P::ScaleLock] > 0.5f;
+        const int root = (int)ps.p[P::ScaleRoot], type = (int)ps.p[P::ScaleType];
+        const int ct = std::max(0, std::min((int)(sizeof kChords / sizeof kChords[0]) - 1, (int)ps.p[P::ChordMode]));
+        int iv[6];
+        const int n = kChords[ct].count;
+        for (int k = 0; k < n; ++k) iv[k] = kChords[ct].iv[k];
+        for (int inv = 0; inv < (int)ps.p[P::ChordInversion] && n > 1; ++inv) {  // lowest note up an octave
+            int lo = 0;
+            for (int k = 1; k < n; ++k) if (iv[k] < iv[lo]) lo = k;
+            iv[lo] += 12;
+        }
+        slot->used = true;
+        slot->id = e.noteId;
+        slot->key = e.key;
+        slot->count = 0;
+        // the root moves into the scale first, then the chord is built on it (and kept in the
+        // scale: diatonic chords)
+        const int base = lock ? quantizeToScale(e.key, root, type) : (int)e.key;
+        for (int k = 0; k < n; ++k) {
+            int key = std::max(0, std::min(127, base + iv[k]));
+            if (lock) key = quantizeToScale(key, root, type);
+            bool dup = false;
+            for (int j = 0; j < slot->count; ++j) dup = dup || slot->keys[j] == key;
+            if (dup) continue;
+            Event c = e;
+            c.key = (uint8_t)key;
+            c.noteId = e.noteId == 0 ? 0 : (slot->count == 0 ? e.noteId : ((e.noteId << 3) | (uint32_t)slot->count | 0x80000000u));
+            slot->keys[slot->count] = (uint8_t)key;
+            slot->ids[slot->count] = c.noteId;
+            ++slot->count;
+            partEvent(part, c);
+        }
+        return;
+    }
+    // note-off: the notes this key started
+    for (auto& pn : ps.perf) {
+        if (!pn.used || (e.noteId != 0 ? pn.id != e.noteId : pn.key != e.key)) continue;
+        for (int j = 0; j < pn.count; ++j) {
+            Event c = e;
+            c.type = EventType::NoteOff;
+            c.key = pn.keys[j];
+            c.noteId = pn.ids[j];
+            partEvent(part, c);
+        }
+        pn.used = false;
+        return;
+    }
+    partEvent(part, e);  // a key pressed before the mode was switched on
+}
+
 void Engine::partEvent(int part, const Event& e) {
     PartState& ps = parts_[part];
+    if ((e.type == EventType::NoteOn || e.type == EventType::NoteOff) && !ps.inPerf) {
+        bool active = ps.p[P::ScaleLock] > 0.5f || ps.p[P::ChordMode] > 0.5f;
+        if (!active && e.type == EventType::NoteOff)
+            for (const auto& pn : ps.perf) active = active || pn.used;  // switched off while keys were held
+        if (active) {
+            ps.inPerf = true;
+            performanceNote(part, e);
+            ps.inPerf = false;
+            return;
+        }
+    }
     if ((e.type == EventType::NoteOn || e.type == EventType::NoteOff) && (seqInput(part, e) || arpInput(part, e))) return;
     switch (e.type) {
         case EventType::NoteOn: noteOn(part, e); break;
@@ -694,11 +808,13 @@ void Engine::partEvent(int part, const Event& e) {
             arpStop(part); seqStop(part);
             ps.sustain = false;
             ps.stackSize = 0;
+            for (auto& pn : ps.perf) pn.used = false;
             for (auto& v : voices_) if (v.active() && v.part == part) v.release();
             break;
         case EventType::AllSoundOff:
             arpStop(part); seqStop(part);
             ps.stackSize = 0;
+            for (auto& pn : ps.perf) pn.used = false;
             for (auto& v : voices_) if (v.part == part) v.hardStop();
             break;
         case EventType::ProgramChange:  // handled by the host
@@ -1191,11 +1307,13 @@ void Engine::scheduleControl(int n) {
     for (int k = 0; k < parts; ++k) arp = arp || parts_[k].p[P::ArpOn] > 0.5f || parts_[k].arp.pendCount > 0;
     const bool seq = seqActive();
     const bool song = song_ && songWasPlaying_;
-    if (!arp && !seq && !song) return;
+    const bool phrase = phraseState_ != PhraseState::Empty && phraseState_ != PhraseState::Stopped;
+    if (!arp && !seq && !song && !phrase) return;
     for (int off = 0; off < n; off += kControlBlock) {
         const int m = std::min(kControlBlock, n - off);
         curOffset_ = off;
         if (song) runSong(off, m);
+        if (phrase) runPhrase(m);
         if (arp) runArps(off, m);
         if (seq) runSeqs(off, m);
     }
@@ -1810,9 +1928,13 @@ void Engine::process(float* L, float* R, int n) {
         parts_[k].ctx.params = parts_[k].p;
         for (int l = 0; l < kNumLayers; ++l) parts_[k].ctx.sampleSets[l] = currentSets_[k][l];
     }
+    phraseBlockStart();
     Event e;
     int budget = 512;
-    while (budget-- > 0 && events_.pop(e)) handleEvent(e);
+    while (budget-- > 0 && events_.pop(e)) {
+        handleEvent(e);
+        phraseCapture(e);
+    }
     songUpdate();
 
     updateClock(n);
@@ -1830,6 +1952,7 @@ void Engine::process(float* L, float* R, int n) {
         }
         ps.ctx.pitchBendSemis = ps.pitchBend * (ps.rpnBend >= 0.0f ? ps.rpnBend : ps.p[P::BendRange]);
         ps.ctx.pedal = ps.pedal;
+        ps.ctx.superKnob = p_[P::SuperKnob];  // one Super Knob for every part
     }
     VoiceContext& ctx0 = parts_[0].ctx;
 
@@ -1964,6 +2087,252 @@ void Engine::process(float* L, float* R, int n) {
                                std::memory_order_relaxed);
     }
     statBlocks_.fetch_add(1, std::memory_order_relaxed);
+}
+
+}  // namespace hsynth
+
+namespace hsynth {
+
+// ------------------------------------------------------------ phrase recorder
+
+void Engine::phraseRecord() { phraseCmds_.push(CmdRecord); }
+void Engine::phrasePlay() { phraseCmds_.push(CmdPlay); }
+void Engine::phraseStop() { phraseCmds_.push(CmdStop); }
+void Engine::phraseClear() { phraseCmds_.push(CmdClear); }
+void Engine::phraseUndo() { phraseCmds_.push(CmdUndo); }
+
+bool Engine::takePhraseSnapshot(std::vector<PhraseEvent>& out, double& lengthBeats) {
+    if (!snapReady_.load(std::memory_order_acquire)) return false;
+    out.assign(snapBuf_.begin(), snapBuf_.end());
+    lengthBeats = snapLen_;
+    snapReady_.store(false, std::memory_order_release);
+    return true;
+}
+
+void Engine::replacePhrase(const std::vector<PhraseEvent>& events, double lengthBeats) {
+    auto* s = new PhraseSwap();
+    s->events.reserve(kMaxPhraseEvents);
+    for (const auto& e : events)
+        if (s->events.size() < (size_t)kMaxPhraseEvents) s->events.push_back(e);
+    std::stable_sort(s->events.begin(), s->events.end(), [](const PhraseEvent& a, const PhraseEvent& b) { return a.beat < b.beat; });
+    s->length = lengthBeats;
+    delete pendingPhrase_.exchange(s, std::memory_order_acq_rel);  // a previous one never reached the audio thread
+}
+
+void Engine::phraseDispatch(const Event& e) {
+    if (e.type == EventType::NoteOn && e.value > 0.0f) {
+        if (playHeldCount_ < kPhraseHeld) playHeld_[playHeldCount_++] = {e.noteId, e.key, e.channel};
+    } else if (e.type == EventType::NoteOff || e.type == EventType::NoteOn) {
+        for (int i = 0; i < playHeldCount_; ++i)
+            if (playHeld_[i].id == e.noteId && playHeld_[i].key == e.key) {
+                playHeld_[i] = playHeld_[--playHeldCount_];
+                break;
+            }
+    }
+    handleEvent(e);
+}
+
+void Engine::phraseSilence() {
+    for (int i = 0; i < playHeldCount_; ++i) {
+        Event off = Event::noteOff(playHeld_[i].id, playHeld_[i].key);
+        off.channel = playHeld_[i].channel;
+        handleEvent(off);
+    }
+    playHeldCount_ = 0;
+}
+
+void Engine::phraseInsert(const PhraseEvent& pe, bool atPlayhead) {
+    if (phrase_.size() >= (size_t)kMaxPhraseEvents) return;  // full: the event is not recorded
+    if (!atPlayhead) {
+        phrase_.push_back(pe);  // first pass: in time order already
+        return;
+    }
+    // overdub: right at the playhead, before the events still to come at this
+    // position, and counted as played (it already sounded live)
+    const size_t i = std::min(phraseIdx_, phrase_.size());
+    phrase_.insert(phrase_.begin() + (std::ptrdiff_t)i, pe);
+    phraseIdx_ = i + 1;
+}
+
+void Engine::phraseCapture(const Event& e) {
+    if (phraseState_ != PhraseState::Recording && phraseState_ != PhraseState::Overdub) return;
+    switch (e.type) {
+        case EventType::NoteOn: case EventType::NoteOff: case EventType::Controller: case EventType::PitchBend:
+        case EventType::ModWheel: case EventType::ChannelPressure: case EventType::Sustain: break;
+        default: return;  // per-note expression, clock, looper... are not recorded
+    }
+    PhraseEvent pe;
+    pe.event = e;
+    pe.pass = phrasePass_;
+    pe.beat = phrasePos_;
+    // own note ids per pass: a loop note never collides with the same key played live
+    if (e.type == EventType::NoteOn || e.type == EventType::NoteOff)
+        pe.event.noteId = e.noteId == 0 ? 0 : ((e.noteId & 0xFFFFFu) | ((uint32_t)(phrasePass_ & 0x3FF) << 20) | 0x40000000u);
+    if (e.type == EventType::NoteOn && e.value > 0.0f) {
+        if (recHeldCount_ < kPhraseHeld) recHeld_[recHeldCount_++] = {pe.event.noteId, e.key, e.channel};
+    } else if (e.type == EventType::NoteOff) {
+        for (int i = 0; i < recHeldCount_; ++i)
+            if (recHeld_[i].id == pe.event.noteId && recHeld_[i].key == e.key) {
+                recHeld_[i] = recHeld_[--recHeldCount_];
+                break;
+            }
+    }
+    phraseInsert(pe, phraseState_ == PhraseState::Overdub);
+}
+
+void Engine::phraseClosePass(double offBeat) {
+    for (int i = 0; i < recHeldCount_; ++i) {
+        PhraseEvent pe;
+        pe.beat = offBeat;
+        pe.pass = phrasePass_;
+        pe.event = Event::noteOff(recHeld_[i].id, recHeld_[i].key);
+        pe.event.channel = recHeld_[i].channel;
+        if (phrase_.size() >= (size_t)kMaxPhraseEvents) break;
+        // in order: after every event at or before offBeat
+        auto it = std::upper_bound(phrase_.begin(), phrase_.end(), offBeat,
+                                   [](double b, const PhraseEvent& x) { return b < x.beat; });
+        const size_t at = (size_t)(it - phrase_.begin());
+        phrase_.insert(it, pe);
+        if (at < phraseIdx_) ++phraseIdx_;
+    }
+    recHeldCount_ = 0;
+}
+
+void Engine::phraseBlockStart() {
+    // a replaced phrase (quantized): same position
+    if (PhraseSwap* s = pendingPhrase_.load(std::memory_order_acquire)) {
+        if (retiredPhrases_.push(s)) {
+            pendingPhrase_.store(nullptr, std::memory_order_release);
+            phraseSilence();
+            phrase_.swap(s->events);  // s now holds the old events (freed by collectGarbage)
+            if (s->length > 0.0) phraseLen_ = s->length;
+            if (phraseLen_ > 0.0) phrasePos_ = std::fmod(phrasePos_, phraseLen_);
+            phraseIdx_ = (size_t)(std::lower_bound(phrase_.begin(), phrase_.end(), phrasePos_,
+                                                   [](const PhraseEvent& x, double b) { return x.beat < b; }) - phrase_.begin());
+            if (phraseState_ == PhraseState::Empty && !phrase_.empty()) phraseState_ = PhraseState::Stopped;
+        }
+    }
+    int cmd;
+    while (phraseCmds_.pop(cmd)) {
+        const int bars = phraseBars_.load(std::memory_order_relaxed);
+        switch (cmd) {
+            case CmdRecord:
+                if (phraseState_ == PhraseState::Empty || (phraseState_ == PhraseState::Stopped && phrase_.empty())) {
+                    phrase_.clear();
+                    phraseLen_ = bars > 0 ? 4.0 * bars : 0.0;
+                    phrasePos_ = 0.0;
+                    phraseIdx_ = 0;
+                    phrasePass_ = 1;
+                    recHeldCount_ = 0;
+                    phraseState_ = PhraseState::Recording;
+                } else if (phraseState_ == PhraseState::Playing || phraseState_ == PhraseState::Stopped) {
+                    if (phraseState_ == PhraseState::Stopped) {
+                        phrasePos_ = 0.0;
+                        phraseIdx_ = 0;
+                    }
+                    ++phrasePass_;
+                    recHeldCount_ = 0;
+                    phraseState_ = PhraseState::Overdub;
+                } else if (phraseState_ == PhraseState::Overdub) {
+                    phraseClosePass(phrasePos_);
+                    phraseState_ = PhraseState::Playing;
+                }
+                break;
+            case CmdPlay:
+                if (phraseState_ == PhraseState::Recording) {
+                    // the first pass ends: its length in whole bars (at least one)
+                    if (phraseLen_ <= 0.0) phraseLen_ = std::max(4.0, std::round(phrasePos_ / 4.0) * 4.0);
+                    phraseClosePass(phraseLen_ - 1e-4);
+                    phrasePos_ = std::fmod(phrasePos_, phraseLen_);
+                    phraseIdx_ = (size_t)(std::lower_bound(phrase_.begin(), phrase_.end(), phrasePos_,
+                                                           [](const PhraseEvent& x, double b) { return x.beat < b; }) -
+                                          phrase_.begin());
+                    phraseState_ = phrase_.empty() ? PhraseState::Empty : PhraseState::Playing;
+                } else if (phraseState_ == PhraseState::Stopped && !phrase_.empty()) {
+                    phrasePos_ = 0.0;
+                    phraseIdx_ = 0;
+                    phraseState_ = PhraseState::Playing;
+                }
+                break;
+            case CmdStop:
+                if (phraseState_ == PhraseState::Recording) {
+                    if (phraseLen_ <= 0.0) phraseLen_ = std::max(4.0, std::round(phrasePos_ / 4.0) * 4.0);
+                    phraseClosePass(phraseLen_ - 1e-4);
+                } else if (phraseState_ == PhraseState::Overdub) {
+                    phraseClosePass(phrasePos_);
+                }
+                phraseSilence();
+                phrasePos_ = 0.0;
+                phraseIdx_ = 0;
+                phraseState_ = phrase_.empty() ? PhraseState::Empty : PhraseState::Stopped;
+                break;
+            case CmdClear:
+                phraseSilence();
+                phrase_.clear();
+                phraseLen_ = phrasePos_ = 0.0;
+                phraseIdx_ = 0;
+                phrasePass_ = 0;
+                recHeldCount_ = 0;
+                phraseState_ = PhraseState::Empty;
+                break;
+            case CmdUndo: {
+                if (phrase_.empty()) break;
+                uint16_t last = 0;
+                for (const auto& pe : phrase_) last = std::max(last, pe.pass);
+                phraseSilence();
+                phrase_.erase(std::remove_if(phrase_.begin(), phrase_.end(), [last](const PhraseEvent& pe) { return pe.pass == last; }),
+                              phrase_.end());
+                recHeldCount_ = 0;
+                phrasePass_ = last > 0 ? (uint16_t)(last - 1) : 0;
+                phraseIdx_ = (size_t)(std::lower_bound(phrase_.begin(), phrase_.end(), phrasePos_,
+                                                       [](const PhraseEvent& x, double b) { return x.beat < b; }) - phrase_.begin());
+                if (phrase_.empty()) {
+                    phraseLen_ = phrasePos_ = 0.0;
+                    phraseState_ = PhraseState::Empty;
+                } else if (phraseState_ == PhraseState::Overdub) {
+                    phraseState_ = PhraseState::Playing;
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+    if (snapReq_.load(std::memory_order_acquire) && !snapReady_.load(std::memory_order_acquire)) {
+        snapBuf_.clear();
+        snapBuf_.insert(snapBuf_.end(), phrase_.begin(), phrase_.end());  // within the reserved capacity
+        snapLen_ = phraseLen_;
+        snapReq_.store(false, std::memory_order_relaxed);
+        snapReady_.store(true, std::memory_order_release);
+    }
+    phraseStateA_.store((int)phraseState_, std::memory_order_relaxed);
+    phraseLenA_.store(phraseLen_, std::memory_order_relaxed);
+    phrasePosA_.store(phrasePos_, std::memory_order_relaxed);
+    phraseCountA_.store((int)phrase_.size(), std::memory_order_relaxed);
+}
+
+void Engine::runPhrase(int frames) {
+    const double db = (double)jobBpf_ * frames;
+    if (phraseState_ == PhraseState::Recording) {
+        phrasePos_ += db;
+        if (phraseLen_ > 0.0 && phrasePos_ >= phraseLen_) {  // a set length: the first pass closes itself
+            phraseClosePass(phraseLen_ - 1e-4);
+            phrasePos_ = std::fmod(phrasePos_, phraseLen_);
+            phraseIdx_ = 0;
+            phraseState_ = PhraseState::Playing;
+        }
+        return;
+    }
+    if (phraseLen_ <= 0.0) return;
+    double end = phrasePos_ + db;
+    for (int wrap = 0; wrap < 4; ++wrap) {
+        const double stop = std::min(end, phraseLen_);
+        while (phraseIdx_ < phrase_.size() && phrase_[phraseIdx_].beat < stop) phraseDispatch(phrase_[phraseIdx_++].event);
+        if (end < phraseLen_) break;
+        end -= phraseLen_;  // the loop starts again
+        phraseIdx_ = 0;
+        if (end <= 0.0) break;
+    }
+    phrasePos_ = end < phraseLen_ ? end : std::fmod(end, phraseLen_);
 }
 
 }  // namespace hsynth

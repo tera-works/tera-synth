@@ -13,7 +13,7 @@
 
 namespace hsynth {
 
-enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Organ, Count };
+enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Organ, Granular, Count };
 enum class VaWave : int { Saw = 0, Square, Pulse, Triangle, Sine, SuperSaw, Count };
 enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Ladder, CombPlus, CombMinus, Formant, Count };
 // Voice FX: per-voice insert after the filter, before the amp envelope.
@@ -58,6 +58,7 @@ enum class ModSource : int {
     Motion3,
     Motion4,
     Mseg,           // per-voice multi-segment envelope, 0..1
+    Super,          // the Super Knob (perf.super, one for all parts), 0..1
     Count
 };
 
@@ -118,6 +119,8 @@ enum class ModDest : int {
     WtDetune,       // wavetable unison detune, x(1 + amount)
     WtSpread,       // wavetable unison stereo spread, +-1
     VfxRatio,       // ring modulator ratio, x4^amount
+    Cutoff2,        // filter 2 cutoff, +-5 octaves * amount
+    GrainPos,       // granular position (all granular layers), +-1
     Count
 };
 
@@ -222,6 +225,22 @@ enum Global : int {
     SeqTranspose,   // -24..24 semitones
     SeqStepBase,    // 32 steps x SeqStepCount (note, velocity (0 = rest), length in steps)
     SeqStepLast = SeqStepBase + 32 * 3 - 1,
+    // second voice filter (after the first, or beside it)
+    Filter2Type,
+    Filter2Cutoff,
+    Filter2Reso,
+    Filter2Drive,
+    Filter2Keytrack,
+    Filter2EnvAmt,
+    FilterRouting,  // serial (1 -> 2) / parallel (1 + 2)
+    FilterBalance,  // parallel: 0 = filter 1 only .. 1 = filter 2 only
+    // performance (per part)
+    ScaleLock,      // notes are moved to the nearest note of the scale
+    ScaleRoot,      // 0 = C .. 11 = B
+    ScaleType,      // ScaleType
+    ChordMode,      // one key plays a chord (ChordType, 0 = off)
+    ChordInversion, // 0..3
+    SuperKnob,      // global (not per part): mod source "super" in every part
     GlobalCount
 };
 
@@ -295,6 +314,13 @@ enum LayerParam : int {
     OrgPercLevel,
     OrgClick,       // key click level
     OrgLeak,        // tonewheel leakage
+    GrSize,         // granular: grain length, seconds
+    GrDensity,      // grains per second
+    GrPos,          // read position in the sample 0..1
+    GrPosRand,      // position jitter 0..1 (of the sample)
+    GrPitchRand,    // pitch jitter, semitones
+    GrSpread,       // stereo spread of the grains 0..1
+    GrScan,         // position movement while the note sounds, x real time (-2..2, 0 = frozen)
     LayerParamCount
 };
 
@@ -342,7 +368,8 @@ constexpr int kNumParts = 16;
 // True for ids stored per part (everything below the effect rack except the
 // master volume, limiter switch and master tune).
 constexpr bool isPartParam(int id) {
-    return id >= 0 && id < P::kPartParams && id != P::MasterVolume && id != P::Limiter && id != P::MasterTune;
+    return id >= 0 && id < P::kPartParams && id != P::MasterVolume && id != P::Limiter && id != P::MasterTune &&
+           id != P::SuperKnob;
 }
 
 // Per-part mix settings (multi-timbral mode only; see engine.h).

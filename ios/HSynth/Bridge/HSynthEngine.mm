@@ -61,6 +61,8 @@ float toNormalized(const ParamInfo& p, float v) {
     std::unique_ptr<MidiOut> _midiOut;
     int _editPart;
     NSString* _recordPath;
+    std::vector<float> _takeL, _takeR;    // the last sampling take
+    int _takeRate;
 }
 
 - (instancetype)initWithFactoryDir:(NSString*)factoryDir userDir:(NSString*)userDir {
@@ -535,6 +537,103 @@ float toNormalized(const ParamInfo& p, float v) {
     _current = -1;
     _currentName = ns(p.name);
     return _currentName;
+}
+
+// ---------------------------------------------------------------- phrase recorder
+
+- (void)phraseRecord { _engine->phraseRecord(); }
+- (void)phrasePlay { _engine->phrasePlay(); }
+- (void)phraseStop { _engine->phraseStop(); }
+- (void)phraseClear { _engine->phraseClear(); }
+- (void)phraseUndo { _engine->phraseUndo(); }
+- (int)phraseBars { return _engine->phraseBars(); }
+- (void)setPhraseBars:(int)bars { _engine->setPhraseBars(bars); }
+- (int)phraseState { return (int)_engine->phraseState(); }
+- (double)phraseLength { return _engine->phraseLength(); }
+- (double)phrasePosition { return _engine->phrasePosition(); }
+- (int)phraseEventCount { return _engine->phraseEventCount(); }
+
+// a copy of the phrase from the audio thread (it answers within a block)
+- (BOOL)phraseSnapshot:(std::vector<Engine::PhraseEvent>&)events length:(double&)len {
+    _engine->requestPhraseSnapshot();
+    for (int i = 0; i < 100; ++i) {
+        if (_engine->takePhraseSnapshot(events, len)) return YES;
+        [NSThread sleepForTimeInterval:0.005];
+    }
+    return NO;
+}
+
+- (BOOL)phraseQuantize:(double)grid {
+    std::vector<Engine::PhraseEvent> ev;
+    double len = 0.0;
+    if (![self phraseSnapshot:ev length:len] || len <= 0.0) return NO;
+    quantizePhrase(ev, len, grid);
+    _engine->replacePhrase(ev, len);
+    return YES;
+}
+
+- (nullable NSString*)phraseExport:(NSString*)path repeats:(int)repeats {
+    std::vector<Engine::PhraseEvent> ev;
+    double len = 0.0;
+    if (![self phraseSnapshot:ev length:len]) return @"the audio is not running";
+    std::string err;
+    const double bpm = _engine->getParam(P::fxChain(P::FxTempo));
+    if (!writePhraseSmf(str(path), ev, len, bpm, repeats, err)) return ns(err);
+    return nil;
+}
+
+// ---------------------------------------------------------------- sampling
+
+- (void)startSampling:(BOOL)fromInput { _audio->startRecording(30.0, fromInput); }
+- (double)samplingSeconds { return _audio->recording() ? _audio->recordedSeconds() : -1.0; }
+- (BOOL)stopSampling {
+    std::vector<float> inter;
+    const size_t frames = _audio->stopRecording(inter);
+    if (frames == 0) return NO;
+    _takeL.resize(frames);
+    _takeR.resize(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        _takeL[i] = inter[i * 2];
+        _takeR[i] = inter[i * 2 + 1];
+    }
+    _takeRate = _audio->stats().sampleRate > 0 ? _audio->stats().sampleRate : 48000;
+    return YES;
+}
+- (long long)takeFrames { return (long long)_takeL.size(); }
+- (int)takeRate { return _takeRate > 0 ? _takeRate : 48000; }
+- (NSArray<NSNumber*>*)takeWaveform:(int)points {
+    NSMutableArray* a = [NSMutableArray arrayWithCapacity:(NSUInteger)std::max(0, points)];
+    const size_t n = _takeL.size();
+    for (int p = 0; p < points; ++p) {
+        const size_t a0 = n * (size_t)p / (size_t)points, a1 = std::max(a0 + 1, n * (size_t)(p + 1) / (size_t)points);
+        float pk = 0.0f;
+        for (size_t i = a0; i < a1 && i < n; ++i) pk = std::max(pk, std::max(std::fabs(_takeL[i]), std::fabs(_takeR[i])));
+        [a addObject:@(std::min(1.0f, pk))];
+    }
+    return a;
+}
+- (NSArray<NSNumber*>*)takeBounds {
+    int64_t s = 0, e = 0;
+    sampleBounds(_takeL, _takeR, -40.0f, s, e);
+    return @[ @(s), @(e) ];
+}
+- (nullable NSArray<NSNumber*>*)takeFindLoopFrom:(long long)start to:(long long)end {
+    int64_t ls = 0, le = 0;
+    if (!findLoop(_takeL, _takeR, start, end, ls, le)) return nil;
+    return @[ @(ls), @(le) ];
+}
+- (nullable NSString*)saveTake:(NSString*)name start:(long long)start end:(long long)end normalize:(BOOL)normalize
+                     loopStart:(long long)loopStart loopEnd:(long long)loopEnd rootKey:(int)rootKey layer:(int)layer {
+    if (_takeL.empty()) return @"nothing recorded";
+    std::string safe;
+    for (char c : str(name)) safe.push_back(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == ' ' ? c : '_');
+    if (safe.empty()) safe = "sample";
+    const float gain = normalize ? normalizeGain(_takeL, _takeR, start, end, -1.0f) : 1.0f;
+    std::string sfz, err;
+    if (!saveSampledInstrument(_libraryDir + "/user/sampled", safe, _takeL, _takeR, [self takeRate], start, end, gain,
+                               loopEnd > loopStart ? loopStart : -1, loopEnd, rootKey, sfz, err))
+        return ns(err);
+    return [self loadSamples:ns(sfz) layer:layer];
 }
 
 - (nullable NSArray<NSString*>*)loadScene:(NSString*)path {

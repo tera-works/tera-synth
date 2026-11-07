@@ -172,9 +172,11 @@ void AudioOut::audioCallback(float* out, const float* in, uint32_t frames, uint3
             sp = (sp + 1) & (kScopeSize - 1);
         }
         if (rec) {
+            const bool fromIn = recInput_.load(std::memory_order_relaxed);
+            const bool haveIn = in && inChannels > 0;
             for (int i = 0; i < n && rp + 2 <= recBuf_.size(); ++i) {
-                recBuf_[rp++] = left_[i];
-                recBuf_[rp++] = right_[i];
+                recBuf_[rp++] = fromIn ? (haveIn ? inL_[i] : 0.0f) : left_[i];
+                recBuf_[rp++] = fromIn ? (haveIn ? inR_[i] : 0.0f) : right_[i];
             }
         }
         if (fileRec_.load(std::memory_order_acquire)) {
@@ -243,8 +245,9 @@ void AudioOut::copyScope(float* left, float* right, int n) const {
     }
 }
 
-void AudioOut::startRecording(double seconds) {
+void AudioOut::startRecording(double seconds, bool fromInput) {
     if (recording_) return;
+    recInput_.store(fromInput);
     recBuf_.assign((size_t)(seconds * sampleRate_) * 2, 0.0f);  // UI thread allocates
     recPos_.store(0);
     recording_.store(true, std::memory_order_release);
