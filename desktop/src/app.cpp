@@ -100,6 +100,7 @@ void App::shutdown() {
         taskCv_.notify_all();
         loader_.join();
     }
+    remote_.reset();  // before the MIDI ports and the engine
     midi_.closeAll();
     audio_.stop();
     saveSettings();
@@ -241,6 +242,7 @@ void App::init(float dpiScale) {
 
     midi_.setMpe(s_.mpe);
     midiPorts_ = midi_.openAll();
+    startRemote();
     log(midiPorts_.empty() ? "no MIDI input ports" : "MIDI inputs: " + std::to_string(midiPorts_.size()));
     if (!s_.midiOutName.empty()) {
         std::string e;
@@ -255,6 +257,33 @@ void App::init(float dpiScale) {
     fs::path start = utf8ToPath(s_.lastPreset);
     if (s_.lastPreset.empty() || !fs::exists(start)) start = presets_.empty() ? fs::path() : presets_.front().file;
     if (!start.empty()) loadPreset(start);
+}
+
+void App::startRemote() {
+    RemoteControl::Config cfg;
+    cfg.deviceName = "HSynth Desktop";
+    cfg.version = "0.7.0";
+    cfg.libraryRoot = pathToUtf8(lib_.libraryRoot());
+    cfg.presetDirs = {pathToUtf8(lib_.dataDir() / "presets" / "factory"), pathToUtf8(lib_.userPresetDir())};
+    cfg.userPresetDir = pathToUtf8(lib_.userPresetDir());
+    cfg.midiDir = pathToUtf8(lib_.dataDir() / "midi");
+    std::error_code ec;
+    fs::create_directories(lib_.dataDir() / "midi", ec);
+    cfg.learn = &learn_;
+    RemoteControl::Hooks hooks;
+    hooks.setMultiTimbral = [this](bool on) { midi_.setMultiTimbral(on); };
+    hooks.setMpe = [this](bool on) {
+        midi_.setMpe(on);
+        post([this, on] { s_.mpe = on; });
+    };
+    hooks.presetLoaded = [this](int part, const std::string& name) {
+        post([this, part, name] {
+            if (part >= 0 && part < kNumParts) partNames_[part] = name;
+            if (part <= 0) currentPresetName_ = name;
+            log("remote: preset \"" + name + "\"");
+        });
+    };
+    remote_ = std::make_unique<RemoteLink>(engine_, midi_, cfg, hooks);
 }
 
 void App::startAudio() {
@@ -1395,6 +1424,11 @@ void App::drawMonitor() {
     if (midiPorts_.empty()) ImGui::TextColored(kDim, "no MIDI input ports");
     for (auto& p : midiPorts_) ImGui::BulletText("%s", p.c_str());
     ImGui::Text("events %d   last %s", midi_.eventCount(), midi_.lastMessage().c_str());
+    if (remote_) {
+        const std::string port = remote_->replyPort();
+        ImGui::TextColored(kDim, "SysEx remote: %u requests%s%s", remote_->requests(), port.empty() ? "" : ", replies to ",
+                           port.c_str());
+    }
     drawMidiOut();
     drawMidiMap();
     ImGui::EndChild();

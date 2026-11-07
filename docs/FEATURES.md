@@ -26,6 +26,7 @@
 | エラー表示 | ✅ | Library 画面のメッセージログ（警告・エラー色分け） |
 | USB MIDI 入力 | 🟡 | android.media.midi、ホットプラグ。実機・実MIDI機器では未検証 |
 | MIDI 2.0 UMP | 🟡 | 変換器はテスト済み。Android 13+ の UMP デバイスとの実機接続は未検証 |
+| SysEx リモート制御 | ✅ | 状態すべての取得・変更と全操作を SysEx（JSON、双方向・変更通知つき）で。Android / iOS / デスクトップ共通。PC ツール `desktop/tools/hsynth_remote.py`。詳細 [SYSEX.md](SYSEX.md)。iOS / macOS の CoreMIDI 部分は未コンパイル |
 | デバッグ計測 | ✅ | Monitor 画面、オフライン `hsynth_bench` |
 
 ### SFZ 対応範囲

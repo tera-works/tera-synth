@@ -31,8 +31,18 @@ public:
     int eventCount() const { return eventCount_.load(); }
     std::string lastMessage() const;
 
+    // System Exclusive messages (complete F0..F7, driver thread) with the name of the
+    // output port that reaches the sender ("" = unknown, kVirtualPort = our virtual
+    // source). Used by the SysEx remote control (remote_link.h).
+    using SysExHandler = std::function<void(const uint8_t* data, size_t len, const std::string& replyPort)>;
+    void setSysExHandler(SysExHandler h);
+    static constexpr const char* kVirtualPort = "<virtual>";
+    // Sends through the virtual "HSynth" source (CoreMIDI); false where there is none.
+    bool sendVirtual(const uint8_t* data, size_t len);
+
     // Called from the driver thread with one complete MIDI message.
     void onBytes(const uint8_t* data, size_t len);
+    void onSysEx(const uint8_t* data, size_t len, const std::string& replyPort);
     // ... or with Universal MIDI Packets (words in host order).
     void onUmp(const uint32_t* words, size_t count);
 
@@ -47,4 +57,6 @@ private:
     std::string last_;
     std::vector<std::string> names_;
     hsynth::MidiLearn* learn_ = nullptr;
+    std::mutex sysexMutex_;
+    SysExHandler sysex_;
 };

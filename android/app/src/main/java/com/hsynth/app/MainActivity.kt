@@ -53,6 +53,7 @@ class MainActivity : Activity() {
     lateinit var player: PlayerPanel
     lateinit var multi: MultiPanel
     lateinit var midiOut: MidiOutput
+    lateinit var remote: RemoteLink
     /** Name of the sound loaded into each part (for the Multi page and the header). */
     val partNames = Array(16) { "" }
     private var learnArmed = -1
@@ -98,6 +99,7 @@ class MainActivity : Activity() {
         NativeEngine.nativeSetMpe(prefs.getBoolean("mpe", false))
         midi = MidiInput(this) { monitor.refreshMidi() }
         midiOut = MidiOutput(this)
+        remote = RemoteLink(this)
         NativeEngine.nativeLearnLoad(File(filesDir, "midi_map.json").absolutePath)
 
         buildUi(0)
@@ -112,6 +114,7 @@ class MainActivity : Activity() {
             }
             ui.post {
                 if (isDestroyed) return@post
+                remote.start()  // SysEx remote control (after the factory presets are in place)
                 libraryPanel.refresh()
                 val last = prefs.getString("lastPreset", null)?.let { File(it) }?.takeIf { it.exists() }
                 loadPreset(last ?: library.presets().firstOrNull()?.file ?: return@post)
@@ -221,6 +224,12 @@ class MainActivity : Activity() {
             it.hide(WindowInsets.Type.systemBars())
             it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
+    }
+
+    /** A SysEx remote request changed the sound: show the new values. */
+    fun onRemoteChange() {
+        if (currentTab == 1) edit.refreshValues()
+        if (currentTab == 2) multi.refresh()
     }
 
     fun selectTab(i: Int) {
@@ -514,6 +523,7 @@ class MainActivity : Activity() {
                 }
             }
             NativeEngine.nativeCollectGarbage()
+            remote.poll()
             updateBackgroundPlayback()
             ui.postDelayed(this, 250)
         }
@@ -521,6 +531,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         ui.removeCallbacks(statsTick)
+        remote.stop()
         if (instance === this) instance = null
         PlaybackService.stop(this)
         if (audioRunning) stopAudio()

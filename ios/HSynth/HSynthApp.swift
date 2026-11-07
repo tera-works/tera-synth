@@ -33,6 +33,22 @@ final class SynthModel: ObservableObject {
     private var background = false
     private var idleSince: Date?
 
+    // SysEx remote control: a request changed the sound -> the views re-read the engine
+    private var remoteSeen = 0
+    private var remoteSongsSeen = 0
+    func pollRemote() {
+        let c = engine.remoteChanges
+        if c != remoteSeen {
+            remoteSeen = c
+            revision += 1
+        }
+        let s = engine.remoteSongCount
+        if s != remoteSongsSeen {
+            remoteSongsSeen = s
+            songLoaded()
+        }
+    }
+
     init() {
         let factory = Bundle.main.resourcePath ?? ""
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
@@ -44,6 +60,7 @@ final class SynthModel: ObservableObject {
             self.cpu = self.engine.cpuLoad
             self.checkBackgroundIdle()
             self.pollLearn()
+            self.pollRemote()
         }
         engine.maxVoices = Int32(UserDefaults.standard.object(forKey: "maxVoices") as? Int ?? 128)
         engine.setQuality(Int32(UserDefaults.standard.object(forKey: "quality") as? Int ?? 1))

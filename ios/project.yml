@@ -30,6 +30,8 @@ targets:
         group: Host
       - path: ../desktop/src/midi_out_coremidi.cpp
         group: Host
+      - path: ../desktop/src/remote_link.cpp
+        group: Host
       - path: ../android/app/src/main/assets/presets
         type: folder
         buildPhase: resources
@@ -69,6 +71,9 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown]
         NSMicrophoneUsageDescription: "The microphone feeds the vocoder and the looper."
+        # network MIDI session: a PC (rtpMIDI) can play and remote-control the synth over Wi-Fi
+        NSLocalNetworkUsageDescription: "Network MIDI lets a computer play and control HSynth over Wi-Fi."
+        NSBonjourServices: [_apple-midi._udp]
         # Documents (library / presets / midi) is visible in the Files app and in Finder (iPhone > Files),
         # so the user's samples and MIDI files are copied in there and never bundled
         UIFileSharingEnabled: true

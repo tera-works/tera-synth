@@ -3,8 +3,13 @@
 // devices with their full resolution and per-note controllers, MIDI 1.0 devices
 // converted), which go to the portable MidiTranslator through MidiIn::onUmp.
 // The MIDI 1.0 byte path (readProc / onBytes) remains for older systems.
+// SysEx (MIDI 1.0 bytes or UMP SysEx7 packets) is assembled per source and goes to
+// the SysEx handler with the name of the destination of the same device (replies).
+// A virtual destination + source named "HSynth" let other apps on this machine
+// (and a PC through a network MIDI session) talk to the synth directly.
 #include <CoreMIDI/CoreMIDI.h>
 
+#include <algorithm>
 #include <cstdio>
 
 #include "midi_in.h"
@@ -31,6 +36,19 @@ std::string endpointName(MIDIEndpointRef e) {
     return buf;
 }
 
+// The destination of the device a source belongs to (its first one), else a destination
+// with the same name; "" if there is none.
+std::string replyDestination(MIDIEndpointRef src) {
+    MIDIEntityRef entity = 0;
+    if (MIDIEndpointGetEntity(src, &entity) == noErr && entity && MIDIEntityGetNumberOfDestinations(entity) > 0)
+        if (MIDIEndpointRef d = MIDIEntityGetDestination(entity, 0)) return endpointName(d);
+    const std::string name = endpointName(src);
+    const ItemCount n = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < n; ++i)
+        if (MIDIEndpointRef d = MIDIGetDestination(i); d && endpointName(d) == name) return name;
+    return "";
+}
+
 // Length of the channel / system message starting with `status` (SysEx excluded).
 size_t messageLength(uint8_t status) {
     if (status < 0xF0) {
@@ -45,25 +63,76 @@ size_t messageLength(uint8_t status) {
 }
 }  // namespace
 
+// Per connected source: where replies go and the SysEx being received.
+struct Source {
+    MidiIn* self = nullptr;
+    MIDIEndpointRef endpoint = 0;
+    std::string reply;           // destination name of the same device
+    std::vector<uint8_t> sysex;
+    void sysexBytes(const uint8_t* b, size_t n) {
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t c = b[i];
+            if (c == 0xF0) sysex.clear();
+            if (c == 0xF0 || !sysex.empty()) sysex.push_back(c);
+            if (c == 0xF7 && !sysex.empty()) {
+                self->onSysEx(sysex.data(), sysex.size(), reply);
+                sysex.clear();
+            }
+        }
+        if (sysex.size() > (1u << 20)) sysex.clear();
+    }
+    // UMP: SysEx7 packets (message type 3) -> bytes
+    void ump(const uint32_t* w, size_t count) {
+        for (size_t i = 0; i < count;) {
+            const int mt = (int)(w[i] >> 28);
+            const int len = hsynth::MidiTranslator::umpWordCount(w[i]);
+            if (mt == 0x3 && i + 1 < count) {
+                const int status = (int)((w[i] >> 20) & 0xF), nb = std::min(6, (int)((w[i] >> 16) & 0xF));
+                const uint8_t d[6] = {(uint8_t)(w[i] >> 8), (uint8_t)w[i], (uint8_t)(w[i + 1] >> 24),
+                                      (uint8_t)(w[i + 1] >> 16), (uint8_t)(w[i + 1] >> 8), (uint8_t)w[i + 1]};
+                const uint8_t f0 = 0xF0, f7 = 0xF7;
+                if (status == 0 || status == 1) sysexBytes(&f0, 1);  // complete / start
+                for (int k = 0; k < nb && !sysex.empty(); ++k) sysex.push_back(d[k] & 0x7F);
+                if (status == 0 || status == 3) sysexBytes(&f7, 1);  // complete / end
+            }
+            i += (size_t)std::max(1, len);
+        }
+    }
+};
+
 struct MidiIn::Impl {
     MIDIClientRef client = 0;
     MIDIPortRef port = 0;
-    std::vector<MIDIEndpointRef> sources;
+    std::vector<std::unique_ptr<Source>> sources;
+    MIDIEndpointRef virtualDest = 0, virtualSrc = 0;
+    std::unique_ptr<Source> virtualIn;  // what arrives at the virtual destination
     uint8_t running = 0;  // running status
 };
 
 namespace {
-void readProc(const MIDIPacketList* list, void* refCon, void*) {
+void readProc(const MIDIPacketList* list, void* refCon, void* srcRef) {
     auto* self = static_cast<MidiIn*>(refCon);
+    auto* src = static_cast<Source*>(srcRef);
     const MIDIPacket* p = &list->packet[0];
     for (UInt32 n = 0; n < list->numPackets; ++n) {
         size_t i = 0;
         uint8_t running = 0;
+        // the continuation of a SysEx that started in an earlier packet
+        if (src && !src->sysex.empty()) {
+            size_t k = 0;
+            while (k < p->length && p->data[k] < 0x80) ++k;
+            if (k < p->length && p->data[k] == 0xF7) ++k;
+            src->sysexBytes(p->data, k);
+            i = k;
+        }
         while (i < p->length) {
             uint8_t b = p->data[i];
-            if (b == 0xF0) {  // skip SysEx
-                while (i < p->length && p->data[i] != 0xF7) ++i;
-                ++i;
+            if (b == 0xF0) {  // SysEx: to the handler (it may continue in the next packet)
+                size_t k = i;
+                while (k < p->length && p->data[k] != 0xF7) ++k;
+                if (k < p->length) ++k;
+                if (src) src->sysexBytes(p->data + i, k - i);
+                i = k;
                 continue;
             }
             uint8_t msg[3];
@@ -92,6 +161,8 @@ void notifyProc(const MIDINotification*, void*) {}
 MidiIn::MidiIn(hsynth::Engine& engine) : impl_(std::make_unique<Impl>()), engine_(engine) {}
 MidiIn::~MidiIn() {
     closeAll();
+    if (impl_->virtualDest) MIDIEndpointDispose(impl_->virtualDest);
+    if (impl_->virtualSrc) MIDIEndpointDispose(impl_->virtualSrc);
     if (impl_->port) MIDIPortDispose(impl_->port);
     if (impl_->client) MIDIClientDispose(impl_->client);
 }
@@ -103,9 +174,11 @@ std::vector<std::string> MidiIn::openAll() {
         OSStatus st = -1;
         if (__builtin_available(macOS 11.0, iOS 14.0, *)) {
             st = MIDIInputPortCreateWithProtocol(impl_->client, CFSTR("HSynth In"), kMIDIProtocol_2_0, &impl_->port,
-                                                 ^(const MIDIEventList* list, void*) {
+                                                 ^(const MIDIEventList* list, void* srcRef) {
+                                                     auto* src = static_cast<Source*>(srcRef);
                                                      const MIDIEventPacket* p = &list->packet[0];
                                                      for (UInt32 k = 0; k < list->numPackets; ++k) {
+                                                         if (src) src->ump(p->words, p->wordCount);
                                                          onUmp(p->words, p->wordCount);
                                                          p = MIDIEventPacketNext(p);
                                                      }
@@ -113,15 +186,36 @@ std::vector<std::string> MidiIn::openAll() {
         }
         if (st != noErr && MIDIInputPortCreate(impl_->client, CFSTR("HSynth In"), readProc, this, &impl_->port) != noErr)
             return {};
+        // virtual endpoints: other apps / a PC (network session) can address the synth directly
+        impl_->virtualIn = std::make_unique<Source>();
+        impl_->virtualIn->self = this;
+        impl_->virtualIn->reply = kVirtualPort;
+        Source* vin = impl_->virtualIn.get();
+        if (__builtin_available(macOS 11.0, iOS 14.0, *)) {
+            MIDIDestinationCreateWithProtocol(impl_->client, CFSTR("HSynth"), kMIDIProtocol_2_0, &impl_->virtualDest,
+                                              ^(const MIDIEventList* list, void*) {
+                                                  const MIDIEventPacket* p = &list->packet[0];
+                                                  for (UInt32 k = 0; k < list->numPackets; ++k) {
+                                                      vin->ump(p->words, p->wordCount);
+                                                      onUmp(p->words, p->wordCount);
+                                                      p = MIDIEventPacketNext(p);
+                                                  }
+                                              });
+            MIDISourceCreateWithProtocol(impl_->client, CFSTR("HSynth"), kMIDIProtocol_1_0, &impl_->virtualSrc);
+        }
     }
     std::vector<std::string> names;
     const ItemCount n = MIDIGetNumberOfSources();
     for (ItemCount i = 0; i < n; ++i) {
         MIDIEndpointRef src = MIDIGetSource(i);
-        if (!src) continue;
-        if (MIDIPortConnectSource(impl_->port, src, nullptr) == noErr) {
-            impl_->sources.push_back(src);
+        if (!src || src == impl_->virtualSrc) continue;  // not our own output
+        auto s = std::make_unique<Source>();
+        s->self = this;
+        s->endpoint = src;
+        s->reply = replyDestination(src);
+        if (MIDIPortConnectSource(impl_->port, src, s.get()) == noErr) {
             names.push_back(endpointName(src));
+            impl_->sources.push_back(std::move(s));
         }
     }
     std::lock_guard<std::mutex> lock(mutex_);
@@ -130,7 +224,7 @@ std::vector<std::string> MidiIn::openAll() {
 }
 
 void MidiIn::closeAll() {
-    for (MIDIEndpointRef s : impl_->sources) MIDIPortDisconnectSource(impl_->port, s);
+    for (auto& s : impl_->sources) MIDIPortDisconnectSource(impl_->port, s->endpoint);
     impl_->sources.clear();
     std::lock_guard<std::mutex> lock(mutex_);
     names_.clear();
@@ -154,6 +248,25 @@ void MidiIn::setMultiTimbral(bool on) {
 std::string MidiIn::lastMessage() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_;
+}
+
+void MidiIn::setSysExHandler(SysExHandler h) {
+    std::lock_guard<std::mutex> lock(sysexMutex_);
+    sysex_ = std::move(h);
+}
+
+void MidiIn::onSysEx(const uint8_t* data, size_t len, const std::string& replyPort) {
+    std::lock_guard<std::mutex> lock(sysexMutex_);
+    if (sysex_) sysex_(data, len, replyPort);
+}
+
+bool MidiIn::sendVirtual(const uint8_t* data, size_t len) {
+    if (!impl_->virtualSrc || len == 0) return false;
+    std::vector<Byte> buffer(len + 256);
+    auto* list = reinterpret_cast<MIDIPacketList*>(buffer.data());
+    MIDIPacket* p = MIDIPacketListInit(list);
+    p = MIDIPacketListAdd(list, buffer.size(), p, 0, (ByteCount)len, data);
+    return p && MIDIReceived(impl_->virtualSrc, list) == noErr;
 }
 
 void MidiIn::onUmp(const uint32_t* words, size_t count) {

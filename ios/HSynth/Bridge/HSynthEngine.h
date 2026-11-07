@@ -83,6 +83,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) NSArray<NSString*>* midiInputs;
 - (void)refreshMidi;
 
+// SysEx remote control (docs/SYSEX.md): a controller / PC reads and changes everything over MIDI SysEx
+@property(nonatomic, readonly) NSInteger remoteChanges;    // bumps when a remote request changed something
+@property(nonatomic, readonly) NSInteger remoteSongCount;  // songs loaded remotely
+@property(nonatomic, readonly) NSString* remotePort;       // where replies go ("" until the first request)
+
 // audio timing (autotest): peaks since resetPeaks
 @property(nonatomic) BOOL muted;
 @property(nonatomic, readonly) NSString* audioDevice;   // "backend, rate Hz, period x periods"

@@ -32,7 +32,14 @@ object NativeEngine {
     external fun nativeNoteOff(id: Int, key: Int, velocity: Float)
     external fun nativePerNote(type: Int, id: Int, key: Int, value: Float)
     external fun nativeControl(type: Int, value: Float, controller: Int)
-    external fun nativeMidi(data: ByteArray, offset: Int, count: Int, ump: Boolean)
+    external fun nativeMidi(data: ByteArray, offset: Int, count: Int, ump: Boolean, source: Int)
+    // SysEx remote control (docs/SYSEX.md)
+    external fun nativeRemoteInit(libraryRoot: String, presetDirs: String, userPresets: String, midiDir: String, version: String)
+    external fun nativeRemoteNext(timeoutMs: Int): ByteArray?
+    external fun nativeRemoteSource(): Int
+    external fun nativeRemoteChanges(): Int
+    external fun nativeRemoteSongCount(): Int
+    external fun nativeRemoteSongPath(): String
     external fun nativeSetMpe(enabled: Boolean)
     external fun nativeTakeProgramChange(): Int
     external fun nativeMidiEventCount(): Int

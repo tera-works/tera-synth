@@ -48,6 +48,7 @@ if(WIN32)
         src/audio_out.cpp
         src/miniaudio_impl.cpp
         src/midi_in_win32.cpp
+        src/remote_link.cpp
         src/host_library.cpp
         src/platform_win32.cpp
     )
@@ -90,6 +91,7 @@ elseif(APPLE)
         src/miniaudio_impl.cpp
         src/midi_in_coremidi.cpp
         src/midi_out_coremidi.cpp
+        src/remote_link.cpp
         src/host_library.cpp
         src/platform_macos.mm
     )

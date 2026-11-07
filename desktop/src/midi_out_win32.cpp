@@ -7,6 +7,7 @@
 #include <mmsystem.h>
 
 #include <chrono>
+#include <vector>
 
 namespace {
 std::string narrow(const wchar_t* w) {
@@ -70,6 +71,23 @@ void MidiOut::send(uint8_t status, uint8_t d1, uint8_t d2) {
 void MidiOut::sendRealtime(uint8_t status) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (handle_) midiOutShortMsg((HMIDIOUT)handle_, (DWORD)status);
+}
+
+void MidiOut::sendSysEx(const uint8_t* data, size_t len) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!handle_ || len == 0) return;
+    auto h = (HMIDIOUT)handle_;
+    std::vector<char> buf(data, data + len);
+    MIDIHDR hdr{};
+    hdr.lpData = buf.data();
+    hdr.dwBufferLength = (DWORD)len;
+    hdr.dwBytesRecorded = (DWORD)len;
+    if (midiOutPrepareHeader(h, &hdr, sizeof hdr) != MMSYSERR_NOERROR) return;
+    if (midiOutLongMsg(h, &hdr, sizeof hdr) == MMSYSERR_NOERROR) {
+        // the driver owns the buffer until MHDR_DONE (a 256-byte message: about 80 ms on DIN MIDI)
+        for (int i = 0; i < 2000 && !(hdr.dwFlags & MHDR_DONE); ++i) Sleep(1);
+    }
+    while (midiOutUnprepareHeader(h, &hdr, sizeof hdr) == MIDIERR_STILLPLAYING) Sleep(1);
 }
 
 void MidiOut::setClock(bool on, std::function<float()> tempo) {

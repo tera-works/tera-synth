@@ -20,6 +20,7 @@
 #include "host_library.h"
 #include "midi_in.h"
 #include "midi_out.h"
+#include "remote_link.h"
 
 struct ImVec2;
 
@@ -220,6 +221,11 @@ private:
     // MIDI learn
     hsynth::MidiLearn learn_;
     int learnSeen_ = -1;
+
+    // SysEx remote control (docs/SYSEX.md)
+    std::unique_ptr<RemoteLink> remote_;
+    uint32_t remoteSeen_ = 0;
+    void startRemote();
 
     // multi / scenes
     std::string partNames_[hsynth::kNumParts];

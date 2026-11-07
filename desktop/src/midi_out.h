@@ -1,4 +1,4 @@
-// Desktop MIDI output (Windows: winmm). Sends the notes played on the screen
+// Desktop MIDI output (Windows: winmm; macOS / iOS: CoreMIDI). Sends the notes played on the screen
 // / PC keyboard to external gear (zone control) and, optionally, MIDI clock
 // (24 ppqn) with Start / Stop following the transport.
 #pragma once
@@ -22,6 +22,7 @@ public:
 
     void send(uint8_t status, uint8_t d1, uint8_t d2);
     void sendRealtime(uint8_t status);  // F8 / FA / FC
+    void sendSysEx(const uint8_t* data, size_t len);  // one complete F0..F7 message
 
     // Clock thread: 24 ticks per quarter note at tempo() bpm while on.
     void setClock(bool on, std::function<float()> tempo);

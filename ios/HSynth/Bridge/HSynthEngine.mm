@@ -1,6 +1,8 @@
 #import "HSynthEngine.h"
 #import <AVFoundation/AVFoundation.h>
+#import <CoreMIDI/MIDINetworkSession.h>
 
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -20,6 +22,7 @@
 #include "hsynth/wav.h"
 #include "midi_in.h"
 #include "midi_out.h"
+#include "remote_link.h"
 
 using namespace hsynth;
 
@@ -63,6 +66,8 @@ float toNormalized(const ParamInfo& p, float v) {
     NSString* _recordPath;
     std::vector<float> _takeL, _takeR;    // the last sampling take
     int _takeRate;
+    std::unique_ptr<RemoteLink> _remote;  // SysEx remote control (docs/SYSEX.md)
+    std::atomic<int> _remoteSongs;
 }
 
 - (instancetype)initWithFactoryDir:(NSString*)factoryDir userDir:(NSString*)userDir {
@@ -93,9 +98,54 @@ float toNormalized(const ParamInfo& p, float v) {
         _current = -1;
         _currentName = @"Init";
         [self rescanPresets];
+        [self startRemote];
     }
     return self;
 }
+
+- (void)startRemote {
+    // a PC with rtpMIDI (Windows) or Audio MIDI Setup (Mac) can connect over Wi-Fi
+    MIDINetworkSession* net = [MIDINetworkSession defaultSession];
+    net.enabled = YES;
+    net.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+    _remoteSongs.store(0);
+    RemoteControl::Config cfg;
+    cfg.deviceName = "HSynth iOS";
+    cfg.version = str([[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"");
+    cfg.libraryRoot = _libraryDir;
+    cfg.presetDirs = {_factoryDir + "/presets", _userDir + "/presets"};
+    cfg.userPresetDir = _userDir + "/presets";
+    cfg.midiDir = _userDir + "/midi";
+    cfg.learn = &_learn;
+    RemoteControl::Hooks hooks;
+    MidiIn* midi = _midi.get();
+    hooks.setMultiTimbral = [midi](bool on) { midi->setMultiTimbral(on); };
+    hooks.setMpe = [midi](bool on) { midi->setMpe(on); };
+    __weak HSynthEngine* weakSelf = self;
+    hooks.loadSong = [weakSelf](const std::string& path, Json& info) -> std::string {
+        HSynthEngine* me = weakSelf;
+        if (!me) return "gone";
+        __block NSString* err = nil;
+        dispatch_sync(dispatch_get_main_queue(), ^{ err = [me loadSong:ns(path)]; });  // the player state is main-thread
+        if (err) return str(err);
+        info.set("name", str(me.songName));
+        info.set("length", me.songLength);
+        me->_remoteSongs.fetch_add(1);
+        return "";
+    };
+    hooks.presetLoaded = [weakSelf](int part, const std::string& name) {
+        NSString* n = ns(name);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            HSynthEngine* me = weakSelf;
+            if (me && part <= 0) me->_currentName = n;
+        });
+    };
+    _remote = std::make_unique<RemoteLink>(*_engine, *_midi, cfg, hooks);
+}
+
+- (NSInteger)remoteChanges { return _remote ? (NSInteger)_remote->control().changeCount() : 0; }
+- (NSInteger)remoteSongCount { return _remoteSongs.load(); }
+- (NSString*)remotePort { return _remote ? ns(_remote->replyPort()) : @""; }
 
 - (void)configureSession:(BOOL)input {
     AVAudioSession* s = [AVAudioSession sharedInstance];
@@ -265,6 +315,7 @@ float toNormalized(const ParamInfo& p, float v) {
 // ---------------------------------------------------------------- songs
 
 - (void)dealloc {
+    _remote.reset();  // its worker uses the engine and the MIDI ports
     if (_programs) _programs->stop();  // its thread uses the engine
 }
 

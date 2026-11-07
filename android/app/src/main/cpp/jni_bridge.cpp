@@ -5,6 +5,9 @@
 #include <jni.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,6 +25,7 @@
 #include "hsynth/midi_learn.h"
 #include "hsynth/midi.h"
 #include "hsynth/preset.h"
+#include "hsynth/remote.h"
 #include "hsynth/sample_set.h"
 
 using namespace hsynth;
@@ -36,6 +40,79 @@ std::atomic<int> gEditPart{0};  // part the editor works on (0 in single mode)
 std::mutex gMidiMutex;
 std::atomic<int> gPendingProgram{-1};
 std::atomic<int> gMidiCount{0};
+
+// SysEx remote control (docs/SYSEX.md): SysEx is taken out of the MIDI streams per
+// source device, requests go to gRemote, replies wait in gRemoteOut for the
+// Kotlin sender thread (nativeRemoteNext), which writes them to the device the
+// last request came from (gRemoteSource).
+std::unique_ptr<RemoteControl> gRemote;
+std::mutex gRemoteOutMutex;
+std::condition_variable gRemoteOutCv;
+std::deque<std::vector<uint8_t>> gRemoteOut;
+std::atomic<int> gRemoteSource{-1};
+struct SysExState {
+    std::vector<uint8_t> buf;
+    bool in = false;
+};
+std::map<int, SysExState> gSysEx;  // per source device (under gMidiMutex)
+
+void sysexDone(int source, const std::vector<uint8_t>& m) {
+    if (!gRemote) return;
+    sysex::Frame f;
+    if (!sysex::parseFrame(m.data(), m.size(), f) || f.type != sysex::Request) return;
+    gRemoteSource.store(source);
+    gRemote->onSysEx(m.data(), m.size());
+}
+
+// MIDI 1.0 bytes: SysEx (possibly split over several calls) is removed and assembled;
+// everything else (realtime bytes inside SysEx too) is returned for the translator.
+std::vector<uint8_t> takeSysEx(int source, const uint8_t* d, size_t n) {
+    SysExState& st = gSysEx[source];
+    std::vector<uint8_t> rest;
+    rest.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t c = d[i];
+        if (c >= 0xF8) { rest.push_back(c); continue; }  // realtime: anywhere
+        if (c == 0xF0) { st.in = true; st.buf.assign(1, c); continue; }
+        if (!st.in) { rest.push_back(c); continue; }
+        if (c == 0xF7) {
+            st.buf.push_back(c);
+            st.in = false;
+            sysexDone(source, st.buf);
+            st.buf.clear();
+        } else if (c & 0x80) {  // a status byte ends an unterminated SysEx
+            st.in = false;
+            st.buf.clear();
+            rest.push_back(c);
+        } else {
+            st.buf.push_back(c);
+            if (st.buf.size() > (1u << 20)) { st.in = false; st.buf.clear(); }
+        }
+    }
+    return rest;
+}
+
+// UMP SysEx7 packets (message type 3)
+void umpSysEx(int source, const uint32_t* w, size_t count) {
+    SysExState& st = gSysEx[source];
+    for (size_t i = 0; i < count;) {
+        const int len = MidiTranslator::umpWordCount(w[i]);
+        if ((w[i] >> 28) == 0x3 && i + 1 < count) {
+            const int status = (int)((w[i] >> 20) & 0xF), nb = std::min(6, (int)((w[i] >> 16) & 0xF));
+            const uint8_t d[6] = {(uint8_t)(w[i] >> 8), (uint8_t)w[i], (uint8_t)(w[i + 1] >> 24),
+                                  (uint8_t)(w[i + 1] >> 16), (uint8_t)(w[i + 1] >> 8), (uint8_t)w[i + 1]};
+            if (status == 0 || status == 1) { st.buf.assign(1, 0xF0); st.in = true; }
+            for (int k = 0; k < nb && st.in; ++k) st.buf.push_back(d[k] & 0x7F);
+            if ((status == 0 || status == 3) && st.in) {
+                st.buf.push_back(0xF7);
+                st.in = false;
+                sysexDone(source, st.buf);
+                st.buf.clear();
+            }
+        }
+        i += (size_t)std::max(1, len);
+    }
+}
 
 struct EngineSink : EventSink {
     void onEvent(const Event& e) override {
@@ -116,7 +193,7 @@ JNI(void, nativeControl)(JNIEnv*, jobject, jint type, jfloat value, jint ctrl) {
     gEngine->sendEvent(type >= 5 ? e : keyboardEvent(e));  // panic stays omni (all parts)
 }
 
-JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint count, jboolean ump) {
+JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint count, jboolean ump, jint source) {
     if (count <= 0) return;
     std::vector<uint8_t> buf((size_t)count);
     env->GetByteArrayRegion(data, offset, count, reinterpret_cast<jbyte*>(buf.data()));
@@ -127,11 +204,14 @@ JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint c
         std::vector<uint32_t> words(buf.size() / 4);
         for (size_t i = 0; i < words.size(); ++i)
             words[i] = (uint32_t)buf[i * 4] << 24 | (uint32_t)buf[i * 4 + 1] << 16 | (uint32_t)buf[i * 4 + 2] << 8 | buf[i * 4 + 3];
+        umpSysEx(source, words.data(), words.size());
         gLearn.onUmp(words.data(), words.size(), *gEngine);
         gMidi.processUmpBytes(buf.data(), buf.size(), sink);
     } else {
-        gLearn.onMidi(buf.data(), buf.size(), *gEngine);  // learned CCs set their parameters
-        gMidi.processMidi1(buf.data(), buf.size(), sink);
+        const std::vector<uint8_t> rest = takeSysEx(source, buf.data(), buf.size());
+        if (rest.empty()) return;
+        gLearn.onMidi(rest.data(), rest.size(), *gEngine);  // learned CCs set their parameters
+        gMidi.processMidi1(rest.data(), rest.size(), sink);
     }
 }
 
@@ -346,19 +426,27 @@ void songPartForgotten(int part) {
 // Loads a Standard MIDI File, picks GM sounds from the preset folders
 // (";"-separated) and loads them into the parts. Blocking: call from the
 // loader thread. Returns JSON {ok, name, length, report[] | error}.
+Json songLoad(const std::string& path, const std::string& libRoot, const std::string& dirs);
+
 JNI(jstring, nativeSongLoad)(JNIEnv* env, jobject, jstring path, jstring libRoot, jstring presetDirs) {
+    return jstr(env, songLoad(str(env, path), str(env, libRoot), str(env, presetDirs)).dump(0));
+}
+
+std::atomic<uint32_t> gRemoteSongs{0};  // songs loaded remotely (the player shows them)
+std::string gRemoteSongPath;
+
+Json songLoad(const std::string& path, const std::string& libRootS, const std::string& dirs) {
     std::lock_guard<std::mutex> lock(gSongMutex);
     gPrograms.stop();  // before prepareSong: it must not stage into the parts being loaded
     Json r = Json::object();
     auto song = std::make_unique<Song>();
     std::string err;
-    if (!loadSmf(str(env, path), *song, err)) {
+    if (!loadSmf(path, *song, err)) {
         r.set("ok", false);
         r.set("error", err);
-        return jstr(env, r.dump(0));
+        return r;
     }
     std::vector<std::pair<std::string, bool>> folders;
-    const std::string dirs = str(env, presetDirs);
     for (size_t a = 0; a <= dirs.size();) {
         size_t b = dirs.find(';', a);
         if (b == std::string::npos) b = dirs.size();
@@ -373,7 +461,7 @@ JNI(jstring, nativeSongLoad)(JNIEnv* env, jobject, jstring path, jstring libRoot
     gEngine->songPlay(false);
     std::vector<std::string> report;
     std::vector<SongPart> parts;
-    prepareSong(*gEngine, *song, bank, str(env, libRoot), gSongLoaded, report, &parts);
+    prepareSong(*gEngine, *song, bank, libRootS, gSongLoaded, report, &parts);
     gMidi.setMultiTimbral(true);
     r.set("ok", true);
     r.set("name", song->name);
@@ -398,9 +486,9 @@ JNI(jstring, nativeSongLoad)(JNIEnv* env, jobject, jstring path, jstring libRoot
         tempos.push(o);
     }
     r.set("tempos", tempos);
-    gPrograms.start(*gEngine, *song, bank, str(env, libRoot));  // mid-song program changes
+    gPrograms.start(*gEngine, *song, bank, libRootS);  // mid-song program changes
     gEngine->setSong(std::move(song));
-    return jstr(env, r.dump(0));
+    return r;
 }
 
 // Preset playing on each channel after mid-song program changes ("" = as loaded).
@@ -561,3 +649,79 @@ JNI(jdouble, nativeRecordStop)(JNIEnv*, jobject) { return gAudio ? gAudio->stopR
 JNI(jdouble, nativeRecordSeconds)(JNIEnv*, jobject) { return gAudio && gAudio->recording() ? gAudio->recordedSeconds() : -1.0; }
 JNI(jboolean, nativeInputEnabled)(JNIEnv*, jobject) { return gAudio && gAudio->inputEnabled() ? JNI_TRUE : JNI_FALSE; }
 JNI(jint, nativeSeqPosition)(JNIEnv*, jobject) { return gEngine->seqPosition(gEditPart.load()); }
+
+// ------------------------------------------------------------ SysEx remote control
+
+// Starts the remote control (once). presetDirs: ";"-separated.
+JNI(void, nativeRemoteInit)(JNIEnv* env, jobject, jstring libRoot, jstring presetDirs, jstring userPresets, jstring midiDir,
+                            jstring version) {
+    if (gRemote || !gEngine) return;
+    RemoteControl::Config cfg;
+    cfg.deviceName = "HSynth Android";
+    cfg.version = str(env, version);
+    cfg.libraryRoot = str(env, libRoot);
+    const std::string dirs = str(env, presetDirs);
+    for (size_t a = 0; a <= dirs.size();) {
+        size_t b = dirs.find(';', a);
+        if (b == std::string::npos) b = dirs.size();
+        if (b > a) cfg.presetDirs.push_back(dirs.substr(a, b - a));
+        a = b + 1;
+    }
+    cfg.userPresetDir = str(env, userPresets);
+    cfg.midiDir = str(env, midiDir);
+    cfg.learn = &gLearn;
+    RemoteControl::Hooks hooks;
+    hooks.setMultiTimbral = [](bool on) {
+        std::lock_guard<std::mutex> lock(gMidiMutex);
+        gMidi.setMultiTimbral(on);
+    };
+    hooks.setMpe = [](bool on) {
+        std::lock_guard<std::mutex> lock(gMidiMutex);
+        gMidi.setMpeEnabled(on);
+    };
+    const std::string root = cfg.libraryRoot;
+    hooks.loadSong = [root, dirs](const std::string& path, Json& info) -> std::string {
+        Json r = songLoad(path, root, dirs);
+        if (!r.find("ok") || !r.find("ok")->boolean()) return r.find("error") ? r.find("error")->string() : "failed";
+        for (const auto& m : r.members())
+            if (m.first != "ok") info.set(m.first, m.second);
+        {
+            std::lock_guard<std::mutex> lock(gSongMutex);
+            gRemoteSongPath = path;
+        }
+        gRemoteSongs.fetch_add(1);
+        return "";
+    };
+    gRemote = std::make_unique<RemoteControl>(*gEngine, cfg, hooks);
+    gRemote->setOutput([](const std::vector<uint8_t>& m) {
+        std::lock_guard<std::mutex> lock(gRemoteOutMutex);
+        if (gRemoteOut.size() < 20000) gRemoteOut.push_back(m);
+        gRemoteOutCv.notify_one();
+    });
+}
+
+// The next reply / notification to send (waits up to timeoutMs), or null.
+JNI(jbyteArray, nativeRemoteNext)(JNIEnv* env, jobject, jint timeoutMs) {
+    std::vector<uint8_t> m;
+    {
+        std::unique_lock<std::mutex> lock(gRemoteOutMutex);
+        gRemoteOutCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [] { return !gRemoteOut.empty(); });
+        if (gRemoteOut.empty()) return nullptr;
+        m = std::move(gRemoteOut.front());
+        gRemoteOut.pop_front();
+    }
+    jbyteArray a = env->NewByteArray((jsize)m.size());
+    env->SetByteArrayRegion(a, 0, (jsize)m.size(), reinterpret_cast<const jbyte*>(m.data()));
+    return a;
+}
+
+// MIDI device id the last request came from (replies go there), -1 none.
+JNI(jint, nativeRemoteSource)(JNIEnv*, jobject) { return gRemoteSource.load(); }
+// Bumped by every remote change (the UI refreshes).
+JNI(jint, nativeRemoteChanges)(JNIEnv*, jobject) { return gRemote ? (jint)gRemote->changeCount() : 0; }
+// Songs loaded remotely: count, and the path of the last one.
+JNI(jint, nativeRemoteSongCount)(JNIEnv*, jobject) { return (jint)gRemoteSongs.load(); }
+JNI(jstring, nativeRemoteSongPath)(JNIEnv* env, jobject) {
+    std::lock_guard<std::mutex> lock(gSongMutex);
+    return jstr(env, gRemoteSongPath);
+}

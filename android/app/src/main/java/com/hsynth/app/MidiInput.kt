@@ -3,6 +3,7 @@ package com.hsynth.app
 import android.content.Context
 import android.media.midi.MidiDevice
 import android.media.midi.MidiDeviceInfo
+import android.media.midi.MidiInputPort
 import android.media.midi.MidiManager
 import android.media.midi.MidiOutputPort
 import android.media.midi.MidiReceiver
@@ -28,10 +29,46 @@ class MidiInput(private val context: Context, private val onChange: () -> Unit) 
     private val executor = Executors.newSingleThreadExecutor()
     val available get() = manager != null
 
-    private inner class Receiver(private val ump: Boolean) : MidiReceiver() {
+    private inner class Receiver(private val ump: Boolean, private val source: Int) : MidiReceiver() {
         override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
-            NativeEngine.nativeMidi(msg, offset, count, ump)
+            NativeEngine.nativeMidi(msg, offset, count, ump, source)
         }
+    }
+
+    // input ports of the opened devices, for SysEx remote replies (RemoteLink)
+    private val replyPorts = mutableMapOf<Int, MidiInputPort>()
+
+    /** Sends to the device with this id (its first input port; UMP devices get SysEx7 packets). */
+    fun sendTo(id: Int, data: ByteArray): Boolean {
+        val (port, ump) = synchronized(opened) {
+            val dev = opened[id]?.first ?: return false
+            val p = replyPorts[id] ?: (if (dev.info.inputPortCount > 0) dev.openInputPort(0) else null)?.also { replyPorts[id] = it }
+            (p ?: return false) to (names[id]?.endsWith("(MIDI 2.0 UMP)") == true)
+        }
+        val bytes = if (ump) sysexToUmp(data) else data
+        return runCatching { port.send(bytes, 0, bytes.size) }.isSuccess
+    }
+
+    // F0 .. F7 -> UMP SysEx7 packets (big-endian words), 6 data bytes per packet
+    private fun sysexToUmp(m: ByteArray): ByteArray {
+        val data = m.copyOfRange(1, m.size - 1)
+        val out = java.io.ByteArrayOutputStream()
+        val n = (data.size + 5) / 6
+        for (k in 0 until maxOf(1, n)) {
+            val chunk = data.copyOfRange(k * 6, minOf(data.size, k * 6 + 6))
+            val status = when {
+                n <= 1 -> 0
+                k == 0 -> 1
+                k == n - 1 -> 3
+                else -> 2
+            }
+            val b = ByteArray(8)
+            b[0] = 0x30
+            b[1] = ((status shl 4) or chunk.size).toByte()
+            for (i in chunk.indices) b[2 + i] = chunk[i]
+            out.write(b)
+        }
+        return out.toByteArray()
     }
 
     private val callback = object : MidiManager.DeviceCallback() {
@@ -69,7 +106,7 @@ class MidiInput(private val context: Context, private val onChange: () -> Unit) 
         m.openDevice(info, { device ->
             if (device == null) return@openDevice
             val ports = (0 until info.outputPortCount).mapNotNull { p ->
-                device.openOutputPort(p)?.also { it.connect(Receiver(ump)) }
+                device.openOutputPort(p)?.also { it.connect(Receiver(ump, info.id)) }
             }
             synchronized(opened) {
                 opened[info.id] = device to ports
@@ -80,7 +117,11 @@ class MidiInput(private val context: Context, private val onChange: () -> Unit) 
     }
 
     private fun close(id: Int) {
-        val entry = synchronized(opened) { names.remove(id); opened.remove(id) } ?: return
+        val entry = synchronized(opened) {
+            names.remove(id)
+            replyPorts.remove(id)?.let { runCatching { it.close() } }
+            opened.remove(id)
+        } ?: return
         entry.second.forEach { runCatching { it.close() } }
         runCatching { entry.first.close() }
         handler.post(onChange)

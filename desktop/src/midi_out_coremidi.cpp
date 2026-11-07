@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <vector>
 
 namespace {
 struct Out {
@@ -28,6 +29,14 @@ void sendBytes(Out* o, const uint8_t* b, int n) {
     auto* list = reinterpret_cast<MIDIPacketList*>(buffer);
     MIDIPacket* p = MIDIPacketListInit(list);
     p = MIDIPacketListAdd(list, sizeof buffer, p, 0, (ByteCount)n, b);
+    if (p) MIDISend(o->port, o->dest, list);
+}
+
+void sendLong(Out* o, const uint8_t* b, size_t n) {
+    std::vector<Byte> buffer(n + 256);
+    auto* list = reinterpret_cast<MIDIPacketList*>(buffer.data());
+    MIDIPacket* p = MIDIPacketListInit(list);
+    p = MIDIPacketListAdd(list, buffer.size(), p, 0, (ByteCount)n, b);
     if (p) MIDISend(o->port, o->dest, list);
 }
 }  // namespace
@@ -98,6 +107,11 @@ void MidiOut::send(uint8_t status, uint8_t d1, uint8_t d2) {
 void MidiOut::sendRealtime(uint8_t status) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (auto* o = static_cast<Out*>(handle_)) sendBytes(o, &status, 1);
+}
+
+void MidiOut::sendSysEx(const uint8_t* data, size_t len) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (auto* o = static_cast<Out*>(handle_); o && len) sendLong(o, data, len);
 }
 
 void MidiOut::setClock(bool on, std::function<float()> tempo) {
