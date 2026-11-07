@@ -6,6 +6,7 @@ name: apple
 # Apple builds use changes (or by hand from the Actions tab).
 on:
   push:
+    branches: ["**"]  # not on tags: release tags build the IPA (ios.yml) on the same commit
     paths:
       - "engine/**"
       - "desktop/**"
