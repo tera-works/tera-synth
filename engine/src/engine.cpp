@@ -39,6 +39,7 @@ Engine::Engine()
       partShared_(new std::atomic<float>[(size_t)(kNumParts - 1) * P::kPartParams]),
       partP_(new float[(size_t)(kNumParts - 1) * P::kPartParams]),
       partBus_(new float[(size_t)kNumParts * 2 * kMaxBlockSize]()),
+      ghostParams_(new float[(size_t)kGhosts * P::kPartParams]()),
       inserts_(new fx::InsertChain[kNumParts]) {
     float defs[P::kNumParams];
     defaultParams(defs);
@@ -110,6 +111,10 @@ Engine::~Engine() {
         delete stageIn_[k].exchange(nullptr);
         delete stage_[k];
         stage_[k] = nullptr;
+    }
+    for (auto& h : held_) {
+        delete h;
+        h = nullptr;
     }
     collectGarbage();
 }
@@ -959,6 +964,20 @@ void Engine::applyStage(int part) {
         retiredStages_.push(st);
         return;
     }
+    // notes sounding now keep the old sound (MIDI: a program change affects new notes)
+    float* ghost = nullptr;
+    bool sounding = false;
+    for (const auto& v : voices_) sounding = sounding || (v.active() && v.part == part && !v.paramsOverride);
+    if (sounding)
+        for (int g = 0; g < kGhosts; ++g)
+            if (!ghostUsed_[g]) {
+                ghostUsed_[g] = true;
+                ghost = ghostParams_.get() + (size_t)g * P::kPartParams;
+                std::memcpy(ghost, parts_[part].p, sizeof(float) * P::kPartParams);
+                for (auto& v : voices_)
+                    if (v.active() && v.part == part && !v.paramsOverride) v.paramsOverride = ghost;
+                break;
+            }
     // parameters: the audio-thread copy and the shared values (what the UI reads)
     if (part == 0) {
         for (int i = 0; i < P::kPartParams; ++i) {
@@ -978,12 +997,25 @@ void Engine::applyStage(int part) {
         }
     }
     updateInserts(part);
-    // samples: voices still playing the old sets fade out
+    // samples: notes that keep their old parameters keep their old sets too (held
+    // until they end); without a ghost (all in use) voices fade out as on a swap
     for (int l = 0; l < kNumLayers; ++l) {
         SampleSet* set = st->sets[l];
         if (!set) continue;  // the loader passes an empty set to unload a layer
         st->sets[l] = nullptr;
-        swapSampleSet(part, l, set, true);
+        SampleSet* old = currentSets_[part][l];
+        int slot = -1;
+        if (ghost && old)
+            for (int h = 0; h < kHeld; ++h)
+                if (!held_[h]) { slot = h; break; }
+        if (slot >= 0) {
+            held_[slot] = old;
+            currentSets_[part][l] = set;
+            keyswitch_[part][l] = -1;
+            seqCount_[part][l] = 0;
+        } else {
+            swapSampleSet(part, l, set, true);
+        }
         // notes later in this block start on the new set (the context is filled at block start)
         parts_[part].ctx.sampleSets[l] = currentSets_[part][l];
     }
@@ -1449,6 +1481,22 @@ void Engine::swapSampleSet(int part, int layer, SampleSet* s, bool playing) {
     currentSets_[part][layer] = s;
 }
 
+void Engine::releaseHeld() {
+    for (int g = 0; g < kGhosts; ++g) {
+        if (!ghostUsed_[g]) continue;
+        const float* buf = ghostParams_.get() + (size_t)g * P::kPartParams;
+        bool used = false;
+        for (const auto& v : voices_) used = used || (v.active() && v.paramsOverride == buf);
+        if (!used) ghostUsed_[g] = false;
+    }
+    for (auto& h : held_) {
+        if (!h) continue;
+        bool used = false;
+        for (const auto& v : voices_) used = used || v.usesSet(h);
+        if (!used && retired_.push(h)) h = nullptr;  // queue full: next block
+    }
+}
+
 void Engine::advanceRetiring(int n) {
     for (auto& r : retiring_) {
         if (!r.set) continue;
@@ -1865,6 +1913,7 @@ void Engine::process(float* L, float* R, int n) {
     for (int i = 0; i < n; ++i) peak = std::max(peak, std::max(std::fabs(L[i]), std::fabs(R[i])));
 
     advanceRetiring(n);
+    releaseHeld();
     profMark(5);
 
     // 6. stats

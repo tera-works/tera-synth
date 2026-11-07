@@ -350,6 +350,14 @@ private:
     void takeStagedPrograms();               // block start
     void songProgramChange(int part, int program);
     void applyStage(int part);
+    // notes sounding at a program change keep their sound: a copy of the old part
+    // parameters (ghost) and the old sample sets (held) until they end
+    static constexpr int kGhosts = 16;
+    std::unique_ptr<float[]> ghostParams_;   // kGhosts x kPartParams
+    bool ghostUsed_[kGhosts] = {};
+    static constexpr int kHeld = kNumParts * kNumLayers;
+    SampleSet* held_[kHeld] = {};
+    void releaseHeld();                      // block end: frees ghosts / sets no voice uses any more
     std::atomic<bool> songPlay_{false};
     bool songWasPlaying_ = false;
     std::atomic<int64_t> songSeekReq_{-1};  // frames, -1 = none

@@ -329,7 +329,7 @@ void Voice::advanceMseg(const float* p, float dtSec, float tempo) {
 
 // Motion lane: tempo-synced step values (part parameters), optionally smoothed.
 float Voice::motionValue(const VoiceContext& ctx, int lane) const {
-    const float* p = ctx.params;
+    const float* p = params(ctx);
     const float stepBeats = fx::syncBeats((int)p[P::motion(lane, P::MotionRate)] + 1);
     if (stepBeats <= 0.0f) return 0.0f;
     const int steps = std::max(1, std::min(P::kMotionSteps, (int)p[P::motion(lane, P::MotionSteps)]));
@@ -377,6 +377,7 @@ void Voice::prepare(float sampleRate) {
 
 void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom) {
     stopPlayers();  // a reused (stolen) voice: release the previous note's disk streams
+    paramsOverride = nullptr;
     const float* p = ctx.params;
     noteId_ = e.noteId;
     key_ = e.key;
@@ -590,6 +591,21 @@ bool Voice::playsLayer(int l) const {
     return false;
 }
 
+bool Voice::usesSet(const SampleSet* set) const {
+    if (!active_ || !set) return false;
+    const Region* lo = set->regions.empty() ? nullptr : set->regions.data();
+    const Region* hi = lo ? lo + set->regions.size() : nullptr;
+    auto in = [&](const PcmPlayer& pl) { return lo && pl.active() && pl.region() >= lo && pl.region() < hi; };
+    for (int l = 0; l < kNumLayers; ++l) {
+        if (sets_[l] == set) return true;
+        for (const auto& pl : layers_[l].pcm)
+            if (in(pl)) return true;
+    }
+    for (const auto& pl : relPcm_)
+        if (in(pl)) return true;
+    return false;
+}
+
 int Voice::dropSet(const SampleSet* set) {
     if (!set || set->regions.empty()) return 0;
     const Region* lo = set->regions.data();
@@ -653,7 +669,7 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
         case ModSource::Macro1:
         case ModSource::Macro2:
         case ModSource::Macro3:
-        case ModSource::Macro4: return ctx.params[P::Macro1 + ((int)s - (int)ModSource::Macro1)];
+        case ModSource::Macro4: return params(ctx)[P::Macro1 + ((int)s - (int)ModSource::Macro1)];
         case ModSource::Motion1:
         case ModSource::Motion2:
         case ModSource::Motion3:
@@ -665,7 +681,7 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
 
 void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     if (!active_) return;
-    const float* p = ctx.params;
+    const float* p = params(ctx);
     if (relActive_) {
         // release-trigger regions: own region envelope, layer level / pan / tuning, no amp env / filter
         bool any = false;
@@ -926,7 +942,8 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 const int ti = (int)p[P::layer(l, P::WtTable)];
                 const Wavetable* t = nullptr;
                 if (ti < builtinWavetableCount()) t = &builtinWavetable(ti);
-                else if (ctx.sampleSets[l] && ctx.sampleSets[l]->wavetable) t = ctx.sampleSets[l]->wavetable.get();
+                else if (const SampleSet* ws = paramsOverride ? sets_[l] : ctx.sampleSets[l]; ws && ws->wavetable)
+                    t = ws->wavetable.get();
                 else t = &builtinWavetable(0);  // "user" selected but nothing loaded
                 const float pos = p[P::layer(l, P::WtPos)] + p[P::layer(l, P::WtPosEnv)] * e2 + D(ModDest::WtPos);
                 const float warpAmt = clampf(p[P::layer(l, P::WtWarpAmt)] + D(ModDest::WtWarp), 0.0f, 1.0f);

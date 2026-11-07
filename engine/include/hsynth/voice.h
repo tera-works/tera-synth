@@ -143,6 +143,13 @@ public:
     bool playsLayer(int l) const;  // PCM / release players of layer l still sounding
     // stop every player still reading `set` (it is about to be freed); true if one was
     int dropSet(const SampleSet* set);
+    bool usesSet(const SampleSet* set) const;  // a player or a release region still reads it
+
+    // A note that keeps the sound it started with after its part switched to
+    // another program (song program changes): the old part parameters (the
+    // engine owns the copy) and the voice's own sample sets. Cleared by start().
+    const float* paramsOverride = nullptr;
+    const float* params(const VoiceContext& ctx) const { return paramsOverride ? paramsOverride : ctx.params; }
     static constexpr float kSwapFadeSeconds = 0.006f;
     // SFZ exclusive groups: groups started by this voice (returns count), and
     // cutting this voice's regions with off_by == group.
