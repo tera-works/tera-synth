@@ -11,9 +11,10 @@ struct ContentView: View {
                 switch tab {
                 case 1: EditScreen()
                 case 2: MultiScreen()
-                case 3: PlayerScreen(player: model.player)
-                case 4: LibraryScreen(tab: $tab)
-                case 5: SystemScreen()
+                case 3: LiveScreen(sets: model.sets)
+                case 4: PlayerScreen(player: model.player)
+                case 5: LibraryScreen(tab: $tab)
+                case 6: SystemScreen()
                 default: PlayScreen()
                 }
             }
@@ -38,7 +39,7 @@ struct ContentView: View {
             Spacer(minLength: 4)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    ForEach(Array(["Play", "Edit", "Multi", "Player", "Library", "System"].enumerated()), id: \.offset) { i, t in
+                    ForEach(Array(["Play", "Edit", "Multi", "Live", "Player", "Library", "System"].enumerated()), id: \.offset) { i, t in
                         HwButton(title: t, lit: tab == i) { tab = i }
                     }
                 }

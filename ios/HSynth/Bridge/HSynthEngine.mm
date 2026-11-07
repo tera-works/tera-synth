@@ -505,6 +505,38 @@ float toNormalized(const ParamInfo& p, float v) {
     return YES;
 }
 
+- (BOOL)saveSoundFile:(NSString*)path name:(NSString*)name {
+    Preset p = capturePreset(*_engine, str(name), _libraryDir);
+    p.category = "Set List";
+    p.author = "user";
+    std::string err;
+    if (!hsynth::savePresetFile(str(path), p, err)) {
+        NSLog(@"HSynth sound: %s", err.c_str());
+        return NO;
+    }
+    return YES;
+}
+
+- (nullable NSString*)loadSoundFile:(NSString*)path {
+    Preset p;
+    std::string err;
+    if (!hsynth::loadPresetFile(str(path), p, err)) {
+        _lastWarnings = @[ ns(err) ];
+        return nil;
+    }
+    std::vector<std::string> warnings;
+    applyPreset(*_engine, p, _libraryDir, warnings);
+    _lastWarnings = [self strings:warnings];
+    _engine->setMultiTimbral(false);
+    _midi->setMultiTimbral(false);
+    self.editPart = 0;
+    _songLoaded[0].clear();
+    _engine->collectGarbage();
+    _current = -1;
+    _currentName = ns(p.name);
+    return _currentName;
+}
+
 - (nullable NSArray<NSString*>*)loadScene:(NSString*)path {
     MultiPreset m;
     std::string err;

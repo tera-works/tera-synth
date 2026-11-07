@@ -5,6 +5,7 @@ import SwiftUI
 final class SynthModel: ObservableObject {
     let engine: HSynthEngine
     let player: PlayerModel
+    let sets = SetListModel()
     @Published var presetName = "Init"
     @Published var presetIndex = -1
     @Published var voices = 0

@@ -147,6 +147,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// [scene name, part 1 name, ..., part 16 name] or nil
 - (nullable NSArray<NSString*>*)loadScene:(NSString*)path;
 
+// sound snapshots (set lists): the single-mode sound to / from a preset file anywhere
+- (BOOL)saveSoundFile:(NSString*)path name:(NSString*)name NS_SWIFT_NAME(saveSoundFile(_:name:));
+/// Loads it as the whole sound (single mode). The preset's name, or nil on failure.
+- (nullable NSString*)loadSoundFile:(NSString*)path;
+
 @end
 
 NS_ASSUME_NONNULL_END
