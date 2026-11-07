@@ -1,5 +1,6 @@
-// Desktop MIDI input. Windows: winmm (MIDI 1.0). Raw bytes are fed to the
-// engine's portable MidiTranslator, exactly like the Android host does.
+// Desktop MIDI input. Windows: winmm (MIDI 1.0); macOS / iOS: CoreMIDI with the
+// MIDI 2.0 protocol (Universal MIDI Packets; MIDI 1.0 devices are converted by
+// CoreMIDI). Everything goes to the engine's portable MidiTranslator, like on Android.
 #pragma once
 
 #include <atomic>
@@ -32,6 +33,8 @@ public:
 
     // Called from the driver thread with one complete MIDI message.
     void onBytes(const uint8_t* data, size_t len);
+    // ... or with Universal MIDI Packets (words in host order).
+    void onUmp(const uint32_t* words, size_t count);
 
 private:
     struct Impl;

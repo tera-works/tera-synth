@@ -7,6 +7,7 @@
 #include "hsynth/engine.h"
 #include "hsynth/fileio.h"
 #include "hsynth/json.h"
+#include "hsynth/midi.h"
 #include "hsynth/params.h"
 
 namespace hsynth {
@@ -48,6 +49,24 @@ int MidiLearn::armedParam() const {
 int MidiLearn::lastLearned() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return lastLearned_;
+}
+
+void MidiLearn::onUmp(const uint32_t* words, size_t count, Engine& engine) {
+    for (size_t i = 0; i < count;) {
+        const uint32_t w0 = words[i];
+        const int n = MidiTranslator::umpWordCount(w0);
+        if (i + (size_t)n > count) break;
+        const int mt = (int)(w0 >> 28);
+        const uint8_t status = (uint8_t)((w0 >> 16) & 0xFF);
+        if (mt == 0x2 && (status & 0xF0) == 0xB0) {  // MIDI 1.0 CC in a packet
+            const uint8_t m[3] = {status, (uint8_t)((w0 >> 8) & 0x7F), (uint8_t)(w0 & 0x7F)};
+            onMidi(m, 3, engine);
+        } else if (mt == 0x4 && (status & 0xF0) == 0xB0) {  // MIDI 2.0 CC: 32-bit value
+            const uint8_t m[3] = {status, (uint8_t)((w0 >> 8) & 0x7F), (uint8_t)(words[i + 1] >> 25)};
+            onMidi(m, 3, engine);
+        }
+        i += (size_t)n;
+    }
 }
 
 bool MidiLearn::onMidi(const uint8_t* data, size_t len, Engine& engine) {

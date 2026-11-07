@@ -123,6 +123,11 @@ JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint c
     std::lock_guard<std::mutex> lock(gMidiMutex);
     EngineSink sink;
     if (ump) {
+        // big-endian words -> host order for MIDI learn
+        std::vector<uint32_t> words(buf.size() / 4);
+        for (size_t i = 0; i < words.size(); ++i)
+            words[i] = (uint32_t)buf[i * 4] << 24 | (uint32_t)buf[i * 4 + 1] << 16 | (uint32_t)buf[i * 4 + 2] << 8 | buf[i * 4 + 3];
+        gLearn.onUmp(words.data(), words.size(), *gEngine);
         gMidi.processUmpBytes(buf.data(), buf.size(), sink);
     } else {
         gLearn.onMidi(buf.data(), buf.size(), *gEngine);  // learned CCs set their parameters

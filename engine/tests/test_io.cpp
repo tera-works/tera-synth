@@ -7,6 +7,7 @@
 #include "hsynth/host_utils.h"
 #include "hsynth/json.h"
 #include "hsynth/midi.h"
+#include "hsynth/midi_learn.h"
 #include "hsynth/preset.h"
 #include "hsynth/fileio.h"
 #include "hsynth/wav.h"
@@ -398,4 +399,33 @@ TEST(io_non_utf8_path_does_not_throw) {
         threw = true;
     }
     CHECK(!threw);
+}
+
+// MIDI 2.0 RPN 0 (pitch bend sensitivity, atomic) sets the bend range like the
+// MIDI 1.0 CC 101 / 100 / 6 / 38 sequence; MIDI learn takes UMP control changes
+TEST(ump_rpn_bend_range_and_learn) {
+    MidiTranslator t;
+    Collector c;
+    const uint32_t rpn[] = {0x40200000u, (12u << 25) | (50u << 18)};  // ch 0, RPN 0/0: 12 semitones 50 cents
+    t.processUmp(rpn, 2, c);
+    CHECK(c.events.size() == 6);
+    if (c.events.size() == 6) {
+        CHECK(c.events[2].controller == 6 && std::lround(c.events[2].value * 127.0f) == 12);
+        CHECK(c.events[3].controller == 38 && std::lround(c.events[3].value * 127.0f) == 50);
+    }
+    Engine e;
+    e.prepare(48000);
+    for (const Event& ev : c.events) e.sendEvent(ev);
+    e.sendEvent(Event::control(EventType::PitchBend, 1.0f));
+    std::vector<float> L(480), R(480);
+    e.process(L.data(), R.data(), 480);
+    CHECK(std::fabs(e.debugPitchBendSemis(0) - 12.5f) < 1e-3f);
+
+    MidiLearn learn;
+    learn.arm(P::FilterCutoff);
+    const uint32_t cc[] = {0x40B04A00u, 0xFFFFFFFFu};  // MIDI 2.0 CC 74, full scale
+    learn.onUmp(cc, 2, e);
+    CHECK(learn.lastLearned() == P::FilterCutoff);
+    const ParamInfo& info = paramTable()[(size_t)P::FilterCutoff];
+    CHECK(std::fabs(e.getParam(P::FilterCutoff) - info.max) < info.max * 1e-3f);
 }

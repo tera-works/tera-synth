@@ -1,6 +1,8 @@
-// macOS / iOS MIDI input via CoreMIDI (MIDI 1.0 byte stream). Every source
-// is connected; packets are split into complete messages and fed to the
-// portable MidiTranslator through MidiIn::onBytes, like the other hosts.
+// macOS / iOS MIDI input via CoreMIDI. Every source is connected to a port that
+// uses the MIDI 2.0 protocol: CoreMIDI delivers Universal MIDI Packets (MIDI 2.0
+// devices with their full resolution and per-note controllers, MIDI 1.0 devices
+// converted), which go to the portable MidiTranslator through MidiIn::onUmp.
+// The MIDI 1.0 byte path (readProc / onBytes) remains for older systems.
 #include <CoreMIDI/CoreMIDI.h>
 
 #include <cstdio>
@@ -98,7 +100,19 @@ std::vector<std::string> MidiIn::openAll() {
     closeAll();
     if (!impl_->client) {
         if (MIDIClientCreate(CFSTR("HSynth"), notifyProc, this, &impl_->client) != noErr) return {};
-        if (MIDIInputPortCreate(impl_->client, CFSTR("HSynth In"), readProc, this, &impl_->port) != noErr) return {};
+        OSStatus st = -1;
+        if (__builtin_available(macOS 11.0, iOS 14.0, *)) {
+            st = MIDIInputPortCreateWithProtocol(impl_->client, CFSTR("HSynth In"), kMIDIProtocol_2_0, &impl_->port,
+                                                 ^(const MIDIEventList* list, void*) {
+                                                     const MIDIEventPacket* p = &list->packet[0];
+                                                     for (UInt32 k = 0; k < list->numPackets; ++k) {
+                                                         onUmp(p->words, p->wordCount);
+                                                         p = MIDIEventPacketNext(p);
+                                                     }
+                                                 });
+        }
+        if (st != noErr && MIDIInputPortCreate(impl_->client, CFSTR("HSynth In"), readProc, this, &impl_->port) != noErr)
+            return {};
     }
     std::vector<std::string> names;
     const ItemCount n = MIDIGetNumberOfSources();
@@ -140,6 +154,17 @@ void MidiIn::setMultiTimbral(bool on) {
 std::string MidiIn::lastMessage() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_;
+}
+
+void MidiIn::onUmp(const uint32_t* words, size_t count) {
+    if (count == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    Sink sink(engine_, pendingProgram_, eventCount_);
+    if (learn_) learn_->onUmp(words, count, engine_);
+    translator_.processUmp(words, count, sink);
+    char buf[40];
+    std::snprintf(buf, sizeof buf, "UMP %08X%s", (unsigned)words[0], count > 1 ? " ..." : "");
+    last_ = buf;
 }
 
 void MidiIn::onBytes(const uint8_t* data, size_t len) {

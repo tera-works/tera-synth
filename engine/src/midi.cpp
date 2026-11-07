@@ -206,6 +206,18 @@ void MidiTranslator::midi2Message(uint32_t w0, uint32_t w1, EventSink& out) {
         case 0x6:  // per-note pitch bend
             sink.onEvent(Event::perNote(EventType::NotePitch, id, idx, u32Bipolar(w1) * perNoteBendRange_));
             break;
+        case 0x2:  // registered controller (RPN), atomic in MIDI 2.0
+            if (idx == 0 && sub == 0) {  // pitch bend sensitivity: semitones in the top 7 bits, cents in the next 7
+                const int semis = (int)(w1 >> 25), cents = (int)((w1 >> 18) & 0x7F);
+                // the engine's RPN handling (select, data entry, deselect)
+                sink.onEvent(Event::control(EventType::Controller, 0.0f, 101));
+                sink.onEvent(Event::control(EventType::Controller, 0.0f, 100));
+                sink.onEvent(Event::control(EventType::Controller, (float)semis / 127.0f, 6));
+                sink.onEvent(Event::control(EventType::Controller, (float)cents / 127.0f, 38));
+                sink.onEvent(Event::control(EventType::Controller, 1.0f, 101));
+                sink.onEvent(Event::control(EventType::Controller, 1.0f, 100));
+            }
+            break;
         case 0xF:  // per-note management: reset per-note controllers if S flag
             if (w0 & 0x1) sink.onEvent(Event::perNote(EventType::NotePitch, id, idx, 0.0f));
             break;

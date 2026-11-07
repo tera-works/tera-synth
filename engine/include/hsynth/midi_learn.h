@@ -34,6 +34,9 @@ public:
 
     // MIDI thread. Returns true if the message was a learned / mapped CC.
     bool onMidi(const uint8_t* data, size_t len, Engine& engine);
+    // The same for Universal MIDI Packets (words in host order): the control changes
+    // in them (MIDI 1.0 or MIDI 2.0 channel voice) are learned / mapped like MIDI 1.0 CCs.
+    void onUmp(const uint32_t* words, size_t count, Engine& engine);
 
     std::vector<MidiMapping> mappings() const;
     void setMappings(std::vector<MidiMapping> m);

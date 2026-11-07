@@ -90,6 +90,14 @@ std::string MidiIn::lastMessage() const {
     return last_;
 }
 
+void MidiIn::onUmp(const uint32_t* words, size_t count) {
+    if (count == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    Sink sink(engine_, pendingProgram_, eventCount_);
+    if (learn_) learn_->onUmp(words, count, engine_);
+    translator_.processUmp(words, count, sink);
+}
+
 void MidiIn::onBytes(const uint8_t* data, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     Sink sink(engine_, pendingProgram_, eventCount_);
