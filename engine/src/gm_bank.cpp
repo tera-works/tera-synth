@@ -72,8 +72,11 @@ void GmBank::build(const std::vector<PresetInfo>& presets) {
         Entry e;
         e.file = p.file;
         e.name = p.name;
-        const bool kit = n.find("rhythm") != std::string::npos || n.find("drum kit") != std::string::npos ||
-                         n.find("kit") != std::string::npos || cat.find("drum") != std::string::npos;
+        // kits: "SC GM2 Rhythm Sets NNN ...", "SC PRESET Rhythm NNN ...", "... Drum Kit", "... Kit";
+        // not every name with "rhythm" in it ("Rhythm'n'B" is a melodic preset)
+        const bool kit = n.find("rhythm sets") != std::string::npos || n.find("preset rhythm ") != std::string::npos ||
+                         n.find("drum kit") != std::string::npos || n.find(" kit") != std::string::npos ||
+                         n.find("kit ") == 0 || cat.find("drum") != std::string::npos;
         if (const size_t c = n.find("capital "); c != std::string::npos && !kit) {
             const int num = std::atoi(n.c_str() + c + 8);
             if (num >= 1 && num <= 128) {
@@ -85,6 +88,11 @@ void GmBank::build(const std::vector<PresetInfo>& presets) {
         }
         if (kit) {
             e.drum = true;
+            // GM2 drum sets are numbered like their program: "Rhythm Sets 009 GM2 ROOM" = program 8
+            if (const size_t r = n.find("rhythm sets "); r != std::string::npos) {
+                const int num = std::atoi(n.c_str() + r + 12);
+                if (num >= 1 && num <= 128) e.program = num - 1;
+            }
             e.quality = n.find("gm2 standard") != std::string::npos ? 4
                       : n.find("standard drum kit") != std::string::npos ? 3
                       : n.find("standard") != std::string::npos ? 2 : 1;
@@ -113,6 +121,14 @@ void GmBank::build(const std::vector<PresetInfo>& presets) {
 const GmBank::Entry* GmBank::pick(int program, bool drum) const {
     const Entry* best = nullptr;
     if (drum) {
+        // the kit numbered like the program, else the nearest one below it (GS / GM2 kits are
+        // variations of the kit at the start of their group: 1..7 -> Standard), else the best kit
+        program = std::max(0, std::min(127, program));
+        for (const Entry& e : entries_)
+            if (e.drum && e.program >= 0 && e.program <= program &&
+                (!best || e.program > best->program || (e.program == best->program && e.quality > best->quality)))
+                best = &e;
+        if (best) return best;
         for (const Entry& e : entries_)
             if (e.drum && (!best || e.quality > best->quality)) best = &e;
         return best;
@@ -176,7 +192,7 @@ bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std
         }
         // reuse the part's preset only if no mid-song program change replaced it
         const GmBank::Entry* now = engine.partProgram(ch) >= 0 ? bank.pick(engine.partProgram(ch), drum) : nullptr;
-        if (loaded[ch] != e->file || (!drum && engine.partProgram(ch) != program && (!now || now->file != e->file))) {
+        if (loaded[ch] != e->file || (engine.partProgram(ch) != program && (!now || now->file != e->file))) {
             Preset p;
             std::string err;
             std::vector<std::string> warnings;
@@ -230,7 +246,7 @@ bool SongProgramLoader::prepare(const Song& song, const GmBank& bank, const std:
         for (auto& n : names_) n.clear();
     }
     for (const auto& pc : song.programChanges) {
-        if (pc.channel == 9 || !song.channelUsed[pc.channel]) continue;  // drums keep their kit
+        if (!song.channelUsed[pc.channel]) continue;  // (channel 10: drum kits by program)
         changes_[pc.channel].push_back({pc.time, pc.program});
     }
     for (int c = 0; c < 16; ++c) {

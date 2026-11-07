@@ -57,7 +57,9 @@ bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std
 // thread looks a few seconds ahead of the song position and loads the preset
 // of each channel's next program (Engine::stagePartProgram), so the engine can
 // switch at the exact moment of the program change. After a seek it loads the
-// program in force at the new position first. Start it after prepareSong();
+// program in force at the new position first. Channel 10 switches drum kits
+// (GM2: 0 Standard, 8 Room, 16 Power, 24 Electric, 25 Analog, 32 Jazz,
+// 40 Brush, 48 Orchestra, 56 SFX; numbers in between use the kit below). Start it after prepareSong();
 // stop() (or the destructor) before loading another song.
 class SongProgramLoader {
 public:

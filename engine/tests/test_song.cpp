@@ -168,6 +168,26 @@ TEST(song_gm_bank_selection) {
     CHECK(b.pick(44, false)->name == "String Ensemble");                   // tremolo strings
     CHECK(b.pick(81, false)->name == "Square Lead");                       // saw lead -> square lead
     CHECK(b.pick(0, true)->name == "SC GM2 Rhythm Sets 001 GM2 STANDARD");
+    // drum kits by program (GM2 numbering; in between: the kit below)
+    GmBank kits;
+    std::vector<PresetInfo> ks;
+    for (const char* n : {"SC GM2 Rhythm Sets 001 GM2 STANDARD", "SC GM2 Rhythm Sets 017 GM2 POWER",
+                          "SC GM2 Rhythm Sets 026 GM2 ANALOG", "SC PRESET Rhythm 008 Rock Kit 1", "GM Standard Drum Kit",
+                          "SC PRESET B 011 Rhythm'n'B"}) {
+        PresetInfo p;
+        p.name = n;
+        p.category = "SonicCell";
+        p.file = std::string(n) + ".json";
+        ks.push_back(p);
+    }
+    kits.build(ks);
+    CHECK(kits.pick(16, true)->name == "SC GM2 Rhythm Sets 017 GM2 POWER");
+    CHECK(kits.pick(19, true)->name == "SC GM2 Rhythm Sets 017 GM2 POWER");  // Power variation
+    CHECK(kits.pick(25, true)->name == "SC GM2 Rhythm Sets 026 GM2 ANALOG");
+    CHECK(kits.pick(3, true)->name == "SC GM2 Rhythm Sets 001 GM2 STANDARD");
+    int drumEntries = 0;
+    for (const auto& e : kits.entries()) drumEntries += e.drum ? 1 : 0;
+    CHECK(drumEntries == 5);  // "Rhythm'n'B" is not a kit
     CHECK(std::string(gmProgramName(73)) == "Flute");
     GmBank empty;
     CHECK(empty.pick(0, false) == nullptr);
