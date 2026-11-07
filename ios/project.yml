@@ -28,6 +28,8 @@ targets:
         group: Host
       - path: ../desktop/src/midi_in_coremidi.cpp
         group: Host
+      - path: ../desktop/src/midi_out_coremidi.cpp
+        group: Host
       - path: ../android/app/src/main/assets/presets
         type: folder
         buildPhase: resources
@@ -58,8 +60,8 @@ targets:
       properties:
         CFBundleDisplayName: HSynth
         # version: CFBundleShortVersionString = the release tag (v0.3.0); CFBundleVersion must grow with every release
-        CFBundleShortVersionString: "0.3.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.4.0"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UIBackgroundModes: [audio]
         UIRequiresFullScreen: true

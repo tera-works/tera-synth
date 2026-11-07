@@ -11,6 +11,21 @@ final class SynthModel: ObservableObject {
     @Published var cpu: Float = 0
     @Published var revision = 0          // bumps when parameters change wholesale (preset load)
     @Published var lcdOverride: String? = nil
+    // multi mode: the sound of every part, the part being edited
+    @Published var multi = false
+    @Published var editPart = 0
+    @Published var partNames = [String](repeating: "", count: 16)
+    // edit history of the edit part (undo / redo / compare with the loaded sound)
+    @Published var canUndo = false
+    @Published var canRedo = false
+    @Published var comparing = false
+    private var undoStack: [[NSNumber]] = []
+    private var redoStack: [[NSNumber]] = []
+    private var loadedSound: [NSNumber] = []
+    private var editedSound: [NSNumber] = []
+    // MIDI learn: tap a knob while learnMode is on, then move a controller
+    @Published var learnMode = false
+    @Published var learnTarget: Int32? = nil
     private var timer: Timer?
     private var lcdClear: DispatchWorkItem?
     private var audioOn = false
@@ -27,8 +42,12 @@ final class SynthModel: ObservableObject {
             self.voices = Int(self.engine.activeVoices)
             self.cpu = self.engine.cpuLoad
             self.checkBackgroundIdle()
+            self.pollLearn()
         }
+        engine.maxVoices = Int32(UserDefaults.standard.object(forKey: "maxVoices") as? Int ?? 128)
+        engine.setQuality(Int32(UserDefaults.standard.object(forKey: "quality") as? Int ?? 1))
         player.ensureAudio = { [weak self] in self?.start() }
+        player.onSongLoaded = { [weak self] in self?.songLoaded() }
         // a phone call or another app took the audio: pause the song, restart the audio afterwards
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
             guard let self, let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -81,13 +100,128 @@ final class SynthModel: ObservableObject {
         else if Date().timeIntervalSince(idleSince!) > 600 { stop() }
     }
 
+    /// Library: in multi mode the preset goes into the edit part, else it is the whole sound.
     func load(preset i: Int) {
-        engine.songPlay(false)  // a preset replaces the song's sounds
-        guard engine.loadPreset(i) else { return }
-        presetIndex = i
-        presetName = engine.currentPresetName
+        if engine.multiTimbral {
+            guard engine.loadPreset(i, intoPart: Int32(editPart)) else { return }
+            let names = engine.presetNames
+            if names.indices.contains(i) { partNames[editPart] = names[i] }
+            presetName = "\(editPart + 1): \(partNames[editPart])"
+        } else {
+            engine.songPlay(false)  // a preset replaces the song's sounds
+            guard engine.loadPreset(i) else { return }
+            presetIndex = i
+            presetName = engine.currentPresetName
+            UserDefaults.standard.set(i, forKey: "lastPreset")
+            partNames[0] = presetName
+            editPart = 0
+            multi = false
+        }
+        soundLoaded()
+    }
+
+    /// A new sound in the edit part: the history starts again.
+    func soundLoaded() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        loadedSound = engine.allParams()
+        comparing = false
+        updateHistory()
         revision += 1
-        UserDefaults.standard.set(i, forKey: "lastPreset")
+    }
+
+    // ------------------------------------------------------------ parts
+
+    func setMulti(_ on: Bool) {
+        engine.multiTimbral = on
+        multi = on
+        if !on { selectPart(0) }
+    }
+
+    func selectPart(_ k: Int) {
+        if comparing { compare() }
+        engine.editPart = Int32(k)
+        editPart = k
+        presetName = multi ? "\(k + 1): \(partNames[k].isEmpty ? "Init" : partNames[k])" : presetName
+        soundLoaded()
+    }
+
+    /// The Player loaded a song: every part has a GM sound now.
+    func songLoaded() {
+        multi = true
+        for k in 0..<16 {
+            let p = engine.songChannelPreset(Int32(k))
+            partNames[k] = p.isEmpty ? partNames[k] : p
+        }
+        editPart = Int(engine.editPart)
+        soundLoaded()
+    }
+
+    // ------------------------------------------------------------ history
+
+    /// Before a change: the current sound goes on the undo stack.
+    func checkpoint() {
+        if comparing { compare() }
+        undoStack.append(engine.allParams())
+        if undoStack.count > 64 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        updateHistory()
+    }
+
+    func undo() {
+        guard let prev = undoStack.popLast() else { return }
+        redoStack.append(engine.allParams())
+        engine.setAllParams(prev)
+        updateHistory()
+        revision += 1
+        show("Undo")
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(engine.allParams())
+        engine.setAllParams(next)
+        updateHistory()
+        revision += 1
+        show("Redo")
+    }
+
+    /// Toggles between the edited sound and the sound as loaded.
+    func compare() {
+        guard !loadedSound.isEmpty else { return }
+        if comparing {
+            engine.setAllParams(editedSound)
+            comparing = false
+        } else {
+            editedSound = engine.allParams()
+            engine.setAllParams(loadedSound)
+            comparing = true
+        }
+        revision += 1
+    }
+
+    private func updateHistory() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    // ------------------------------------------------------------ MIDI learn
+
+    func learn(_ param: Int32) {
+        engine.learnArm(param)
+        learnTarget = param
+        show("Learn \(engine.paramLabel(param)): move a controller")
+    }
+
+    private func pollLearn() {
+        guard let p = learnTarget, engine.learnArmed < 0 else { return }
+        learnTarget = nil
+        let d = engine.learnDescribe(p)
+        if !d.isEmpty {
+            engine.learnSave()
+            show("\(engine.paramLabel(p)) <- \(d)")
+            revision += 1
+        }
     }
 
     func step(_ d: Int) {

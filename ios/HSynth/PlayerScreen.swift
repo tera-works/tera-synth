@@ -30,6 +30,8 @@ final class PlayerModel: ObservableObject {
     private var shownPos = 0.0
     /// Starts the audio output if it was stopped (set by SynthModel; lock screen play).
     var ensureAudio: (() -> Void)?
+    /// A song's sounds are in the parts (SynthModel: part names, edit history).
+    var onSongLoaded: (() -> Void)?
 
     init(engine: HSynthEngine) {
         self.engine = engine
@@ -121,6 +123,7 @@ final class PlayerModel: ObservableObject {
                 self.message = ""
                 self.lastEnd = engine.songEndCount
                 self.applyMutes()
+                self.onSongLoaded?()
                 engine.songPlay(true)
             }
         }

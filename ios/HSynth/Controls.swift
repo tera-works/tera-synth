@@ -103,21 +103,36 @@ struct Knob: View {
             }
             .frame(width: size + 8, height: size + 8)
             .contentShape(Rectangle())
+            .overlay(Circle().stroke(model.learnTarget == param ? Hw.led : Color.clear, lineWidth: 2).padding(2))
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { g in
-                    if !dragging { dragging = true; start = value }
+                    if model.learnMode { return }  // learn mode: a tap picks the knob (onEnded)
+                    if !dragging {
+                        dragging = true
+                        start = value
+                        model.checkpoint()
+                    }
                     let t = min(1, max(0, start + Float(-g.translation.height + g.translation.width * 0.5) / 180))
                     value = t
                     e.setParam(param, normalized: t)
                     model.show("\(e.paramLabel(param))  \(e.formatParam(param))")
                 }
-                .onEnded { _ in dragging = false })
+                .onEnded { _ in
+                    if model.learnMode { model.learn(param) }
+                    dragging = false
+                })
             .onTapGesture(count: 2) {
+                if model.learnMode { return }
+                model.checkpoint()
                 e.setParam(param, value: e.paramDefault(param))
                 value = e.paramNormalized(param)
             }
             Text(e.paramLabel(param).uppercased()).font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave).lineLimit(1)
             Text(e.formatParam(param)).font(.system(size: 10.5, design: .monospaced)).foregroundColor(Hw.lcdFg).lineLimit(1)
+            if model.learnMode {
+                let cc = e.learnDescribe(param)
+                Text(cc.isEmpty ? "—" : cc).font(.system(size: 9.5, design: .monospaced)).foregroundColor(Hw.led).lineLimit(1)
+            }
         }
         .frame(width: max(size + 12, 64))
         .onAppear { value = e.paramNormalized(param) }
@@ -138,7 +153,12 @@ struct ParamControl: View {
                 Text(e.paramLabel(param).uppercased()).font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave)
                 Menu {
                     ForEach(Array(e.paramOptions(param).enumerated()), id: \.offset) { i, o in
-                        Button(o) { e.setParam(param, value: Float(i)); refresh += 1; model.show("\(e.paramLabel(param))  \(o)") }
+                        Button(o) {
+                            model.checkpoint()
+                            e.setParam(param, value: Float(i))
+                            refresh += 1
+                            model.show("\(e.paramLabel(param))  \(o)")
+                        }
                     }
                 } label: { Lcd(text: e.formatParam(param) + " ▾", size: 13).frame(width: 120) }
             }
@@ -148,7 +168,7 @@ struct ParamControl: View {
                 let on = e.paramValue(param) > 0.5
                 Circle().fill(on ? Hw.led : Hw.ledOff).frame(width: 8, height: 8).shadow(color: on ? Hw.led : .clear, radius: 4)
                 Toggle("", isOn: Binding(get: { e.paramValue(param) > 0.5 },
-                                         set: { e.setParam(param, value: $0 ? 1 : 0); refresh += 1 }))
+                                         set: { model.checkpoint(); e.setParam(param, value: $0 ? 1 : 0); refresh += 1 }))
                     .labelsHidden().tint(Hw.led)
                 Text(e.paramLabel(param).uppercased()).font(.system(size: 10.5, weight: .bold)).foregroundColor(Hw.engrave)
             }

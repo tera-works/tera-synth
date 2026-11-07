@@ -96,6 +96,45 @@ NS_ASSUME_NONNULL_BEGIN
 /// Warnings of the last loadPreset (missing samples, ...) or the report of the last loadSong.
 @property(nonatomic, readonly) NSArray<NSString*>* lastWarnings;
 
+// parts (multi mode): the edit part is what the parameters above and loadPreset address
+@property(nonatomic) BOOL multiTimbral;
+@property(nonatomic) int editPart;                       // 0..15
+/// Loads a preset into a part (multi mode). The part's sound name is kept by the caller.
+- (BOOL)loadPreset:(NSInteger)index intoPart:(int)part NS_SWIFT_NAME(loadPreset(_:intoPart:));
+/// All parameters of the edit part (undo / compare snapshots).
+- (NSArray<NSNumber*>*)allParams;
+- (void)setAllParams:(NSArray<NSNumber*>*)values;
+
+// samples: SFZ / WAV / FLAC into a layer (0..2) of the edit part; nil on success, else the error
+- (nullable NSString*)loadSamples:(NSString*)path layer:(int)layer NS_SWIFT_NAME(loadSamples(_:layer:));
+- (void)unloadSamples:(int)layer;
+- (NSString*)sampleSetName:(int)layer;
+
+// settings
+@property(nonatomic) int maxVoices;
+- (void)setQuality:(int)quality;                         // 0 low, 1 normal, 2 high
+@property(nonatomic, readonly) BOOL audioInputOn;
+
+// recording (output after the effects, to Documents/recordings, at most 5 minutes)
+- (void)startRecording;
+/// Seconds recorded so far, -1 when not recording.
+@property(nonatomic, readonly) double recordSeconds;
+/// Stops and writes a WAV; returns its path (nil on failure / nothing recorded).
+- (nullable NSString*)stopRecording;
+
+// MIDI learn (mappings saved in Documents/midi_learn.json)
+- (void)learnArm:(int)param;
+- (void)learnCancel;
+@property(nonatomic, readonly) int learnArmed;            // -1 = not armed
+- (void)learnRemove:(int)param;
+- (NSString*)learnDescribe:(int)param;                    // "CC 74 ch 1" / ""
+- (void)learnSave;
+
+// MIDI out (the notes of the on-screen keyboard)
+@property(nonatomic, readonly) NSArray<NSString*>* midiOutputs;
+@property(nonatomic, readonly) NSString* midiOutput;      // "" = off
+- (BOOL)openMidiOutput:(NSString*)name;                   // "" closes
+
 @end
 
 NS_ASSUME_NONNULL_END

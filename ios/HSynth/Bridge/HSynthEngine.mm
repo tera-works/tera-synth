@@ -12,10 +12,13 @@
 #include "hsynth/gm_bank.h"
 #include "hsynth/smf.h"
 #include "hsynth/host_utils.h"
+#include "hsynth/midi_learn.h"
 #include "hsynth/params.h"
 #include "hsynth/preset.h"
 #include "hsynth/preset_index.h"
+#include "hsynth/wav.h"
 #include "midi_in.h"
+#include "midi_out.h"
 
 using namespace hsynth;
 
@@ -53,6 +56,9 @@ float toNormalized(const ParamInfo& p, float v) {
     std::vector<std::pair<double, double>> _tempos;
     NSString* _songName;
     NSArray<NSString*>* _lastWarnings;   // preset load warnings / song report (autotest)
+    MidiLearn _learn;
+    std::unique_ptr<MidiOut> _midiOut;
+    int _editPart;
 }
 
 - (instancetype)initWithFactoryDir:(NSString*)factoryDir userDir:(NSString*)userDir {
@@ -75,6 +81,11 @@ float toNormalized(const ParamInfo& p, float v) {
         _engine->setRenderThreads(0);  // auto: helpers on the performance cores
         _audio = std::make_unique<AudioOut>(*_engine);
         _midi = std::make_unique<MidiIn>(*_engine);
+        _midi->setLearn(&_learn);
+        std::string learnErr;
+        _learn.load(_userDir + "/midi_learn.json", learnErr);  // missing file: no mappings
+        _midiOut = std::make_unique<MidiOut>();
+        _editPart = 0;
         _current = -1;
         _currentName = @"Init";
         [self rescanPresets];
@@ -127,8 +138,15 @@ float toNormalized(const ParamInfo& p, float v) {
 
 // ---------------------------------------------------------------- playing
 
-- (void)noteOn:(int)key velocity:(float)velocity { _engine->sendEvent(Event::noteOn((uint32_t)(key + 1), key, velocity)); }
-- (void)noteOff:(int)key { _engine->sendEvent(Event::noteOff((uint32_t)(key + 1), key, 0.0f)); }
+- (void)noteOn:(int)key velocity:(float)velocity {
+    _engine->sendEvent(Event::noteOn((uint32_t)(key + 1), key, velocity));
+    if (_midiOut->isOpen())
+        _midiOut->send(0x90, (uint8_t)std::max(0, std::min(127, key)), (uint8_t)std::max(1, std::min(127, (int)std::lround(velocity * 127.0f))));
+}
+- (void)noteOff:(int)key {
+    _engine->sendEvent(Event::noteOff((uint32_t)(key + 1), key, 0.0f));
+    if (_midiOut->isOpen()) _midiOut->send(0x80, (uint8_t)std::max(0, std::min(127, key)), 64);
+}
 - (void)pitchBend:(float)value { _engine->sendEvent(Event::control(EventType::PitchBend, value)); }
 - (void)modWheel:(float)value { _engine->sendEvent(Event::control(EventType::ModWheel, value)); }
 - (void)sustain:(BOOL)on { _engine->sendEvent(Event::control(EventType::Sustain, on ? 1.0f : 0.0f)); }
@@ -170,6 +188,7 @@ float toNormalized(const ParamInfo& p, float v) {
     _lastWarnings = [self strings:warnings];
     _engine->setMultiTimbral(false);  // a single preset: leave the song's multi mode
     _midi->setMultiTimbral(false);
+    self.editPart = 0;
     _engine->collectGarbage();
     _current = index;
     _currentName = ns(p.name);
@@ -206,20 +225,21 @@ float toNormalized(const ParamInfo& p, float v) {
     if (param >= 0) for (const auto& o : paramTable()[(size_t)param].options) [a addObject:ns(o)];
     return a;
 }
-- (float)paramValue:(int)param { return param >= 0 ? _engine->getParam(param) : 0.0f; }
-- (void)setParam:(int)param value:(float)value { if (param >= 0) _engine->setParam(param, value); }
+// part parameters go to the edit part, the others are global (Engine::setPartParam)
+- (float)paramValue:(int)param { return param >= 0 ? _engine->getPartParam(_editPart, param) : 0.0f; }
+- (void)setParam:(int)param value:(float)value { if (param >= 0) _engine->setPartParam(_editPart, param, value); }
 - (float)paramNormalized:(int)param {
-    return param >= 0 ? toNormalized(paramTable()[(size_t)param], _engine->getParam(param)) : 0.0f;
+    return param >= 0 ? toNormalized(paramTable()[(size_t)param], _engine->getPartParam(_editPart, param)) : 0.0f;
 }
 - (void)setParam:(int)param normalized:(float)t {
-    if (param >= 0) _engine->setParam(param, fromNormalized(paramTable()[(size_t)param], t));
+    if (param >= 0) _engine->setPartParam(_editPart, param, fromNormalized(paramTable()[(size_t)param], t));
 }
 - (float)paramDefault:(int)param { return param >= 0 ? paramTable()[(size_t)param].def : 0.0f; }
 
 - (NSString*)formatParam:(int)param {
     if (param < 0) return @"";
     const ParamInfo& p = paramTable()[(size_t)param];
-    const float v = _engine->getParam(param);
+    const float v = _engine->getPartParam(_editPart, param);
     char buf[64];
     switch (p.kind) {
         case ParamKind::Enum: {
@@ -357,6 +377,135 @@ float toNormalized(const ParamInfo& p, float v) {
     return a;
 }
 - (NSArray<NSString*>*)lastWarnings { return _lastWarnings ?: @[]; }
+
+// ---------------------------------------------------------------- parts
+
+- (BOOL)multiTimbral { return _engine->multiTimbral(); }
+- (void)setMultiTimbral:(BOOL)on {
+    _engine->setMultiTimbral(on);
+    _midi->setMultiTimbral(on);
+    if (!on) self.editPart = 0;
+}
+- (int)editPart { return _editPart; }
+- (void)setEditPart:(int)part {
+    _editPart = std::max(0, std::min(kNumParts - 1, part));
+    _engine->selectPart(_editPart);
+}
+
+- (BOOL)loadPreset:(NSInteger)index intoPart:(int)part {
+    const auto& all = _index.all();
+    if (index < 0 || index >= (NSInteger)all.size() || part < 0 || part >= kNumParts) return NO;
+    Preset p;
+    std::string err;
+    if (!loadPresetFile(all[(size_t)index].file, p, err)) {
+        _lastWarnings = @[ ns(err) ];
+        return NO;
+    }
+    std::vector<std::string> warnings;
+    applyPartPreset(*_engine, part, p, _libraryDir, warnings);
+    _songLoaded[part].clear();  // the part no longer holds a song's sound
+    _lastWarnings = [self strings:warnings];
+    _engine->collectGarbage();
+    return YES;
+}
+
+- (NSArray<NSNumber*>*)allParams {
+    std::vector<float> v((size_t)P::kNumParams);
+    _engine->getPartParams(_editPart, v.data());
+    NSMutableArray* a = [NSMutableArray arrayWithCapacity:v.size()];
+    for (float x : v) [a addObject:@(x)];
+    return a;
+}
+- (void)setAllParams:(NSArray<NSNumber*>*)values {
+    if ((int)values.count != P::kNumParams) return;
+    for (int i = 0; i < P::kNumParams; ++i) _engine->setPartParam(_editPart, i, values[(NSUInteger)i].floatValue);
+}
+
+// ---------------------------------------------------------------- samples
+
+- (nullable NSString*)loadSamples:(NSString*)path layer:(int)layer {
+    if (layer < 0 || layer >= kNumLayers) return @"no such layer";
+    std::string err;
+    std::vector<std::string> warnings;
+    const std::string ext = [[path pathExtension] lowercaseString].UTF8String;
+    const bool ok = ext == "wav" && _engine->getPartParam(_editPart, P::layer(layer, P::LType)) == (float)LayerType::WT
+                        ? loadPartWavetable(*_engine, _editPart, layer, str(path), err)
+                        : loadPartSamples(*_engine, _editPart, layer, str(path), err, warnings);
+    _lastWarnings = [self strings:warnings];
+    if (!ok) return ns(err);
+    // a PCM layer to hear it
+    if (_engine->getPartParam(_editPart, P::layer(layer, P::LType)) != (float)LayerType::WT)
+        _engine->setPartParam(_editPart, P::layer(layer, P::LType), (float)LayerType::PCM);
+    return nil;
+}
+- (void)unloadSamples:(int)layer {
+    if (layer < 0 || layer >= kNumLayers) return;
+    _engine->setPartSampleSet(_editPart, layer, nullptr);
+    _engine->collectGarbage();
+}
+- (NSString*)sampleSetName:(int)layer { return ns(_engine->partSampleSetName(_editPart, layer)); }
+
+// ---------------------------------------------------------------- settings
+
+- (int)maxVoices { return _engine->maxVoices(); }
+- (void)setMaxVoices:(int)n { _engine->setMaxVoices(n); }
+- (void)setQuality:(int)quality { _engine->setQuality((Quality)std::max(0, std::min(2, quality))); }
+- (BOOL)audioInputOn { return _input; }
+
+// ---------------------------------------------------------------- recording
+
+- (void)startRecording { _audio->startRecording(300.0); }
+- (double)recordSeconds { return _audio->recording() ? _audio->recordedSeconds() : -1.0; }
+- (nullable NSString*)stopRecording {
+    std::vector<float> inter;
+    const size_t frames = _audio->stopRecording(inter);
+    if (frames == 0) return nil;
+    std::vector<float> l(frames), r(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        l[i] = inter[i * 2];
+        r[i] = inter[i * 2 + 1];
+    }
+    NSString* dir = ns(_userDir + "/recordings");
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDateFormatter* f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyyMMdd-HHmmss";
+    NSString* path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"HSynth %@.wav", [f stringFromDate:[NSDate date]]]];
+    const int rate = _audio->stats().sampleRate > 0 ? _audio->stats().sampleRate : 48000;
+    std::string err;
+    if (!writeWav(str(path), l, &r, rate, true, err)) {
+        NSLog(@"HSynth recording: %s", err.c_str());
+        return nil;
+    }
+    return path;
+}
+
+// ---------------------------------------------------------------- MIDI learn / out
+
+- (void)learnArm:(int)param { _learn.arm(param, _editPart); }
+- (void)learnCancel { _learn.cancel(); }
+- (int)learnArmed { return _learn.armedParam(); }
+- (void)learnRemove:(int)param {
+    _learn.removeParam(param);
+    [self learnSave];
+}
+- (NSString*)learnDescribe:(int)param { return ns(_learn.describe(param)); }
+- (void)learnSave {
+    std::string err;
+    if (!_learn.save(_userDir + "/midi_learn.json", err)) NSLog(@"HSynth learn: %s", err.c_str());
+}
+
+- (NSArray<NSString*>*)midiOutputs {
+    NSMutableArray* a = [NSMutableArray array];
+    for (const auto& n : MidiOut::ports()) [a addObject:ns(n)];
+    return a;
+}
+- (NSString*)midiOutput { return _midiOut->isOpen() ? ns(_midiOut->name()) : @""; }
+- (BOOL)openMidiOutput:(NSString*)name {
+    std::string err;
+    const bool ok = _midiOut->open(str(name), err);
+    if (!ok) NSLog(@"HSynth MIDI out: %s", err.c_str());
+    return ok;
+}
 - (void)resetPeaks {
     _engine->resetPeakStats();
     _audio->resetPeaks();

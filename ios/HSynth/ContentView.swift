@@ -10,8 +10,10 @@ struct ContentView: View {
             Group {
                 switch tab {
                 case 1: EditScreen()
-                case 2: PlayerScreen(player: model.player)
-                case 3: LibraryScreen(tab: $tab)
+                case 2: MultiScreen()
+                case 3: PlayerScreen(player: model.player)
+                case 4: LibraryScreen(tab: $tab)
+                case 5: SystemScreen()
                 default: PlayScreen()
                 }
             }
@@ -31,12 +33,17 @@ struct ContentView: View {
                     .font(.system(size: 10, design: .monospaced)).foregroundColor(Hw.lcdDim)
             }
             .padding(.horizontal, 8).padding(.vertical, 3)
-            .frame(maxWidth: 260, alignment: .leading)
+            .frame(maxWidth: 220, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 2).fill(Hw.lcdBg))
             Spacer(minLength: 4)
-            ForEach(Array(["Play", "Edit", "Player", "Library"].enumerated()), id: \.offset) { i, t in
-                HwButton(title: t, lit: tab == i) { tab = i }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(Array(["Play", "Edit", "Multi", "Player", "Library", "System"].enumerated()), id: \.offset) { i, t in
+                        HwButton(title: t, lit: tab == i) { tab = i }
+                    }
+                }
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(LinearGradient(colors: [Color(white: 0.16), Color(white: 0.09)], startPoint: .top, endPoint: .bottom))
@@ -137,16 +144,34 @@ struct EditScreen: View {
         VStack(spacing: 6) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack {
+                    if model.multi {
+                        Lcd(text: "PART \(model.editPart + 1)", size: 14).frame(width: 90)
+                    }
+                    HwButton(title: "Undo") { model.undo() }.opacity(model.canUndo ? 1 : 0.4)
+                    HwButton(title: "Redo") { model.redo() }.opacity(model.canRedo ? 1 : 0.4)
+                    HwButton(title: "Compare", lit: model.comparing) { model.compare() }
+                    HwButton(title: "Learn", lit: model.learnMode) {
+                        model.learnMode.toggle()
+                        if !model.learnMode {
+                            e.learnCancel()
+                            model.learnTarget = nil
+                        }
+                    }
+                    Rectangle().fill(Color(white: 0.3)).frame(width: 1, height: 30)
                     ForEach(pages.indices, id: \.self) { i in HwButton(title: pages[i].0, lit: page == i) { page = i } }
                 }
                 .padding(.horizontal, 8)
             }
             ScrollView {
                 VStack(spacing: 8) {
+                    if page == 0 { SamplesPanel() }
                     ForEach(pages[page].1, id: \.self) { g in
                         let ids = all.filter { $0.1 == g }.map { $0.0 }
                         if !ids.isEmpty {
                             Panel(title: g) {
+                                if g == "Amp Env" { EnvGraph(prefix: "amp") }
+                                if g == "Mod Env" { EnvGraph(prefix: "env2") }
+                                if g == "Filter" { FilterGraph() }
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 8)], alignment: .leading, spacing: 8) {
                                     ForEach(ids, id: \.self) { ParamControl(param: $0) }
                                 }
