@@ -1,11 +1,15 @@
 // Standard MIDI File playback: parser (tempo map, running status, tracks),
 // sample-accurate song playback in the parts, GM sound selection.
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 
 #include "analysis.h"
 #include "hsynth/engine.h"
 #include "hsynth/gm_bank.h"
 #include "hsynth/host_utils.h"
+#include "hsynth/preset.h"
+#include "hsynth/wav.h"
 #include "hsynth/smf.h"
 #include "test.h"
 
@@ -294,4 +298,47 @@ TEST(song_staged_program_change) {
         CHECK(e.partProgram(0) == 5);
         CHECK(e.songProgram(0) == 5);
     }
+}
+
+// a kit whose samples are missing at the first song (not copied yet) is loaded
+// again with the next song instead of being skipped as "already loaded"
+TEST(song_prepare_reloads_incomplete_parts) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "hsynth_tests" / "song_reload";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "library");
+    const std::string lib = (dir / "library").generic_string();
+    Preset kit;
+    kit.name = "Standard Drum Kit";
+    kit.category = "Drums";
+    kit.params[(size_t)P::layer(0, P::LType)] = (float)LayerType::PCM;
+    kit.samples[0] = "user/kit/kit.sfz";
+    std::string err;
+    const std::string kitFile = (dir / "kit.json").generic_string();
+    CHECK(savePresetFile(kitFile, kit, err));
+    PresetInfo info;
+    info.file = kitFile;
+    info.name = kit.name;
+    info.category = kit.category;
+    GmBank bank;
+    bank.build({info});
+    Song song;
+    song.channelUsed[9] = true;
+    Engine e;
+    e.prepare(48000);
+    std::string loaded[kNumParts];
+    std::vector<std::string> report;
+    CHECK(prepareSong(e, song, bank, lib, loaded, report));
+    CHECK(loaded[9].empty());                      // samples missing: not remembered
+    CHECK(e.partSampleSetPath(9, 0).empty());
+    // the samples arrive
+    fs::create_directories(dir / "library" / "user" / "kit");
+    std::vector<float> click(4800, 0.5f);
+    CHECK(writeWav((dir / "library" / "user" / "kit" / "k.wav").generic_string(), click, nullptr, 48000, true, err));
+    std::ofstream((dir / "library" / "user" / "kit" / "kit.sfz").string()) << "<region> sample=k.wav key=36\n";
+    report.clear();
+    CHECK(prepareSong(e, song, bank, lib, loaded, report));
+    for (auto& r : report) INFO("%s\n", r.c_str());
+    CHECK(loaded[9] == kitFile);
+    CHECK(e.partSampleSetPath(9, 0).find("kit.sfz") != std::string::npos);
 }

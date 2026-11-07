@@ -185,7 +185,10 @@ bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std
                 if (parts) parts->push_back(sp);
                 continue;
             }
-            loaded[ch] = e->file;
+            // remember it only if it loaded completely: samples missing now (not copied yet)
+            // must be loaded again with the next song, not skipped as "already loaded"
+            loaded[ch] = warnings.empty() ? e->file : std::string();
+            for (const auto& w : warnings) report.push_back("ch " + std::to_string(ch + 1) + ": " + w);
         }
         engine.setPartProgram(ch, program);
         engine.setPartParam(ch, P::BendRange, 2.0f);  // GM default
