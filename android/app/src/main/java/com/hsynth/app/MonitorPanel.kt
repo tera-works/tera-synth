@@ -30,6 +30,11 @@ class MonitorPanel(private val a: MainActivity) {
     var inputSwitch: ToggleSwitch? = null
     private val inputText = Ui.text(a, "", 12f, Ui.DIM, tr = false).apply { typeface = Hw.MONO }
     private var inPeak = 0f
+    private var bleScan: android.widget.Button? = null
+    private var blePeripheral: ToggleSwitch? = null
+    private val bleList by lazy { Ui.column(a) }
+    private val bleStatus by lazy { Ui.text(a, "", 12f, Ui.DIM, tr = false) }
+
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
@@ -123,6 +128,25 @@ class MonitorPanel(private val a: MainActivity) {
         }))
         a.midiOut.channel = a.prefs.getInt("midiOutCh", 0)
         if (outSel > 0) a.midiOut.open(outs[outSel - 1].first)
+        // Bluetooth LE MIDI
+        midi.body.addView(Ui.text(a, "Bluetooth MIDI", 13f, Ui.ACCENT, bold = true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(10) })
+        if (!a.ble.available) {
+            midi.body.addView(Ui.text(a, "Bluetooth LE is not available on this device", 12f, Ui.DIM))
+        } else {
+            bleScan = Ui.button(a, "Scan") {
+                a.withBlePermission { if (a.ble.scanning) a.ble.stopScan() else a.ble.scan() }
+            }
+            midi.body.addView(Ui.row(a, bleScan!!), LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(4) })
+            midi.body.addView(bleList, LinearLayout.LayoutParams(-1, -2))
+            blePeripheral = toggle("Peripheral: a PC / tablet can connect to this phone", a.prefs.getBoolean("blePeripheral", false)) { c ->
+                a.prefs.edit().putBoolean("blePeripheral", c).apply()
+                if (c) a.withBlePermission { a.ble.startPeripheral() } else a.ble.stopPeripheral()
+            }
+            midi.body.addView(blePeripheral, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+            midi.body.addView(bleStatus, LinearLayout.LayoutParams(-1, -2))
+            midi.body.addView(Ui.text(a, "Scan finds BLE MIDI keyboards and controllers; tap one to connect (it is reconnected next time). " +
+                "Peripheral mode lets a PC or tablet connect to this phone for playing and SysEx remote control.", 12f, Ui.DIM))
+        }
         midi.body.addView(Ui.text(a, "Program Change selects the n-th preset in the library list. " +
             "MIDI 2.0 UMP devices are opened in UMP mode on Android 13+ (per-note pitch bend, per-note controllers).", 12f, Ui.DIM))
         col.addView(midi, Hw.sectionLp(a))
@@ -152,7 +176,7 @@ class MonitorPanel(private val a: MainActivity) {
             addView(ScrollView(a).apply { addView(left) }, LinearLayout.LayoutParams(0, -1, 1f).apply { marginEnd = d(10) })
             addView(ScrollView(a).apply { addView(col) }, LinearLayout.LayoutParams(0, -1, 1f))
         }
-        refreshMidi()
+        refreshBle()
     }
 
     private fun typeName(t: Int) = when (t) {
@@ -161,6 +185,29 @@ class MonitorPanel(private val a: MainActivity) {
         AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> "USB"
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> L10n.t("Bluetooth (high latency)")
         else -> L10n.f("type %d", t)
+    }
+
+    /** Bluetooth MIDI: found / connected devices, peripheral clients. */
+    fun refreshBle() {
+        if (!a.ble.available) return
+        bleScan?.text = L10n.t(if (a.ble.scanning) "Stop scan" else "Scan")
+        bleList.removeAllViews()
+        val conn = a.ble.connectedDevices()
+        for ((addr, name) in conn)
+            bleList.addView(Ui.button(a, L10n.f("Disconnect %s", name)) { a.ble.disconnect(addr) },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = Ui.dp(a, 4) })
+        for (f in a.ble.found.values) {
+            if (conn.any { it.first == f.address }) continue
+            bleList.addView(Ui.button(a, L10n.f("Connect %s", f.name)) { a.withBlePermission { a.ble.connect(f.address, f.name) } },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = Ui.dp(a, 4) })
+        }
+        if (a.ble.scanning && a.ble.found.isEmpty())
+            bleList.addView(Ui.text(a, "Searching…", 12f, Ui.DIM))
+        blePeripheral?.on = a.ble.peripheralOn || a.prefs.getBoolean("blePeripheral", false)
+        val clients = a.ble.peripheralClients()
+        bleStatus.text = if (!a.ble.peripheralOn) "" else if (clients.isEmpty()) L10n.t("Advertising, waiting for a connection")
+            else L10n.f("Connected: %s", clients.joinToString(", "))
+        refreshMidi()
     }
 
     fun refreshMidi() {

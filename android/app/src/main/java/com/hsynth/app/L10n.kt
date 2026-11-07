@@ -92,6 +92,15 @@ object L10n {
         "MIDI service not available" to "MIDI サービスを利用できません",
         "No MIDI devices connected (USB MIDI hot-plug is detected automatically)" to "MIDI 機器が接続されていません（USB MIDI は接続すると自動で認識します）",
         "Auto (device)" to "Auto（端末の設定）",
+        "Bluetooth LE is not available on this device" to "この端末では Bluetooth LE を利用できません",
+        "Scan finds BLE MIDI keyboards and controllers; tap one to connect (it is reconnected next time). " +
+            "Peripheral mode lets a PC or tablet connect to this phone for playing and SysEx remote control." to
+            "Scan で BLE MIDI のキーボードやコントローラーを探し、タップすると接続します（次回は自動で再接続）。" +
+            "Peripheral をオンにすると、PC やタブレットからこの端末に Bluetooth で接続して、演奏や SysEx リモート操作ができます。",
+        "Searching…" to "検索中…",
+        "Advertising, waiting for a connection" to "接続を待っています（アドバタイズ中）",
+        "Connected: %s" to "接続中: %s",
+        "Bluetooth permission denied" to "Bluetooth の権限が許可されませんでした",
         // player
         "(no songs)\nAdd some with \"Open Folder\" / \"Open Songs\"\n%s" to "（曲がありません）\n「Open Folder」「Open Songs」で追加できます\n%s",
         "Loading sounds…" to "音色を読み込んでいます…", "Cannot load: %s" to "読み込めません: %s",

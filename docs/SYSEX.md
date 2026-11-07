@@ -13,7 +13,8 @@ HSynth は組み込み機器としての利用を前提に、**シンセサイ�
 
 | 本体 | PC との接続 | 備考 |
 |---|---|---|
-| Android（Galaxy S23 など） | USB ケーブルで接続し、通知の「USB の設定」で **MIDI** を選ぶ | PC 側には「Android」などの名前の MIDI ポートが現れます。Bluetooth MIDI でも可 |
+| Android（Galaxy S23 など） | USB ケーブルで接続し、通知の「USB の設定」で **MIDI** を選ぶ | PC 側には「Android」などの名前の MIDI ポートが現れます |
+| Android / iPhone（ケーブルなし） | **Bluetooth MIDI**: 本体をペリフェラルとして公開し、PC から `hsynth_remote.py --ble 名前` | [BLE_MIDI.md](BLE_MIDI.md) |
 | iPhone / iPad | **ネットワーク MIDI**（同じ Wi-Fi）。Windows は rtpMIDI、Mac は「Audio MIDI 設定」→ ネットワーク | アプリ起動時にネットワークセッションを自動で有効にします（初回はローカルネットワークの許可を求められます）。USB-MIDI インターフェースや Bluetooth MIDI でも可 |
 | Windows デスクトップ版 | 同じ PC で使うなら loopMIDI のポートを 1 つ作る | 同じポートで送受信して構いません（自分の送ったメッセージのこだまは無視します） |
 | macOS デスクトップ版 / iOS 内の他アプリ | 仮想ポート **「HSynth」** に直接つなぐ | HSynth が仮想の入力・出力ポートを作ります |

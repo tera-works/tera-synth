@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "audio_engine.h"
+#include "hsynth/ble_midi.h"
 #include "hsynth/dsp/fm.h"
 #include "hsynth/engine.h"
 #include "hsynth/fx/ir_load.h"
@@ -193,6 +194,50 @@ JNI(void, nativeControl)(JNIEnv*, jobject, jint type, jfloat value, jint ctrl) {
     gEngine->sendEvent(type >= 5 ? e : keyboardEvent(e));  // panic stays omni (all parts)
 }
 
+namespace {
+// MIDI 1.0 bytes from a source (gMidiMutex held)
+void midi1(int source, const uint8_t* data, size_t n) {
+    EngineSink sink;
+    const std::vector<uint8_t> rest = takeSysEx(source, data, n);
+    if (rest.empty()) return;
+    gLearn.onMidi(rest.data(), rest.size(), *gEngine);  // learned CCs set their parameters
+    gMidi.processMidi1(rest.data(), rest.size(), sink);
+}
+std::map<int, ble::Decoder> gBle;  // BLE MIDI peripheral connections (under gMidiMutex)
+}  // namespace
+
+// A BLE MIDI packet written by a central connected to the phone (BleMidi.kt).
+JNI(void, nativeBlePacket)(JNIEnv* env, jobject, jbyteArray data, jint source) {
+    const jsize n = env->GetArrayLength(data);
+    if (n <= 0) return;
+    std::vector<uint8_t> buf((size_t)n);
+    env->GetByteArrayRegion(data, 0, n, reinterpret_cast<jbyte*>(buf.data()));
+    std::lock_guard<std::mutex> lock(gMidiMutex);
+    gBle[source].packet(buf.data(), buf.size(), [source](const uint8_t* m, size_t len) { midi1(source, m, len); });
+}
+
+JNI(void, nativeBleReset)(JNIEnv*, jobject, jint source) {
+    std::lock_guard<std::mutex> lock(gMidiMutex);
+    gBle.erase(source);
+    gSysEx.erase(source);
+}
+
+// One complete MIDI message -> BLE MIDI packets of at most maxPacket bytes.
+JNI(jobjectArray, nativeBleEncode)(JNIEnv* env, jobject, jbyteArray data, jint maxPacket, jint timeMs) {
+    const jsize n = env->GetArrayLength(data);
+    std::vector<uint8_t> buf((size_t)std::max(0, (int)n));
+    if (n > 0) env->GetByteArrayRegion(data, 0, n, reinterpret_cast<jbyte*>(buf.data()));
+    const auto packets = ble::encode(buf.data(), buf.size(), (size_t)std::max(5, (int)maxPacket), (uint32_t)timeMs);
+    jobjectArray a = env->NewObjectArray((jsize)packets.size(), env->FindClass("[B"), nullptr);
+    for (size_t i = 0; i < packets.size(); ++i) {
+        jbyteArray p = env->NewByteArray((jsize)packets[i].size());
+        env->SetByteArrayRegion(p, 0, (jsize)packets[i].size(), reinterpret_cast<const jbyte*>(packets[i].data()));
+        env->SetObjectArrayElement(a, (jsize)i, p);
+        env->DeleteLocalRef(p);
+    }
+    return a;
+}
+
 JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint count, jboolean ump, jint source) {
     if (count <= 0) return;
     std::vector<uint8_t> buf((size_t)count);
@@ -208,10 +253,7 @@ JNI(void, nativeMidi)(JNIEnv* env, jobject, jbyteArray data, jint offset, jint c
         gLearn.onUmp(words.data(), words.size(), *gEngine);
         gMidi.processUmpBytes(buf.data(), buf.size(), sink);
     } else {
-        const std::vector<uint8_t> rest = takeSysEx(source, buf.data(), buf.size());
-        if (rest.empty()) return;
-        gLearn.onMidi(rest.data(), rest.size(), *gEngine);  // learned CCs set their parameters
-        gMidi.processMidi1(rest.data(), rest.size(), sink);
+        midi1(source, buf.data(), buf.size());
     }
 }
 

@@ -54,6 +54,7 @@ class MainActivity : Activity() {
     lateinit var multi: MultiPanel
     lateinit var midiOut: MidiOutput
     lateinit var remote: RemoteLink
+    lateinit var ble: BleMidi
     /** Name of the sound loaded into each part (for the Multi page and the header). */
     val partNames = Array(16) { "" }
     private var learnArmed = -1
@@ -100,6 +101,8 @@ class MainActivity : Activity() {
         midi = MidiInput(this) { monitor.refreshMidi() }
         midiOut = MidiOutput(this)
         remote = RemoteLink(this)
+        ble = BleMidi(this)
+        ble.onChange = { if (::monitor.isInitialized) monitor.refreshBle() }
         NativeEngine.nativeLearnLoad(File(filesDir, "midi_map.json").absolutePath)
 
         buildUi(0)
@@ -115,6 +118,7 @@ class MainActivity : Activity() {
             ui.post {
                 if (isDestroyed) return@post
                 remote.start()  // SysEx remote control (after the factory presets are in place)
+                ble.reconnect()  // Bluetooth MIDI devices of the last session, peripheral mode
                 libraryPanel.refresh()
                 val last = prefs.getString("lastPreset", null)?.let { File(it) }?.takeIf { it.exists() }
                 loadPreset(last ?: library.presets().firstOrNull()?.file ?: return@post)
@@ -364,8 +368,27 @@ class MainActivity : Activity() {
         monitor.inputSwitch?.on = on && ok
     }
 
+    // ------------------------------------------------------------ Bluetooth MIDI
+
+    private val reqBle = 302
+    private var afterBlePermission: (() -> Unit)? = null
+
+    /** Runs f once the Bluetooth permissions are granted (asks for them if needed). */
+    fun withBlePermission(f: () -> Unit) {
+        if (ble.hasPermissions()) return f()
+        afterBlePermission = f
+        requestPermissions(ble.permissions(), reqBle)
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == reqBle) {
+            val f = afterBlePermission
+            afterBlePermission = null
+            if (grantResults.isNotEmpty() && grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) f?.invoke()
+            else log("Bluetooth permission denied", Ui.WARN)
+            return
+        }
         if (requestCode == reqMic) {
             if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) setAudioInput(true)
             else { log("microphone permission denied", Ui.WARN); monitor.inputSwitch?.on = false }
@@ -531,6 +554,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         ui.removeCallbacks(statsTick)
+        ble.stop()
         remote.stop()
         if (instance === this) instance = null
         PlaybackService.stop(this)

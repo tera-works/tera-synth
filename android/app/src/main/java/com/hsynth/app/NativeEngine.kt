@@ -40,6 +40,10 @@ object NativeEngine {
     external fun nativeRemoteChanges(): Int
     external fun nativeRemoteSongCount(): Int
     external fun nativeRemoteSongPath(): String
+    // Bluetooth LE MIDI peripheral (BleMidi.kt)
+    external fun nativeBlePacket(data: ByteArray, source: Int)
+    external fun nativeBleReset(source: Int)
+    external fun nativeBleEncode(msg: ByteArray, maxPacket: Int, timeMs: Int): Array<ByteArray>
     external fun nativeSetMpe(enabled: Boolean)
     external fun nativeTakeProgramChange(): Int
     external fun nativeMidiEventCount(): Int

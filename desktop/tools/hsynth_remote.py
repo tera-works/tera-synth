@@ -20,6 +20,8 @@ Examples:
   python hsynth_remote.py -p HSynth req '{"op":"phrase","cmd":"record","bars":4}'
   python hsynth_remote.py -p HSynth shell          (type JSON or commands interactively)
   python hsynth_remote.py --sim engine/build-desktop/hsynth_remote_sim.exe hello   (no MIDI needed)
+  python hsynth_remote.py ble-scan                     (Bluetooth LE MIDI devices nearby; pip install bleak)
+  python hsynth_remote.py --ble Galaxy status         (straight over Bluetooth, no MIDI driver needed)
 
 -p takes a port name (or a part of it); the same name is used for input and
 output unless --in / --out are given.
@@ -261,6 +263,149 @@ class Sim:
     def close(self):
         self.p.stdin.close()
         self.p.wait(5)
+
+
+BLE_SERVICE = '03b80e5a-ede8-4b33-a751-6ce34ec4c700'
+BLE_CHAR = '7772e5db-3868-4112-a1a9-f2669d106bf3'
+
+
+def ble_decode(state, pkt, out):
+    """BLE MIDI packet -> complete MIDI messages (state: dict kept per connection)."""
+    if len(pkt) < 2 or not pkt[0] & 0x80:
+        return
+    i, n = 1, len(pkt)
+    while i < n:
+        b = pkt[i]
+        if state.get('sx') is not None:
+            if b < 0x80:
+                state['sx'].append(b)
+                i += 1
+                continue
+            i += 1
+            if i >= n:
+                break
+            c = pkt[i]
+            if c == 0xF7:
+                out(bytes(state['sx'] + [0xF7]))
+                state['sx'] = None
+                i += 1
+            elif c >= 0xF8:
+                out(bytes([c]))
+                i += 1
+            else:
+                state['sx'] = None
+                i -= 1
+            continue
+        if b & 0x80:
+            i += 1
+            if i >= n:
+                break
+            c = pkt[i]
+            if c & 0x80:
+                i += 1
+                if c == 0xF0:
+                    state['sx'] = [0xF0]
+                    continue
+                if c >= 0xF8:
+                    out(bytes([c]))
+                    continue
+                status = c
+                state['run'] = c if c < 0xF0 else 0
+            else:
+                status = state.get('run', 0)
+        else:
+            status = state.get('run', 0)
+        if not status:
+            i += 1
+            continue
+        nd = 1 if (status & 0xF0) in (0xC0, 0xD0) or status in (0xF1, 0xF3) else (0 if status >= 0xF4 else 2)
+        data = []
+        while len(data) < nd and i < n and pkt[i] < 0x80:
+            data.append(pkt[i])
+            i += 1
+        if len(data) == nd:
+            out(bytes([status] + data))
+
+
+def ble_encode(msg, max_packet, ms):
+    header, ts = 0x80 | ((ms >> 7) & 0x3F), 0x80 | (ms & 0x7F)
+    if msg[0] != 0xF0:
+        return [bytes([header, ts]) + bytes(msg)]
+    body = msg[:-1] if msg[-1] == 0xF7 else msg
+    out, pk = [], [header, ts]
+    for b in body:
+        if len(pk) >= max_packet:
+            out.append(bytes(pk))
+            pk = [header]
+        pk.append(b)
+    if len(pk) + 2 > max_packet:
+        out.append(bytes(pk))
+        pk = [header]
+    out.append(bytes(pk + [ts, 0xF7]))
+    return out
+
+
+class Ble:
+    """Bluetooth LE MIDI straight from the PC (pip install bleak): connects to a BLE MIDI
+    device by name, e.g. HSynth on Android in peripheral mode or an iPhone advertising."""
+
+    def __init__(self, name):
+        try:
+            import bleak  # noqa: F401
+        except ImportError:
+            raise SystemExit('Bluetooth needs bleak:  pip install bleak')
+        import asyncio
+        self.asyncio = asyncio
+        self.rx = queue.Queue()
+        self.state = {}
+        self.t0 = time.time()
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        self.client, self.name = self._run(self._connect(name), 40)
+
+    def _run(self, coro, timeout=20):
+        return self.asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    @staticmethod
+    async def scan_async(seconds=6.0):
+        from bleak import BleakScanner
+        found = await BleakScanner.discover(timeout=seconds, service_uuids=[BLE_SERVICE], return_adv=True)
+        return [(d.name or adv.local_name or d.address, d.address) for d, adv in found.values()]
+
+    @staticmethod
+    def scan(seconds=6.0):
+        import asyncio
+        return asyncio.run(Ble.scan_async(seconds))
+
+    async def _connect(self, want):
+        from bleak import BleakClient
+        devs = await Ble.scan_async()
+        hit = [d for d in devs if want and (want.lower() in d[0].lower() or want.lower() == d[1].lower())]
+        if not hit:
+            raise SystemExit(f'Bluetooth MIDI device {want!r} not found (found: {", ".join(d[0] for d in devs) or "none"})')
+        client = BleakClient(hit[0][1])
+        await client.connect()
+        await client.start_notify(BLE_CHAR, lambda _c, data: ble_decode(self.state, bytes(data), self.rx.put))
+        return client, f'BLE {hit[0][0]}'
+
+    def send(self, msg):
+        mtu = getattr(self.client, 'mtu_size', 23) or 23
+        ms = int((time.time() - self.t0) * 1000)
+        for p in ble_encode(msg, max(20, mtu - 3), ms):
+            self._run(self.client.write_gatt_char(BLE_CHAR, p, response=False))
+
+    def recv(self, timeout):
+        try:
+            return self.rx.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def close(self):
+        try:
+            self._run(self.client.disconnect(), 10)
+        except Exception:
+            pass
+        self.loop.call_soon_threadsafe(self.loop.stop)
 
 
 def pick(names, want, what):
@@ -613,6 +758,7 @@ def main():
     ap.add_argument('--in', dest='inp', help='input port (default: --port)')
     ap.add_argument('--out', help='output port (default: --port)')
     ap.add_argument('--device', type=int, default=ALL_DEVICES, help='device id 0..126 (default 127 = all)')
+    ap.add_argument('--ble', metavar='NAME', help='connect over Bluetooth LE MIDI to this device (pip install bleak)')
     ap.add_argument('--sim', help='path of hsynth_remote_sim (instead of MIDI)')
     ap.add_argument('--sim-args', default='', help='arguments for the simulator')
     ap.add_argument('-v', '--verbose', action='store_true', help='print the SysEx bytes')
@@ -621,6 +767,10 @@ def main():
     if not a.command:
         ap.print_help()
         return 2
+    if a.command[0] == 'ble-scan':
+        for name, addr in Ble.scan():
+            print(f'{name}  ({addr})')
+        return 0
     if a.command[0] == 'ports':
         ins, outs = backend_class().ports()
         print('inputs: ', *ins, sep='\n  ')
@@ -628,6 +778,8 @@ def main():
         return 0
     if a.sim:
         port = Sim(a.sim, shlex.split(a.sim_args))
+    elif a.ble:
+        port = Ble(a.ble)
     else:
         port = backend_class()(a.inp or a.port, a.out or a.port)
     try:

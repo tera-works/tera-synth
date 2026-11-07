@@ -57,6 +57,7 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: AudioToolbox.framework
       - sdk: CoreAudio.framework
+      - sdk: CoreAudioKit.framework
     info:
       path: HSynth/Info.plist
       properties:
@@ -74,6 +75,8 @@ targets:
         # network MIDI session: a PC (rtpMIDI) can play and remote-control the synth over Wi-Fi
         NSLocalNetworkUsageDescription: "Network MIDI lets a computer play and control HSynth over Wi-Fi."
         NSBonjourServices: [_apple-midi._udp]
+        # Bluetooth LE MIDI: connect to BLE MIDI devices / advertise the iPhone as one
+        NSBluetoothAlwaysUsageDescription: "Bluetooth MIDI connects keyboards and controllers, and lets a computer play and control HSynth."
         # Documents (library / presets / midi) is visible in the Files app and in Finder (iPhone > Files),
         # so the user's samples and MIDI files are copied in there and never bundled
         UIFileSharingEnabled: true

@@ -155,7 +155,11 @@ void readProc(const MIDIPacketList* list, void* refCon, void* srcRef) {
     }
 }
 
-void notifyProc(const MIDINotification*, void*) {}
+// Devices came or went (USB, Bluetooth LE MIDI connected in the system's Bluetooth
+// screen, network sessions): reconnect every source. Runs on the client's run loop.
+void notifyProc(const MIDINotification* n, void* refCon) {
+    if (n && n->messageID == kMIDIMsgSetupChanged && refCon) static_cast<MidiIn*>(refCon)->openAll();
+}
 }  // namespace
 
 MidiIn::MidiIn(hsynth::Engine& engine) : impl_(std::make_unique<Impl>()), engine_(engine) {}

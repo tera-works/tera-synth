@@ -27,6 +27,7 @@
 | USB MIDI 入力 | 🟡 | android.media.midi、ホットプラグ。実機・実MIDI機器では未検証 |
 | MIDI 2.0 UMP | 🟡 | 変換器はテスト済み。Android 13+ の UMP デバイスとの実機接続は未検証 |
 | SysEx リモート制御 | ✅ | 状態すべての取得・変更と全操作を SysEx（JSON、双方向・変更通知つき）で。Android / iOS / デスクトップ共通。PC ツール `desktop/tools/hsynth_remote.py`。詳細 [SYSEX.md](SYSEX.md)。iOS / macOS の CoreMIDI 部分は未コンパイル |
+| Bluetooth MIDI（BLE） | 🟡 | Android: 機器の検索・接続・自動再接続、端末を BLE MIDI 機器として公開（ペリフェラル）。iOS: 標準の接続画面と公開画面。macOS: システムで接続した機器を自動で認識。PC ツールから BLE で直接リモート操作。Windows デスクトップ版は非対応（winmm）。実機未検証。[BLE_MIDI.md](BLE_MIDI.md) |
 | デバッグ計測 | ✅ | Monitor 画面、オフライン `hsynth_bench` |
 
 ### SFZ 対応範囲

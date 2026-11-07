@@ -374,6 +374,7 @@ struct SystemScreen: View {
     @State private var tick = 0
     @State private var recSeconds = -1.0
     @State private var lastRecording = ""
+    @State private var bleSheet: BluetoothMidiSheet.Mode?
     private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -447,11 +448,26 @@ struct SystemScreen: View {
                             Lcd(text: "OUT: " + (e.midiOutput.isEmpty ? "Off" : e.midiOutput), size: 13).frame(width: 280)
                         }
                     }
+                    HStack {
+                        HwButton(title: "Bluetooth MIDI") { bleSheet = .central }
+                        HwButton(title: "Advertise") { bleSheet = .peripheral }
+                    }
                     Text("MIDI OUT には、画面の鍵盤で弾いた音符を送ります。MIDI Learn は、Edit 画面の Learn をオンにしてつまみをタップし、コントローラーを動かすと割り当てられます。")
+                        .font(.system(size: 11)).foregroundColor(Hw.engrave)
+                    Text("Bluetooth MIDI: BLE MIDI のキーボードやコントローラーを探して接続します。Advertise: この iPhone を Bluetooth MIDI 機器として公開し、Mac・PC・iPad から接続できるようにします（演奏も SysEx リモート操作も可。画面を開いている間だけ公開されます）。")
                         .font(.system(size: 11)).foregroundColor(Hw.engrave)
                 }
             }
             .padding(8)
+        }
+        .sheet(isPresented: Binding(get: { bleSheet != nil }, set: { if !$0 { bleSheet = nil } })) {
+            if let m = bleSheet {
+                BluetoothMidiSheet(mode: m) {
+                    bleSheet = nil
+                    model.engine.refreshMidi()
+                    tick += 1
+                }
+            }
         }
         .onReceive(timer) { _ in
             recSeconds = e.recordSeconds

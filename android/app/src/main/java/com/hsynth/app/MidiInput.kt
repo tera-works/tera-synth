@@ -99,6 +99,9 @@ class MidiInput(private val context: Context, private val onChange: () -> Unit) 
         for (id in opened.keys.toList()) close(id)
     }
 
+    /** Opens a device that was connected another way (Bluetooth LE). */
+    fun attach(info: MidiDeviceInfo) = open(info, isUmp(info))
+
     private fun open(info: MidiDeviceInfo, ump: Boolean) {
         val m = manager ?: return
         if (info.outputPortCount == 0 || opened.containsKey(info.id)) return
