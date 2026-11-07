@@ -29,6 +29,19 @@ int64_t SampleSet::diskBytes() const {
 
 bool Sample::loadFully(std::string& error) {
     if (!streamed) return true;
+    if (stream.flac) {
+        WavData w;
+        if (!readFlac(stream.path, w, error)) return false;
+        data[0] = std::move(w.left);
+        data[0].resize((size_t)(frames + kPadFrames), 0.0f);
+        if (channels == 2) {
+            data[1] = std::move(w.right);
+            data[1].resize((size_t)(frames + kPadFrames), 0.0f);
+        }
+        streamed = false;
+        preloadFrames = 0;
+        return true;
+    }
     std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(stream.path, "rb"), &std::fclose);
     if (!f) { error = "cannot open " + stream.path; return false; }
     std::vector<float> d[2];
@@ -216,43 +229,6 @@ bool readWavInfo(FILE* f, WavInfo& w) {
     return true;
 }
 
-// Raw float cache of a decoded (FLAC) file: this header, then interleaved float32.
-struct RawHeader {
-    char magic[8];
-    int32_t channels;
-    int32_t unity;
-    double rate;
-    int64_t frames;
-    int64_t sourceSize;
-    int64_t sourceTime;
-};
-
-std::string cachePathFor(const std::string& path, int64_t size, int64_t mtime) {
-    uint64_t h = 1469598103934665603ull;  // FNV-1a of path, size and time
-    for (unsigned char c : path) h = (h ^ c) * 1099511628211ull;
-    h = (h ^ (uint64_t)size) * 1099511628211ull;
-    h = (h ^ (uint64_t)mtime) * 1099511628211ull;
-    std::string dir = sampleLoadOptions().cacheDir;
-    if (dir.empty()) {
-        std::error_code ec;
-        dir = utf8String(std::filesystem::temp_directory_path(ec) / "hsynth_stream_cache");
-    }
-    char name[40];
-    std::snprintf(name, sizeof name, "%016llx.hsraw", (unsigned long long)h);
-    return dir + "/" + name;
-}
-
-StreamSource rawSource(const std::string& cache, int channels) {
-    StreamSource src;
-    src.path = cache;
-    src.dataOffset = (int64_t)sizeof(RawHeader);
-    src.format = 3;
-    src.bits = 32;
-    src.blockAlign = 4 * channels;
-    src.fileChannels = channels;
-    return src;
-}
-
 // A streamed sample whose head is read from src.
 std::unique_ptr<Sample> headFromSource(FILE* f, const std::string& path, const StreamSource& src, int channels, double rate,
                                        int64_t frames, int unity, int64_t preload) {
@@ -287,71 +263,55 @@ std::unique_ptr<Sample> streamedWav(const std::string& path, int64_t preload) {
     return headFromSource(f.get(), path, src, w.fileChannels >= 2 ? 2 : 1, w.rate, w.frames, w.unity, preload);
 }
 
-// FLAC: decoded once into the raw cache and streamed from there (the cache
-// also makes later loads fast: only the header and the head are read).
+// FLAC: only the head is decoded now; the streamer decodes the rest frame by
+// frame from the compressed file (nothing decoded is kept on disk).
 std::unique_ptr<Sample> streamedFlac(const std::string& path, int64_t preload) {
-    std::error_code ec;
-    const auto fp = utf8Path(path);
-    const int64_t size = (int64_t)std::filesystem::file_size(fp, ec);
-    if (ec) return nullptr;
-    const int64_t mtime = (int64_t)std::filesystem::last_write_time(fp, ec).time_since_epoch().count();
-    const std::string cache = cachePathFor(path, size, mtime);
-    RawHeader h{};
-    {
-        std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(cache, "rb"), &std::fclose);
-        if (f && std::fread(&h, sizeof h, 1, f.get()) == 1 && std::memcmp(h.magic, "HSRAW01", 8) == 0 &&
-            h.sourceSize == size && h.sourceTime == mtime && h.channels >= 1 && h.channels <= 2 && h.frames > 2 * preload) {
-            if (auto s = headFromSource(f.get(), path, rawSource(cache, h.channels), h.channels, h.rate, h.frames, h.unity,
-                                        preload))
-                return s;
+    std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(path, "rb"), &std::fclose);
+    if (!f) return nullptr;
+    std::fseek(f.get(), 0, SEEK_END);
+    const long size = std::ftell(f.get());
+    std::fseek(f.get(), 0, SEEK_SET);
+    if (size <= 0) return nullptr;
+    // the head is in the first part of the file (a whole read if it is not)
+    for (size_t want = std::min<size_t>((size_t)size, 256u << 10);; want = (size_t)size) {
+        std::vector<uint8_t> bytes(want);
+        std::fseek(f.get(), 0, SEEK_SET);
+        if (std::fread(bytes.data(), 1, want, f.get()) != want) return nullptr;
+        FlacFrameDecoder dec;
+        std::string err;
+        if (!dec.open(bytes.data(), bytes.size(), err)) return nullptr;
+        // unknown length or a loop in the file: decoded fully by the caller
+        if (dec.totalFrames() <= 2 * preload || dec.loopStart() >= 0) return nullptr;
+        auto s = std::make_unique<Sample>();
+        s->path = path;
+        s->channels = dec.channels();
+        s->sampleRate = dec.sampleRate();
+        s->frames = dec.totalFrames();
+        s->unityNote = dec.unityNote();
+        for (int c = 0; c < s->channels; ++c) s->data[c].assign((size_t)(preload + Sample::kPadFrames), 0.0f);
+        std::vector<float> l, r;
+        int64_t got = 0;
+        bool ok = true;
+        while (got < preload) {
+            const int n = dec.next(l, r, err);
+            if (n <= 0) { ok = false; break; }
+            const int64_t k = std::min<int64_t>(n, preload - got);
+            std::memcpy(s->data[0].data() + got, l.data(), sizeof(float) * (size_t)k);
+            if (s->channels == 2) std::memcpy(s->data[1].data() + got, r.data(), sizeof(float) * (size_t)k);
+            got += k;
         }
-    }
-    WavData w;
-    std::string err;
-    if (!readFlac(path, w, err) || w.loopStart >= 0 || w.frames <= 2 * preload) return nullptr;
-    std::filesystem::create_directories(utf8Path(cache).parent_path(), ec);
-    const std::string tmp = cache + ".tmp";
-    {
-        std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(tmp, "wb"), &std::fclose);
-        if (!f) return nullptr;
-        std::memcpy(h.magic, "HSRAW01", 8);
-        h.channels = w.channels;
-        h.unity = w.unityNote;
-        h.rate = w.sampleRate;
-        h.frames = w.frames;
-        h.sourceSize = size;
-        h.sourceTime = mtime;
-        bool ok = std::fwrite(&h, sizeof h, 1, f.get()) == 1;
-        std::vector<float> buf;
-        for (int64_t i = 0; ok && i < w.frames; i += 65536) {
-            const int64_t n = std::min<int64_t>(65536, w.frames - i);
-            buf.resize((size_t)(n * w.channels));
-            for (int64_t k = 0; k < n; ++k) {
-                buf[(size_t)(k * w.channels)] = w.left[(size_t)(i + k)];
-                if (w.channels == 2) buf[(size_t)(k * 2 + 1)] = w.right[(size_t)(i + k)];
-            }
-            ok = std::fwrite(buf.data(), sizeof(float), buf.size(), f.get()) == buf.size();
+        if (!ok) {
+            if (want == (size_t)size) return nullptr;
+            continue;  // the head runs past the part read: read it all
         }
-        if (!ok) return nullptr;
+        s->streamed = true;
+        s->preloadFrames = preload;
+        s->stream.path = path;
+        s->stream.flac = true;
+        s->stream.blockAlign = 2 * s->channels;  // diskBytes(): counted like 16-bit PCM
+        s->stream.fileChannels = s->channels;
+        return s;
     }
-    std::filesystem::remove(utf8Path(cache), ec);
-    std::filesystem::rename(utf8Path(tmp), utf8Path(cache), ec);
-    if (ec) return nullptr;
-    auto s = std::make_unique<Sample>();
-    s->path = path;
-    s->channels = w.channels;
-    s->sampleRate = w.sampleRate;
-    s->frames = w.frames;
-    s->unityNote = w.unityNote;
-    for (int c = 0; c < w.channels; ++c) {
-        std::vector<float>& src = c == 0 ? w.left : w.right;
-        s->data[c].assign(src.begin(), src.begin() + preload);
-        s->data[c].resize((size_t)(preload + Sample::kPadFrames), 0.0f);
-    }
-    s->streamed = true;
-    s->preloadFrames = preload;
-    s->stream = rawSource(cache, w.channels);
-    return s;
 }
 
 }  // namespace

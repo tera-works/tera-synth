@@ -1,5 +1,7 @@
 #include "hsynth/streaming.h"
 
+#include "hsynth/flac.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -150,10 +152,70 @@ void DiskStreamer::waitFor(const StreamSlot& s, int64_t frameEnd) const {
         std::this_thread::yield();
 }
 
+struct StreamFlacState {
+    const Sample* sample = nullptr;  // whose data is loaded (nullptr = none)
+    std::vector<uint8_t> data;       // the compressed file
+    FlacFrameDecoder dec;
+    std::vector<float> buf[2];       // the last decoded frame
+    int64_t bufStart = 0;
+    int bufFrames = 0;
+};
+
+// FLAC: the compressed file is read once per voice (it is small) and decoded a
+// frame at a time ahead of the player. Frames before the slot's start (the
+// preloaded head) are decoded and skipped: at most preloadFrames.
+bool DiskStreamer::fillFlac(StreamSlot& s, int64_t w, int64_t n) {
+    const Sample* smp = s.sample;
+    if (!s.flac) s.flac = std::make_shared<StreamFlacState>();
+    StreamFlacState& st = *s.flac;
+    std::string err;
+    auto restart = [&]() {
+        st.bufStart = 0;
+        st.bufFrames = 0;
+        return st.dec.open(st.data.data(), st.data.size(), err);
+    };
+    if (st.sample != smp) {
+        st.sample = nullptr;
+        std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(smp->stream.path, "rb"), &std::fclose);
+        if (!f) return false;
+        std::fseek(f.get(), 0, SEEK_END);
+        const long size = std::ftell(f.get());
+        std::fseek(f.get(), 0, SEEK_SET);
+        if (size <= 0) return false;
+        st.data.resize((size_t)size);
+        if (std::fread(st.data.data(), 1, st.data.size(), f.get()) != st.data.size()) return false;
+        bytesRead_.fetch_add((uint64_t)size, std::memory_order_relaxed);
+        if (!restart()) return false;
+        st.sample = smp;
+    }
+    const bool stereo = smp->channels == 2;
+    int64_t got = 0;
+    while (got < n) {
+        const int64_t f = w + got;
+        if (f >= st.bufStart && f < st.bufStart + st.bufFrames) {
+            const int64_t k = std::min(n - got, st.bufStart + st.bufFrames - f);
+            for (int c = 0; c < (stereo ? 2 : 1); ++c)
+                std::memcpy(tmp_[c].data() + got, st.buf[c].data() + (f - st.bufStart), sizeof(float) * (size_t)k);
+            got += k;
+            continue;
+        }
+        if (f < st.bufStart && !restart()) break;  // behind the decoder (not expected): from the top
+        const int k = st.dec.next(st.buf[0], st.buf[1], err);
+        if (k <= 0) break;
+        if (stereo && st.buf[1].size() < (size_t)k) st.buf[1].assign((size_t)k, 0.0f);
+        st.bufStart = st.dec.position() - k;
+        st.bufFrames = k;
+    }
+    for (int c = 0; c < (stereo ? 2 : 1); ++c)  // corrupt / short data: silence
+        std::fill(tmp_[c].begin() + got, tmp_[c].begin() + n, 0.0f);
+    return true;
+}
+
 bool DiskStreamer::fill(StreamSlot& s) {
     constexpr int64_t kChunk = 4096;
     const Sample* smp = s.sample;
-    if (!s.file) {
+    const bool flac = smp->stream.flac;
+    if (!flac && !s.file) {
         s.file = fopenUtf8(smp->stream.path, "rb");
         if (!s.file) {
             // unreadable: mark everything as arrived (silence) so the voice ends normally
@@ -168,8 +230,15 @@ bool DiskStreamer::fill(StreamSlot& s) {
     const int64_t n = std::min(kChunk, limit - w);
     for (auto& t : tmp_) if ((int64_t)t.size() < n) t.resize((size_t)n);
     const bool stereo = smp->channels == 2;
-    readStreamFrames(s.file, smp->stream, w, n, tmp_[0].data(), stereo ? tmp_[1].data() : nullptr, scratch_);
-    bytesRead_.fetch_add((uint64_t)(n * smp->stream.blockAlign), std::memory_order_relaxed);
+    if (flac) {
+        if (!fillFlac(s, w, n)) {
+            s.written.store(smp->frames, std::memory_order_release);  // unreadable: silence, the voice ends normally
+            return false;
+        }
+    } else {
+        readStreamFrames(s.file, smp->stream, w, n, tmp_[0].data(), stereo ? tmp_[1].data() : nullptr, scratch_);
+        bytesRead_.fetch_add((uint64_t)(n * smp->stream.blockAlign), std::memory_order_relaxed);
+    }
     for (int c = 0; c < (stereo ? 2 : 1); ++c) {
         float* ring = s.ring[c].get();
         for (int64_t i = 0; i < n;) {
@@ -199,6 +268,7 @@ void DiskStreamer::threadMain() {
                 if (st == StreamSlot::kReleased) {
                     if (s.file) std::fclose(s.file);
                     s.file = nullptr;
+                    if (s.flac) s.flac->sample = nullptr;  // a new sample may get the same address
                     s.sample = nullptr;
                     s.state.store(StreamSlot::kFree, std::memory_order_release);
                     continue;

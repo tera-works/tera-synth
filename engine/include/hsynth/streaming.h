@@ -28,9 +28,11 @@ struct Sample;
 struct SampleSet;
 
 // Where the frames of a streamed sample are on disk: interleaved PCM in a WAV
-// file or in the raw float cache made for compressed (FLAC) files.
+// file, or a FLAC file that the streamer decodes frame by frame (flac = true;
+// the PCM fields are then unused).
 struct StreamSource {
     std::string path;
+    bool flac = false;
     int64_t dataOffset = 0;   // byte offset of frame 0
     int format = 1;           // 1 = integer PCM, 3 = IEEE float
     int bits = 16;            // bits per sample
@@ -50,10 +52,12 @@ struct SampleLoadOptions {
     StreamMode mode = StreamMode::Auto;
     int64_t autoThresholdBytes = 32ll << 20;  // Auto: stream sets whose sample files exceed this
     int64_t preloadFrames = 16384;            // frames kept in memory per streamed sample (~0.34 s)
-    std::string cacheDir;                     // FLAC decode cache; empty = <temp>/hsynth_stream_cache
+    std::string cacheDir;                     // unused (FLAC used to be decoded into a cache; it streams directly now)
 };
 void setSampleLoadOptions(const SampleLoadOptions& o);
 SampleLoadOptions sampleLoadOptions();
+
+struct StreamFlacState;  // streaming.cpp
 
 struct StreamSlot {
     static constexpr int kRing = 32768;   // frames per channel in the ring
@@ -69,6 +73,7 @@ struct StreamSlot {
     std::unique_ptr<float[]> ring[2];
     // streamer thread only
     FILE* file = nullptr;
+    std::shared_ptr<StreamFlacState> flac;  // FLAC: compressed data + decoder (kept for reuse)
 
     // Audio thread: pointer to frames [first, first + count) of channel c
     // (count <= kMirror), nullptr if they are not in the ring (yet).
@@ -116,6 +121,7 @@ public:
 private:
     void threadMain();
     bool fill(StreamSlot& s);  // one chunk; true if something was read
+    bool fillFlac(StreamSlot& s, int64_t w, int64_t n);  // decodes frames [w, w + n) into tmp_
 
     std::unique_ptr<StreamSlot[]> slots_;
     std::thread thread_;

@@ -1027,7 +1027,7 @@ void Engine::songChase() {
             continue;
         }
         // RPN / NRPN messages only mean something in order (below); 120-127 are commands
-        if (slot < 0 || slot == 6 || slot == 38 || (slot >= 98 && slot <= 101) || slot >= 120 && slot < 128) continue;
+        if (slot < 0 || slot == 6 || slot == 38 || (slot >= 98 && slot <= 101) || (slot >= 120 && slot < 128)) continue;
         if (seen[ch][slot]) continue;
         seen[ch][slot] = true;
         if (slot != 64) handleEvent(ev);  // no sustain: nothing is held after a jump

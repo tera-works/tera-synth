@@ -1,15 +1,30 @@
 // SFZ loader (subset). See supportedSfzOpcodes() for what is honoured;
 // everything else produces a warning instead of failing the load.
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
+
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/resource.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#include <pthread/qos.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include "hsynth/sample_set.h"
 #include "hsynth/fileio.h"
@@ -264,6 +279,43 @@ const std::vector<std::string>& supportedSfzOpcodes() {
     return v;
 }
 
+namespace {
+// Sample decoding helpers run below normal priority, like the loader thread
+// that starts them (Android: the audio callback must never wait for them).
+void lowerThreadPriority() {
+#if defined(__ANDROID__) || defined(__linux__)
+    setpriority(PRIO_PROCESS, 0, 10);
+#elif defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#elif defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+}
+
+// Size of a sample file as 16-bit PCM: the file size for WAV, the decoded size
+// from STREAMINFO for FLAC (a third of it on disk would never reach the
+// streaming threshold although it needs as much memory as the WAV).
+int64_t pcmBytes(const std::string& path) {
+    std::error_code ec;
+    const int64_t size = (int64_t)std::filesystem::file_size(utf8Path(path), ec);
+    if (ec) return 0;
+    if (path.size() < 5) return size;
+    std::string ext = path.substr(path.size() - 5);
+    for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+    if (ext != ".flac") return size;
+    std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(path, "rb"), &std::fclose);
+    uint8_t h[42];
+    if (!f || std::fread(h, 1, sizeof h, f.get()) != sizeof h || std::memcmp(h, "fLaC", 4) != 0 || (h[4] & 0x7F) != 0)
+        return size * 3;
+    const uint8_t* si = h + 8;  // STREAMINFO body
+    const int channels = ((si[12] >> 1) & 7) + 1;
+    const uint64_t frames = ((uint64_t)(si[13] & 0x0F) << 32) | (uint64_t)si[14] << 24 | (uint64_t)si[15] << 16 |
+                            (uint64_t)si[16] << 8 | si[17];
+    return frames ? (int64_t)(frames * (uint64_t)channels * 2) : size * 3;
+}
+
+}  // namespace
+
 std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string& error) {
     std::string text;
     if (!readTextFile(path, text)) { error = "cannot open " + path; return nullptr; }
@@ -299,13 +351,42 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
                 files.insert((rel.size() > 1 && (rel[0] == '/' || rel[1] == ':')) ? rel : parser.rootDir + rel);
             }
             int64_t total = 0;
-            for (const auto& f : files) {
-                std::error_code ec;
-                const auto sz = std::filesystem::file_size(utf8Path(f), ec);
-                if (!ec) total += (int64_t)sz;
-            }
+            for (const auto& f : files) total += pcmBytes(f);
             stream = total > opt.autoThresholdBytes;
         }
+    }
+
+    // decode every sample file first, several at a time (FLAC decoding is the
+    // slow part of loading an instrument); the regions below pick them up
+    std::map<std::string, std::pair<std::unique_ptr<Sample>, std::string>> decoded;
+    {
+        std::vector<std::string> paths;
+        for (const OpcodeMap& op : parser.regions) {
+            auto it = op.find("sample");
+            if (it == op.end() || it->second.empty()) continue;
+            std::string rel = parser.defaultPath + it->second;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            if (rel[0] == '*') continue;
+            const std::string full = (rel.size() > 1 && (rel[0] == '/' || rel[1] == ':')) ? rel : parser.rootDir + rel;
+            if (decoded.emplace(full, std::make_pair(std::unique_ptr<Sample>(), std::string())).second) paths.push_back(full);
+        }
+        std::vector<std::pair<std::unique_ptr<Sample>, std::string>*> slots;
+        for (const auto& p : paths) slots.push_back(&decoded[p]);
+        std::atomic<size_t> next{0};
+        auto work = [&](bool helper) {
+            if (helper) lowerThreadPriority();
+            for (size_t i; (i = next.fetch_add(1)) < paths.size();) {
+                std::string err;
+                slots[i]->first = sampleFromWav(paths[i], err, stream);
+                slots[i]->second = std::move(err);
+            }
+        };
+        const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        const size_t helpers = paths.size() < 8 ? 0 : std::min<size_t>({3, hw > 2 ? hw - 2 : 0, paths.size() / 8});
+        std::vector<std::thread> pool;
+        for (size_t h = 0; h < helpers; ++h) pool.emplace_back(work, true);
+        work(false);
+        for (auto& t : pool) t.join();
     }
 
     for (const OpcodeMap& op : parser.regions) {
@@ -333,8 +414,9 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
         if (found != loaded.end()) {
             sample = found->second;
         } else if (!failedSamples.count(full)) {
-            std::string err;
-            auto s = sampleFromWav(full, err, stream);
+            auto pre = decoded.find(full);
+            std::string err = pre != decoded.end() ? pre->second.second : std::string();
+            std::unique_ptr<Sample> s = pre != decoded.end() ? std::move(pre->second.first) : sampleFromWav(full, err, stream);
             if (!s) {
                 failedSamples.insert(full);
                 parser.warnings.push_back("sample load failed: " + err);

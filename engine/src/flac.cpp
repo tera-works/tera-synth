@@ -1,6 +1,9 @@
 #include "hsynth/flac.h"
 
 #include <algorithm>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 #include <fstream>
 #include <vector>
 
@@ -10,29 +13,29 @@ namespace hsynth {
 
 namespace {
 
+// MSB-first bit reader over a byte buffer with a 64-bit refill buffer: bit
+// fields, unary codes and Rice codes take a few operations instead of a loop
+// per bit. Reads past the end return zero bits and set the overrun flag.
 class BitReader {
 public:
     BitReader(const uint8_t* d, size_t n) : d_(d), n_(n) {}
     bool ok() const { return !overrun_; }
-    size_t bytePos() const { return pos_ >> 3; }
-    void alignByte() { pos_ = (pos_ + 7) & ~(size_t)7; }
-    void seekByte(size_t b) { pos_ = b << 3; }
-    bool atEnd() const { return (pos_ >> 3) >= n_; }
+    size_t bytePos() const { return bitPos() >> 3; }
+    void alignByte() { seekBit((bitPos() + 7) & ~(size_t)7); }
+    void seekByte(size_t b) { seekBit(b << 3); }
+    bool atEnd() const { return bytePos() >= n_; }
 
-    uint32_t bits(int count) { return (uint32_t)bits64(count); }  // count <= 32
-    uint64_t bits64(int count) {  // count <= 64, byte-wise
-        uint64_t v = 0;
-        while (count > 0) {
-            const size_t byte = pos_ >> 3;
-            if (byte >= n_) { overrun_ = true; return v << count; }
-            const int avail = 8 - (int)(pos_ & 7);
-            const int take = std::min(avail, count);
-            const uint32_t b = ((uint32_t)d_[byte] >> (avail - take)) & ((1u << take) - 1u);
-            v = (v << take) | b;
-            pos_ += (size_t)take;
-            count -= take;
-        }
+    uint32_t bits(int count) {  // count <= 32
+        if (count == 0) return 0;
+        if (cnt_ < count) refill();
+        const uint32_t v = (uint32_t)(buf_ >> (64 - count));
+        consume(count);
         return v;
+    }
+    uint64_t bits64(int count) {  // count <= 64
+        if (count <= 32) return bits(count);
+        const uint64_t hi = bits(count - 32);
+        return (hi << 32) | bits(32);
     }
     int64_t sbits(int count) {
         if (count == 0) return 0;
@@ -40,38 +43,75 @@ public:
         const uint64_t sign = (uint64_t)1 << (count - 1);
         return (int64_t)(v ^ sign) - (int64_t)sign;
     }
-    uint32_t bit() {
-        const size_t byte = pos_ >> 3;
-        if (byte >= n_) { overrun_ = true; return 0; }
-        const uint32_t b = (d_[byte] >> (7 - (pos_ & 7))) & 1u;
-        ++pos_;
-        return b;
-    }
-    // number of 0 bits before the next 1
+    uint32_t bit() { return bits(1); }
+    // number of 0 bits before the next 1 (which is consumed)
     uint32_t unary() {
         uint32_t q = 0;
-        // fast path: whole zero bytes
-        while (true) {
-            if ((pos_ & 7) == 0) {
-                const size_t byte = pos_ >> 3;
-                if (byte >= n_) { overrun_ = true; return q; }
-                if (d_[byte] == 0) { q += 8; pos_ += 8; continue; }
+        for (;;) {
+            if (cnt_ < 57) refill();
+            if (buf_) {
+                const int z = clz64(buf_);
+                if (z < cnt_) {
+                    q += (uint32_t)z;
+                    consume(z + 1);
+                    return q;
+                }
             }
-            if (bit()) return q;
-            if (overrun_) return q;
-            ++q;
+            q += (uint32_t)cnt_;
+            consume(cnt_);
+            if (overrun_) return q;  // ran into the zero padding past the end
         }
     }
     int64_t rice(int param) {
         const uint64_t q = unary();
-        const uint64_t u = (q << param) | (param ? bits64(param) : 0);
+        const uint64_t u = (q << param) | (param ? bits(param) : 0);
         return (int64_t)(u >> 1) ^ -(int64_t)(u & 1);
     }
 
 private:
+    static int clz64(uint64_t x) {
+#if defined(_MSC_VER) && !defined(__clang__)
+        unsigned long i;
+        _BitScanReverse64(&i, x);
+        return 63 - (int)i;
+#else
+        return __builtin_clzll(x);
+#endif
+    }
+    size_t bitPos() const { return next_ * 8 + pad_ - (size_t)cnt_; }
+    void seekBit(size_t pos) {
+        next_ = pos >> 3;
+        buf_ = 0;
+        cnt_ = 0;
+        pad_ = 0;
+        const int skip = (int)(pos & 7);
+        if (skip) {
+            refill();
+            consume(skip);
+        }
+    }
+    // tops the buffer up to at least 57 bits (zero bits past the end, counted in pad_)
+    void refill() {
+        while (cnt_ <= 56) {
+            uint64_t b = 0;
+            if (next_ < n_) b = d_[next_++];
+            else pad_ += 8;
+            buf_ |= b << (56 - cnt_);
+            cnt_ += 8;
+        }
+    }
+    void consume(int count) {
+        buf_ = count >= 64 ? 0 : buf_ << count;
+        cnt_ -= count;
+        if (pad_ > 0 && (size_t)cnt_ < pad_) overrun_ = true;  // consumed padding bits
+    }
+
     const uint8_t* d_;
     size_t n_;
-    size_t pos_ = 0;
+    size_t next_ = 0;  // next byte to load
+    size_t pad_ = 0;   // zero bits appended past the end
+    uint64_t buf_ = 0; // MSB-aligned
+    int cnt_ = 0;      // valid bits in buf_
     bool overrun_ = false;
 };
 
@@ -79,12 +119,6 @@ private:
 inline int64_t wadd(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
 inline int64_t wmul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
 inline int64_t wneg(int64_t a) { return (int64_t)(0 - (uint64_t)a); }
-
-struct StreamInfo {
-    int sampleRate = 0, channels = 0, bps = 0;
-    uint64_t totalSamples = 0;
-    int maxBlock = 0;
-};
 
 bool decodeResidual(BitReader& br, int blockSize, int order, int64_t* out, std::string& err) {
     const int method = (int)br.bits(2);
@@ -175,13 +209,13 @@ void parseForeignRiff(const uint8_t* d, size_t n, WavData& out) {
 
 }  // namespace
 
-bool readFlacMemory(const uint8_t* data, size_t size, WavData& out, std::string& error) {
+bool FlacFrameDecoder::open(const uint8_t* data, size_t size, std::string& error) {
+    *this = FlacFrameDecoder();
     if (size < 8 || data[0] != 'f' || data[1] != 'L' || data[2] != 'a' || data[3] != 'C') {
         error = "not a FLAC file";
         return false;
     }
-    StreamInfo si;
-    WavData w;
+    WavData meta;  // loop / root key from a RIFF smpl chunk
     size_t pos = 4;
     bool last = false, haveInfo = false;
     while (!last) {
@@ -194,38 +228,42 @@ bool readFlacMemory(const uint8_t* data, size_t size, WavData& out, std::string&
         if (type == 0 && len >= 34) {
             BitReader br(data + pos, len);
             br.bits(16);  // min block
-            si.maxBlock = (int)br.bits(16);
+            br.bits(16);  // max block
             br.bits(24);
             br.bits(24);
-            si.sampleRate = (int)br.bits(20);
-            si.channels = (int)br.bits(3) + 1;
-            si.bps = (int)br.bits(5) + 1;
-            si.totalSamples = br.bits64(36);
+            rate_ = (int)br.bits(20);
+            fileChannels_ = (int)br.bits(3) + 1;
+            bps_ = (int)br.bits(5) + 1;
+            total_ = (int64_t)br.bits64(36);
             haveInfo = true;
         } else if (type == 2 && len > 4 && std::equal(data + pos, data + pos + 4, (const uint8_t*)"riff")) {
-            parseForeignRiff(data + pos + 4, len - 4, w);
+            parseForeignRiff(data + pos + 4, len - 4, meta);
         }
         pos += len;
     }
-    if (!haveInfo || si.sampleRate <= 0) { error = "missing STREAMINFO"; return false; }
-    if (si.bps < 4 || si.bps > 32) { error = "unsupported bit depth " + std::to_string(si.bps); return false; }
+    if (!haveInfo || rate_ <= 0) { error = "missing STREAMINFO"; return false; }
+    if (bps_ < 4 || bps_ > 32) { error = "unsupported bit depth " + std::to_string(bps_); return false; }
+    d_ = data;
+    n_ = size;
+    pos_ = pos;
+    outChannels_ = std::min(2, fileChannels_);
+    unity_ = meta.unityNote;
+    loopStart_ = meta.loopStart;
+    loopEnd_ = meta.loopEnd;
+    return true;
+}
 
-    const int outCh = std::min(2, si.channels);
-    std::vector<float> ch[2];
-    if (si.totalSamples > 0 && si.totalSamples < (1ull << 31)) {
-        ch[0].reserve((size_t)si.totalSamples);
-        if (outCh == 2) ch[1].reserve((size_t)si.totalSamples);
-    }
-    std::vector<int64_t> sub[8];
-    BitReader br(data, size);
-    br.seekByte(pos);
-    static const int kRates[12] = {0, 88200, 176400, 192000, 8000, 16000, 22050, 24000, 32000, 44100, 48000, 96000};
+int FlacFrameDecoder::next(std::vector<float>& left, std::vector<float>& right, std::string& error) {
+    if (!d_) { error = "not open"; return -1; }
     static const int kBps[8] = {0, 8, 12, 0, 16, 20, 24, 32};
+    BitReader br(d_, n_);
+    br.seekByte(pos_);
     while (!br.atEnd()) {
+        if (total_ > 0 && decoded_ >= total_) break;
         const size_t frameStart = br.bytePos();
         if (br.bits(14) != 0x3FFE) {  // resync: scan for the next frame header
             br.seekByte(frameStart + 1);
-            if (frameStart + 2 >= size) break;
+            if (frameStart + 2 >= n_) break;
             continue;
         }
         br.bit();  // reserved
@@ -250,31 +288,32 @@ bool readFlacMemory(const uint8_t* data, size_t size, WavData& out, std::string&
         if (srCode == 12) br.bits(8);
         else if (srCode == 13 || srCode == 14) br.bits(16);
         br.bits(8);  // CRC-8
-        const int bps = bpsCode == 0 ? si.bps : kBps[bpsCode];
+        const int bps = bpsCode == 0 ? bps_ : kBps[bpsCode];
         const int nch = chCode < 8 ? chCode + 1 : 2;
-        if (blockSize <= 0 || bps == 0 || chCode > 10 || nch != si.channels || !br.ok()) {
+        if (blockSize <= 0 || bps == 0 || chCode > 10 || nch != fileChannels_ || !br.ok()) {
             br.seekByte(frameStart + 1);  // false sync
             continue;
         }
-        (void)kRates;
         for (int c = 0; c < nch; ++c) {
-            sub[c].resize((size_t)blockSize);
+            sub_[c].resize((size_t)blockSize);
             // the side channel carries one extra bit
             const bool side = (chCode == 8 && c == 1) || (chCode == 9 && c == 0) || (chCode == 10 && c == 1);
-            if (!decodeSubframe(br, blockSize, bps + (side ? 1 : 0), sub[c].data(), error)) {
+            if (!decodeSubframe(br, blockSize, bps + (side ? 1 : 0), sub_[c].data(), error)) {
                 error = "frame at byte " + std::to_string(frameStart) + ": " + error;
-                return false;
+                pos_ = n_;
+                return -1;
             }
         }
         br.alignByte();
         br.bits(16);  // CRC-16
-        int64_t* a = sub[0].data();
-        int64_t* b = nch > 1 ? sub[1].data() : nullptr;
+        pos_ = br.bytePos();
+        int64_t* a = sub_[0].data();
+        int64_t* b = nch > 1 ? sub_[1].data() : nullptr;
         for (int i = 0; i < blockSize; ++i) {
             switch (chCode) {
-                case 8: b[i] = wadd(a[i], wneg(b[i])); break;            // left / side
-                case 9: a[i] = wadd(a[i], b[i]); break;             // side / right
-                case 10: {                                          // mid / side
+                case 8: b[i] = wadd(a[i], wneg(b[i])); break;  // left / side
+                case 9: a[i] = wadd(a[i], b[i]); break;        // side / right
+                case 10: {                                     // mid / side
                     const int64_t mid = wmul(a[i], 2) | (b[i] & 1);
                     a[i] = wadd(mid, b[i]) >> 1;
                     b[i] = wadd(mid, wneg(b[i])) >> 1;
@@ -283,27 +322,50 @@ bool readFlacMemory(const uint8_t* data, size_t size, WavData& out, std::string&
                 default: break;
             }
         }
+        int frames = blockSize;
+        if (total_ > 0) frames = (int)std::min<int64_t>(frames, total_ - decoded_);
         const float scale = 1.0f / (float)((int64_t)1 << (bps - 1));
-        for (int i = 0; i < blockSize; ++i) {
-            if (si.channels <= 2) {
-                ch[0].push_back((float)a[i] * scale);
-                if (outCh == 2) ch[1].push_back((float)b[i] * scale);
-            } else {  // >2 channels: front left / right only (same as the WAV reader keeping two)
-                ch[0].push_back((float)sub[0][(size_t)i] * scale);
-                ch[1].push_back((float)sub[1][(size_t)i] * scale);
-            }
+        left.resize((size_t)frames);
+        if (outChannels_ == 2) right.resize((size_t)frames);
+        else right.clear();
+        for (int i = 0; i < frames; ++i) {
+            // >2 channels: front left / right only (same as the WAV reader keeping two)
+            left[(size_t)i] = (float)a[i] * scale;
+            if (outChannels_ == 2) right[(size_t)i] = (float)b[i] * scale;
         }
+        decoded_ += frames;
+        return frames;
+    }
+    pos_ = n_;
+    return 0;
+}
+
+bool readFlacMemory(const uint8_t* data, size_t size, WavData& out, std::string& error) {
+    FlacFrameDecoder dec;
+    if (!dec.open(data, size, error)) return false;
+    std::vector<float> ch[2], l, r;
+    const int64_t total = dec.totalFrames();
+    if (total > 0 && total < (1ll << 31)) {
+        ch[0].reserve((size_t)total);
+        if (dec.channels() == 2) ch[1].reserve((size_t)total);
+    }
+    for (;;) {
+        const int n = dec.next(l, r, error);
+        if (n < 0) return false;
+        if (n == 0) break;
+        ch[0].insert(ch[0].end(), l.begin(), l.end());
+        if (dec.channels() == 2) ch[1].insert(ch[1].end(), r.begin(), r.end());
     }
     if (ch[0].empty()) { error = "no audio frames"; return false; }
-    if (si.totalSamples > 0 && ch[0].size() > si.totalSamples) {
-        ch[0].resize((size_t)si.totalSamples);
-        if (outCh == 2) ch[1].resize((size_t)si.totalSamples);
-    }
-    w.channels = outCh;
-    w.sampleRate = si.sampleRate;
+    WavData w;
+    w.channels = dec.channels();
+    w.sampleRate = dec.sampleRate();
     w.frames = (int64_t)ch[0].size();
+    w.unityNote = dec.unityNote();
+    w.loopStart = dec.loopStart();
+    w.loopEnd = dec.loopEnd();
     w.left = std::move(ch[0]);
-    if (outCh == 2) w.right = std::move(ch[1]);
+    if (w.channels == 2) w.right = std::move(ch[1]);
     out = std::move(w);
     return true;
 }

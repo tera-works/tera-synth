@@ -132,7 +132,11 @@ TEST(streaming_matches_in_memory) {
     CHECK(st.streamVoices == 0);  // all notes ended: every slot released
 }
 
-TEST(streaming_flac_through_cache) {
+// FLAC streams straight from the compressed file: the streamer decodes it a
+// frame at a time (nothing decoded is written to disk), output identical to
+// the fully decoded sample. The fixture has two FLAC frames (4608 + 4392) and
+// a 4096-frame head, so streaming starts inside the first frame.
+TEST(streaming_flac_direct) {
     OptionsGuard guard;
     const std::string dir = tempDir("stream_flac");
     const std::string cache = dir + "/cache";
@@ -143,23 +147,26 @@ TEST(streaming_flac_through_cache) {
     setMode(StreamMode::Off);
     auto mem = load(dir + "/f.sfz");
     setMode(StreamMode::Always, cache);
-    auto first = load(dir + "/f.sfz");   // decodes and writes the cache
-    auto second = load(dir + "/f.sfz");  // reads only the head from the cache
-    CHECK(mem && first && second);
-    if (!mem || !first || !second) return;
-    int cacheFiles = 0;
-    for (auto& e : fs::directory_iterator(utf8Path(cache))) cacheFiles += e.path().extension() == ".hsraw" ? 1 : 0;
-    CHECK(cacheFiles == 1);
-    CHECK(first->streamedSamples() == 1 && second->streamedSamples() == 1);
+    auto str = load(dir + "/f.sfz");
+    CHECK(mem && str);
+    if (!mem || !str) return;
+    CHECK(str->streamedSamples() == 1);
+    CHECK(!fs::exists(utf8Path(cache)));  // no decode cache any more
+    CHECK(str->memoryBytes() * 2 < mem->memoryBytes());
 
-    std::vector<float> l1, r1, l2, r2, l3, r3;
+    std::vector<float> l1, r1, l2, r2;
+    EngineStats st;
     render(std::move(mem), l1, r1, nullptr, 1.0);
-    render(std::move(first), l2, r2, nullptr, 1.0);
-    render(std::move(second), l3, r3, nullptr, 1.0);
-    const double d = std::max({maxDiff(l1, l2), maxDiff(r1, r2), maxDiff(l1, l3), maxDiff(r1, r3)});
-    INFO("FLAC: max |memory - streamed| = %.3g\n", d);
+    render(std::move(str), l2, r2, &st, 1.0);
+    const double d = std::max(maxDiff(l1, l2), maxDiff(r1, r2));
+    INFO("FLAC: max |memory - streamed| = %.3g, %llu bytes read, %u underruns\n", d,
+         (unsigned long long)st.streamBytesRead, st.streamUnderruns);
     CHECK(rms(l1, 0, 9000) > 0.001);
     CHECK(d < 1e-6);
+    CHECK(st.streamUnderruns == 0);
+    // the compressed file once per streamed voice, not decoded PCM
+    const auto fileSize = (uint64_t)fs::file_size(utf8Path(flac));
+    CHECK(st.streamBytesRead > 0 && st.streamBytesRead % fileSize == 0);
 }
 
 TEST(streaming_only_where_it_is_safe) {
