@@ -590,6 +590,22 @@ bool Voice::playsLayer(int l) const {
     return false;
 }
 
+int Voice::dropSet(const SampleSet* set) {
+    if (!set || set->regions.empty()) return 0;
+    const Region* lo = set->regions.data();
+    const Region* hi = lo + set->regions.size();
+    auto in = [&](const PcmPlayer& pl) { return pl.active() && pl.region() >= lo && pl.region() < hi; };
+    int n = 0;
+    for (int l = 0; l < kNumLayers; ++l) {
+        for (auto& pl : layers_[l].pcm)
+            if (in(pl)) { pl.stop(); ++n; }
+        if (sets_[l] == set) sets_[l] = nullptr;
+    }
+    for (auto& pl : relPcm_)
+        if (in(pl)) { pl.stop(); ++n; }
+    return n;
+}
+
 void Voice::fadeLayer(int l) {
     for (auto& pl : layers_[l].pcm) pl.fadeOut();
     for (int i = 0; i < kMaxReleaseRegions; ++i)

@@ -91,18 +91,33 @@ int main(int argc, char** argv) {
         prepareSong(engine, *song, bank, library, loaded, report);
         for (auto& r : report) std::printf("  %s\n", r.c_str());
         const double total = secondsGiven ? seconds : song->length + 2.0;
+        SongProgramLoader programs;  // mid-song program changes, loaded in step (offline: always in time)
+        const bool follow = programs.prepare(*song, bank, library);
         engine.setSong(std::move(song));
         engine.songPlay(true);
         engine.setOfflineRender(true);
         const int64_t frames = (int64_t)(total * sr);
         std::vector<float> L((size_t)frames), R((size_t)frames);
+        int staged = 0;
+        double stageTime = 0.0, stageMax = 0.0;
         const auto t0 = std::chrono::steady_clock::now();
         for (int64_t pos = 0; pos < frames; pos += block) {
             const int n = (int)std::min<int64_t>(block, frames - pos);
+            if (follow) {
+                for (;;) {
+                    const auto s0 = std::chrono::steady_clock::now();
+                    if (!programs.step(engine)) break;
+                    const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
+                    ++staged;
+                    stageTime += dt;
+                    stageMax = std::max(stageMax, dt);
+                }
+            }
             engine.process(L.data() + pos, R.data() + pos, n);
             engine.collectGarbage();
         }
         const double cpu = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (staged) std::printf("program changes: %d presets staged, loading %.2f s (slowest %.2f s)\n", staged, stageTime, stageMax);
         const EngineStats st = engine.stats();
         float pk = 0.0f;
         for (int64_t i = 0; i < frames; ++i) pk = std::max(pk, std::max(std::fabs(L[(size_t)i]), std::fabs(R[(size_t)i])));

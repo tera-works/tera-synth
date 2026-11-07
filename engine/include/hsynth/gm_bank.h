@@ -8,7 +8,10 @@
 // in the same GM family, then to a related family.
 #pragma once
 
+#include <atomic>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hsynth/engine.h"
@@ -49,5 +52,43 @@ struct SongPart {
 };
 bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std::string& libraryRoot,
                  std::string loaded[kNumParts], std::vector<std::string>& report, std::vector<SongPart>* parts = nullptr);
+
+// Follows a song's mid-song program changes while it plays: a background
+// thread looks a few seconds ahead of the song position and loads the preset
+// of each channel's next program (Engine::stagePartProgram), so the engine can
+// switch at the exact moment of the program change. After a seek it loads the
+// program in force at the new position first. Start it after prepareSong();
+// stop() (or the destructor) before loading another song.
+class SongProgramLoader {
+public:
+    static constexpr double kLookahead = 15.0;  // seconds
+    SongProgramLoader() = default;
+    SongProgramLoader(const SongProgramLoader&) = delete;
+    SongProgramLoader& operator=(const SongProgramLoader&) = delete;
+    ~SongProgramLoader() { stop(); }
+
+    void start(Engine& engine, const Song& song, const GmBank& bank, const std::string& libraryRoot);
+    void stop();
+    // without the thread (tests, offline renders): prepare() once (false: the song never
+    // switches programs), then step() stages at most one program per call (false: nothing due)
+    bool prepare(const Song& song, const GmBank& bank, const std::string& libraryRoot);
+    bool step(Engine& engine);
+    // name of the preset playing on a channel ("" = unchanged since prepareSong); any thread
+    std::string presetName(int channel) const;
+
+private:
+    struct Change { double time; int program; };
+    std::vector<Change> changes_[16];
+    int initial_[16] = {};
+    GmBank bank_;
+    std::string root_;
+    int stagedProg_[16] = {};    // program staged per channel and not applied yet (-1 none)
+    std::string stagedName_[16];
+    mutable std::mutex nameMutex_;
+    std::string names_[16];      // preset playing after a switch (presetName)
+    std::atomic<bool> run_{false};
+    std::thread thread_;
+    const GmBank::Entry* entryFor(int program, int channel) const;
+};
 
 }  // namespace hsynth

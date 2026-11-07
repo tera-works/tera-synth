@@ -247,3 +247,51 @@ TEST(song_chase_rpn_bend_range_and_resume) {
     for (int b = 0; b < 2; ++b) e.process(L.data(), R.data(), 480);
     check("after resume");
 }
+
+// mid-song program changes: a program staged ahead switches at the change; one
+// staged late switches as soon as it arrives
+TEST(song_staged_program_change) {
+    for (int late = 0; late < 2; ++late) {
+        auto song = std::make_unique<Song>();
+        auto ch0 = [](Event e) { e.channel = 0; return e; };
+        Event pc = Event::control(EventType::ProgramChange, 0.0f, 5);
+        song->events = {{0.0, ch0(Event::noteOn(1, 69, 0.9f))}, {0.4, ch0(Event::noteOff(1, 69))}, {0.5, ch0(pc)},
+                        {0.6, ch0(Event::noteOn(2, 69, 0.9f))}, {1.4, ch0(Event::noteOff(2, 69))}};
+        song->channelUsed[0] = true;
+        song->initialProgram[0] = 0;
+        song->length = 1.5;
+        Engine e;
+        e.prepare(48000);
+        e.setMultiTimbral(true);
+        e.setParam(P::layer(0, P::VaWave1), (float)VaWave::Sine);
+        e.setParam(P::layer(0, P::VaMix), 0.0f);
+        e.setParam(P::FilterType, (float)FilterType::Off);
+        e.setParam(P::fxp(fx::Reverb, fx::reverb::On), 0.0f);
+        e.setParam(P::mod(0, P::ModAmt), 0.0f);
+        e.setParam(P::AmpSustain, 1.0f);
+        e.setPartProgram(0, 0);
+        auto stage = [&] {
+            auto st = std::make_unique<Engine::StagedProgram>();
+            e.getPartParams(0, st->params);
+            st->params[P::layer(0, P::LCoarse)] += 12.0f;  // an octave up: easy to tell apart
+            st->program = 5;
+            e.stagePartProgram(0, std::move(st));
+        };
+        if (!late) stage();
+        e.setSong(std::move(song));
+        e.songPlay(true);
+        std::vector<float> L(48000 * 3 / 2), R(L.size());
+        for (size_t pos = 0; pos < L.size(); pos += 480) {
+            if (late && pos == 48000 * 7 / 10) stage();  // 0.1 s after the note started
+            e.process(L.data() + pos, R.data() + pos, 480);
+            e.collectGarbage();
+        }
+        const double before = zeroCrossFreq(L, 48000, 48000 / 20, 48000 * 35 / 100);
+        const double after = zeroCrossFreq(L, 48000, 48000 * 85 / 100, 48000 * 13 / 10);
+        INFO("late %d: %.1f Hz -> %.1f Hz, program %d\n", late, before, after, e.partProgram(0));
+        CHECK_NEAR(before, 440.0, 2.0);
+        CHECK_NEAR(after, 880.0, 2.0);
+        CHECK(e.partProgram(0) == 5);
+        CHECK(e.songProgram(0) == 5);
+    }
+}

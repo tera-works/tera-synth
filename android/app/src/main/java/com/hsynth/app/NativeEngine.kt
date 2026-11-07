@@ -20,6 +20,8 @@ object NativeEngine {
     external fun nativeSongPlay(on: Boolean)
     external fun nativeSongSeek(seconds: Double)
     external fun nativeSongState(): DoubleArray
+    /** Preset playing on each channel after mid-song program changes ("" = as loaded). */
+    external fun nativeSongPartPresets(): Array<String>
     external fun nativePlayerState(): FloatArray
     external fun nativeNoteMasks(): IntArray
     external fun nativeSetPartMix(part: Int, id: Int, value: Float)

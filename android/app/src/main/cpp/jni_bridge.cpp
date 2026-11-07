@@ -330,6 +330,7 @@ JNI(jintArray, nativeFxChain)(JNIEnv* env, jobject) {
 namespace {
 std::mutex gSongMutex;
 std::string gSongLoaded[kNumParts];  // preset file per part (skips reloading between songs)
+SongProgramLoader gPrograms;          // follows mid-song program changes of the loaded song
 }  // namespace
 
 void songPartForgotten(int part) {
@@ -342,6 +343,7 @@ void songPartForgotten(int part) {
 // loader thread. Returns JSON {ok, name, length, report[] | error}.
 JNI(jstring, nativeSongLoad)(JNIEnv* env, jobject, jstring path, jstring libRoot, jstring presetDirs) {
     std::lock_guard<std::mutex> lock(gSongMutex);
+    gPrograms.stop();  // before prepareSong: it must not stage into the parts being loaded
     Json r = Json::object();
     auto song = std::make_unique<Song>();
     std::string err;
@@ -391,8 +393,16 @@ JNI(jstring, nativeSongLoad)(JNIEnv* env, jobject, jstring path, jstring libRoot
         tempos.push(o);
     }
     r.set("tempos", tempos);
+    gPrograms.start(*gEngine, *song, bank, str(env, libRoot));  // mid-song program changes
     gEngine->setSong(std::move(song));
     return jstr(env, r.dump(0));
+}
+
+// Preset playing on each channel after mid-song program changes ("" = as loaded).
+JNI(jobjectArray, nativeSongPartPresets)(JNIEnv* env, jobject) {
+    jobjectArray a = env->NewObjectArray(16, env->FindClass("java/lang/String"), nullptr);
+    for (int c = 0; c < 16; ++c) env->SetObjectArrayElement(a, c, jstr(env, gPrograms.presetName(c)));
+    return a;
 }
 
 JNI(void, nativeSongPlay)(JNIEnv*, jobject, jboolean on) { gEngine->songPlay(on); }

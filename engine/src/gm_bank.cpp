@@ -1,11 +1,16 @@
 #include "hsynth/gm_bank.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 
 #include "hsynth/host_utils.h"
 #include "hsynth/preset.h"
+
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/resource.h>
+#endif
 
 namespace hsynth {
 
@@ -169,7 +174,9 @@ bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std
             if (parts) parts->push_back(sp);
             continue;
         }
-        if (loaded[ch] != e->file) {
+        // reuse the part's preset only if no mid-song program change replaced it
+        const GmBank::Entry* now = engine.partProgram(ch) >= 0 ? bank.pick(engine.partProgram(ch), drum) : nullptr;
+        if (loaded[ch] != e->file || (!drum && engine.partProgram(ch) != program && (!now || now->file != e->file))) {
             Preset p;
             std::string err;
             std::vector<std::string> warnings;
@@ -180,6 +187,7 @@ bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std
             }
             loaded[ch] = e->file;
         }
+        engine.setPartProgram(ch, program);
         engine.setPartParam(ch, P::BendRange, 2.0f);  // GM default
         engine.setPartParam(ch, P::ArpOn, 0.0f);
         engine.setPartParam(ch, P::SeqOn, 0.0f);
@@ -188,6 +196,131 @@ bool prepareSong(Engine& engine, const Song& song, const GmBank& bank, const std
         if (parts) parts->push_back(sp);
     }
     return any;
+}
+
+// ------------------------------------------------------------ SongProgramLoader
+
+void SongProgramLoader::start(Engine& engine, const Song& song, const GmBank& bank, const std::string& libraryRoot) {
+    if (!prepare(song, bank, libraryRoot)) return;  // nothing to follow
+    run_.store(true);
+    thread_ = std::thread([this, &engine] {
+#if defined(__ANDROID__) || defined(__linux__)
+        setpriority(PRIO_PROCESS, 0, 10);  // this thread: background, the audio threads come first
+#endif
+        while (run_.load()) {
+            if (!step(engine)) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+}
+
+bool SongProgramLoader::prepare(const Song& song, const GmBank& bank, const std::string& libraryRoot) {
+    stop();
+    bool any = false;
+    for (int c = 0; c < 16; ++c) {
+        changes_[c].clear();
+        initial_[c] = song.initialProgram[c] < 0 ? 0 : song.initialProgram[c];
+        stagedProg_[c] = -1;
+        stagedName_[c].clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(nameMutex_);
+        for (auto& n : names_) n.clear();
+    }
+    for (const auto& pc : song.programChanges) {
+        if (pc.channel == 9 || !song.channelUsed[pc.channel]) continue;  // drums keep their kit
+        changes_[pc.channel].push_back({pc.time, pc.program});
+    }
+    for (int c = 0; c < 16; ++c) {
+        // only channels that really switch
+        bool switches = false;
+        for (const auto& ch : changes_[c]) switches = switches || ch.program != initial_[c];
+        if (!switches) changes_[c].clear();
+        any = any || switches;
+    }
+    if (!any) return false;
+    bank_ = bank;
+    root_ = libraryRoot;
+    return true;
+}
+
+void SongProgramLoader::stop() {
+    run_.store(false);
+    if (thread_.joinable()) thread_.join();
+}
+
+std::string SongProgramLoader::presetName(int channel) const {
+    std::lock_guard<std::mutex> lock(nameMutex_);
+    return channel >= 0 && channel < 16 ? names_[channel] : std::string();
+}
+
+const GmBank::Entry* SongProgramLoader::entryFor(int program, int channel) const {
+    return program >= 0 ? bank_.pick(program, channel == 9) : nullptr;
+}
+
+bool SongProgramLoader::step(Engine& engine) {
+    const double pos = engine.songPosition();
+    int bestCh = -1, bestProg = -1;
+    double bestDue = 1e300;
+    for (int c = 0; c < 16 && c < kNumParts; ++c) {
+        if (changes_[c].empty()) continue;
+        const int applied = engine.partProgram(c);
+        if (stagedProg_[c] >= 0 && applied == stagedProg_[c]) {  // the engine switched to it
+            std::lock_guard<std::mutex> lock(nameMutex_);
+            names_[c] = stagedName_[c];
+            stagedProg_[c] = -1;
+        }
+        int target = -1;
+        double due = 0.0;
+        const int now = engine.songProgram(c);
+        if (now >= 0 && now != applied) {
+            target = now;  // late (a seek, or a change too soon after the last): first
+            due = -1.0;
+        } else {
+            int prev = applied;
+            for (const Change& ch : changes_[c]) {
+                if (ch.time <= pos) continue;
+                if (ch.time > pos + kLookahead) break;
+                if (ch.program != prev) {
+                    target = ch.program;
+                    due = ch.time;
+                    break;
+                }
+            }
+        }
+        if (target < 0 || target == stagedProg_[c]) continue;
+        if (due < bestDue) {
+            bestDue = due;
+            bestCh = c;
+            bestProg = target;
+        }
+    }
+    if (bestCh < 0) return false;
+
+    const GmBank::Entry* want = entryFor(bestProg, bestCh);
+    const GmBank::Entry* have = entryFor(engine.partProgram(bestCh), bestCh);
+    std::unique_ptr<Engine::StagedProgram> st;
+    if (!want || (have && have->file == want->file)) {
+        st = std::make_unique<Engine::StagedProgram>();  // the same sound: only the number changes
+        st->keepSound = true;
+    } else {
+        Preset p;
+        std::string err;
+        std::vector<std::string> warnings;
+        if (loadPresetFile(want->file, p, err)) st = loadStagedProgram(p, root_, warnings);
+        if (!st) {
+            st = std::make_unique<Engine::StagedProgram>();  // cannot load: keep the sound
+            st->keepSound = true;
+        } else {
+            st->params[P::BendRange] = 2.0f;  // as prepareSong()
+            st->params[P::ArpOn] = 0.0f;
+            st->params[P::SeqOn] = 0.0f;
+        }
+    }
+    st->program = bestProg;
+    stagedProg_[bestCh] = bestProg;
+    stagedName_[bestCh] = want && !st->keepSound ? want->name : presetName(bestCh);
+    engine.stagePartProgram(bestCh, std::move(st));
+    return true;
 }
 
 }  // namespace hsynth

@@ -76,6 +76,8 @@ class PlayerPanel(private val a: MainActivity) {
     private var seeking = false
     private var tempos: List<Pair<Double, Double>> = emptyList()
     private var dsp = 0f
+    private val loadedPresets = Array(16) { "" }  // as loaded (before mid-song program changes)
+    private var nameTick = 0
     private var voices = 0
 
     init {
@@ -201,6 +203,7 @@ class PlayerPanel(private val a: MainActivity) {
         if (shown) {
             val st = NativeEngine.nativePlayerState()
             val masks = NativeEngine.nativeNoteMasks()
+            if (loaded && ++nameTick % 15 == 0) followProgramChanges()
             table.update(st, masks)
             val pos = st[0].toDouble()
             val len = st[1].toDouble()
@@ -233,6 +236,19 @@ class PlayerPanel(private val a: MainActivity) {
             }
         }
         view.postDelayed({ tick() }, if (shown) 33L else 250L)
+    }
+
+    /** Mid-song program changes: the channel table shows the preset playing now. */
+    private fun followProgramChanges() {
+        val names = NativeEngine.nativeSongPartPresets()
+        for (k in 0 until 16) {
+            val n = names.getOrNull(k)?.takeIf { it.isNotEmpty() }?.replace(Regex("^SC GM2 (Capital|Rhythm Sets) [0-9]+ "), "")
+                ?: loadedPresets[k]
+            if (table.used[k] && table.preset[k] != n) {
+                table.preset[k] = n
+                a.partNames[k] = n
+            }
+        }
     }
 
     private fun showTab(i: Int) {
@@ -317,6 +333,7 @@ class PlayerPanel(private val a: MainActivity) {
                          else listOf(0.0 to r.optDouble("tempo", 120.0))
                 table.applyMutes()
                 for (k in 0 until 16) a.partNames[k] = table.preset[k]
+                for (k in 0 until 16) loadedPresets[k] = table.preset[k]
                 lastEnd = NativeEngine.nativePlayerState()[3].toInt()
                 NativeEngine.nativeSongSeek(0.0)
                 NativeEngine.nativeSongPlay(true)

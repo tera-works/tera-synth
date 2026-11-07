@@ -42,6 +42,7 @@ public:
         return true;
     }
 
+    bool full() const { return size() >= buffer_.size(); }
     size_t size() const { return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire); }
 
 private:

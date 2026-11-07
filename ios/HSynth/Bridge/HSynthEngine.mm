@@ -49,6 +49,7 @@ float toNormalized(const ParamInfo& p, float v) {
     std::string _libraryDir;              // Documents/library (factory -> bundle link + user samples)
     std::string _songLoaded[kNumParts];   // preset file per part (no reload between songs)
     std::vector<SongPart> _songParts;
+    std::unique_ptr<SongProgramLoader> _programs;  // mid-song program changes (stopped before the engine goes)
     std::vector<std::pair<double, double>> _tempos;
     NSString* _songName;
     NSArray<NSString*>* _lastWarnings;   // preset load warnings / song report (autotest)
@@ -239,6 +240,10 @@ float toNormalized(const ParamInfo& p, float v) {
 
 // ---------------------------------------------------------------- songs
 
+- (void)dealloc {
+    if (_programs) _programs->stop();  // its thread uses the engine
+}
+
 - (NSString*)libraryDir { return ns(_libraryDir); }
 - (NSString*)midiDir { return ns(_userDir + "/midi"); }
 
@@ -246,6 +251,7 @@ float toNormalized(const ParamInfo& p, float v) {
     auto song = std::make_unique<Song>();
     std::string err;
     if (!loadSmf(str(path), *song, err)) return ns(err);
+    if (_programs) _programs->stop();  // before prepareSong: it must not stage into the parts being loaded
     [self rescanPresets];      // samples / presets copied in since the last scan
     GmBank bank;
     bank.build(_index.all());  // factory + user presets (GM test, SonicCell, ...)
@@ -259,6 +265,8 @@ float toNormalized(const ParamInfo& p, float v) {
     for (const auto& t : song->tempos) _tempos.push_back({t.time, t.bpm});
     if (_tempos.empty()) _tempos.push_back({0.0, song->initialTempo});
     _songName = ns(song->name);
+    if (!_programs) _programs = std::make_unique<SongProgramLoader>();
+    _programs->start(*_engine, *song, bank, _libraryDir);
     _engine->setSong(std::move(song));
     _engine->songSeek(0.0);
     return nil;
@@ -286,7 +294,9 @@ float toNormalized(const ParamInfo& p, float v) {
 - (BOOL)songChannelUsed:(int)ch { return [self songPart:ch] != nullptr; }
 - (NSString*)songChannelPreset:(int)ch {
     const SongPart* p = [self songPart:ch];
-    return p ? ns(p->presetName) : @"";
+    if (!p) return @"";
+    const std::string now = _programs ? _programs->presetName(ch) : std::string();  // after a program change
+    return ns(now.empty() ? p->presetName : now);
 }
 - (NSString*)songChannelGm:(int)ch {
     const SongPart* p = [self songPart:ch];

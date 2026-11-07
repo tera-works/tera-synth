@@ -124,6 +124,40 @@ bool applyPartPreset(Engine& engine, int part, const Preset& preset, const std::
     return true;
 }
 
+std::unique_ptr<Engine::StagedProgram> loadStagedProgram(const Preset& preset, const std::string& libraryRoot,
+                                                         std::vector<std::string>& warnings) {
+    if ((int)preset.params.size() != P::kNumParams) return nullptr;
+    auto st = std::make_unique<Engine::StagedProgram>();
+    std::copy(preset.params.begin(), preset.params.end(), st->params);
+    for (auto& w : preset.warnings) warnings.push_back(w);
+    for (int l = 0; l < kNumLayers; ++l) {
+        const auto type = (LayerType)(int)preset.params[(size_t)P::layer(l, P::LType)];
+        const std::string& rel = preset.samples[l];
+        std::unique_ptr<SampleSet> set;
+        if (!rel.empty()) {
+            const std::string full = joinPath(libraryRoot, rel);
+            std::string err;
+            if (type == LayerType::WT) {
+                if (auto wt = loadWavetableFile(full, err)) {
+                    set = std::make_unique<SampleSet>();
+                    set->name = wt->name;
+                    set->sourcePath = full;
+                    set->wavetable = std::move(wt);
+                }
+            } else {
+                set = loadSampleSet(full, err);
+                if (set) for (auto& w : set->warnings) warnings.push_back(w);
+            }
+            if (!set) warnings.push_back(std::string("layer ") + (char)('A' + l) + ": " + err);
+        }
+        if (!set) set = std::make_unique<SampleSet>();  // empty: unloads the layer
+        st->setNames[l] = set->name;
+        st->setPaths[l] = set->sourcePath;
+        st->sets[l] = set.release();
+    }
+    return st;
+}
+
 Preset capturePreset(const Engine& engine, const std::string& name, const std::string& libraryRoot) {
     return capturePartPreset(engine, 0, name, libraryRoot);
 }

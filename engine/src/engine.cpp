@@ -63,6 +63,10 @@ Engine::Engine()
         parts_[k].rng = Rng(0x9E3779B9u * (uint32_t)(k + 1));
         for (auto& ps : pendingSets_[k]) ps.store(nullptr);
         for (auto& ks : keyswitch_[k]) ks = -1;
+        stageIn_[k].store(nullptr);
+        appliedProg_[k].store(-1);
+        songProg_[k].store(-1);
+        stagedProg_[k].store(-1);
     }
     for (int t = 0; t < 2; ++t) {
         pendingIr_[t].store(nullptr);
@@ -101,6 +105,11 @@ Engine::~Engine() {
         if (p != &unloadIr_) delete p;
         delete currentIr_[t];
         currentIr_[t] = nullptr;
+    }
+    for (int k = 0; k < kNumParts; ++k) {
+        delete stageIn_[k].exchange(nullptr);
+        delete stage_[k];
+        stage_[k] = nullptr;
     }
     collectGarbage();
 }
@@ -257,6 +266,18 @@ void Engine::collectGarbage() {
     }
     fx::ConvIr* ir;
     while (retiredIr_.pop(ir)) delete ir;
+    StagedProgram* st;
+    while (retiredStages_.pop(st)) {
+        if (st->appliedPart >= 0 && !st->keepSound) {
+            // applied: its sets now belong to the part (st->sets were cleared)
+            std::lock_guard<std::mutex> lock(nameMutex_);
+            for (int l = 0; l < kNumLayers; ++l) {
+                setNames_[st->appliedPart][l] = st->setNames[l];
+                setPaths_[st->appliedPart][l] = st->setPaths[l];
+            }
+        }
+        delete st;
+    }
 }
 
 void Engine::setFxImpulse(int target, std::unique_ptr<fx::ConvIr> ir) {
@@ -881,6 +902,94 @@ void Engine::songSeek(double seconds) {
     songSeekReq_.store((int64_t)(std::max(0.0, seconds) * sampleRate_));
 }
 
+// ------------------------------------------------------------ song program changes
+
+void Engine::stagePartProgram(int part, std::unique_ptr<StagedProgram> staged) {
+    if (!validPart(part) || !staged) return;
+    {
+        std::lock_guard<std::mutex> lock(loaderMutex_);
+        for (SampleSet* set : staged->sets) {
+            if (!set || set->streamedSamples() == 0) continue;
+            streamer_.start();
+            for (auto& smp : set->samples)
+                if (smp->streamed) smp->streamer = &streamer_;
+        }
+    }
+    delete stageIn_[part].exchange(staged.release(), std::memory_order_acq_rel);  // never reached the audio thread
+    collectGarbage();
+}
+
+void Engine::setPartProgram(int part, int program) {
+    if (!validPart(part)) return;
+    appliedProg_[part].store(program, std::memory_order_relaxed);
+    songProg_[part].store(program, std::memory_order_relaxed);
+}
+
+void Engine::takeStagedPrograms() {
+    for (int k = 0; k < kNumParts; ++k) {
+        if (!stageIn_[k].load(std::memory_order_acquire)) continue;
+        if (stage_[k]) {
+            if (!retiredStages_.push(stage_[k])) continue;  // garbage queue full: retry next block
+            stage_[k] = nullptr;
+        }
+        stage_[k] = stageIn_[k].exchange(nullptr, std::memory_order_acq_rel);
+        stagedProg_[k].store(stage_[k] ? stage_[k]->program : -1, std::memory_order_relaxed);
+        // late: the song already switched to this program
+        if (stage_[k] && song_ && songProg_[k].load(std::memory_order_relaxed) == stage_[k]->program &&
+            appliedProg_[k].load(std::memory_order_relaxed) != stage_[k]->program)
+            applyStage(k);
+    }
+}
+
+void Engine::songProgramChange(int part, int program) {
+    songProg_[part].store(program, std::memory_order_relaxed);
+    if (appliedProg_[part].load(std::memory_order_relaxed) == program) return;
+    if (stage_[part] && stage_[part]->program == program) applyStage(part);
+    // else: not loaded yet; takeStagedPrograms() applies it when it arrives
+}
+
+void Engine::applyStage(int part) {
+    StagedProgram* st = stage_[part];
+    if (!st || retiredStages_.full()) return;  // garbage queue full: apply next block
+    stage_[part] = nullptr;
+    stagedProg_[part].store(-1, std::memory_order_relaxed);
+    appliedProg_[part].store(st->program, std::memory_order_relaxed);
+    st->appliedPart = part;
+    if (st->keepSound) {
+        retiredStages_.push(st);
+        return;
+    }
+    // parameters: the audio-thread copy and the shared values (what the UI reads)
+    if (part == 0) {
+        for (int i = 0; i < P::kPartParams; ++i) {
+            if (!isPartParam(i)) continue;
+            const float v = sanitizeParam(i, st->params[i]);
+            p_[i] = v;
+            sharedParams_[i].store(v, std::memory_order_relaxed);
+        }
+    } else {
+        float* dst = partP_.get() + (size_t)(part - 1) * P::kPartParams;
+        std::atomic<float>* shared = partShared_.get() + (size_t)(part - 1) * P::kPartParams;
+        for (int i = 0; i < P::kPartParams; ++i) {
+            if (!isPartParam(i)) continue;
+            const float v = sanitizeParam(i, st->params[i]);
+            dst[i] = v;
+            shared[i].store(v, std::memory_order_relaxed);
+        }
+    }
+    updateInserts(part);
+    // samples: voices still playing the old sets fade out
+    for (int l = 0; l < kNumLayers; ++l) {
+        SampleSet* set = st->sets[l];
+        if (!set) continue;  // the loader passes an empty set to unload a layer
+        st->sets[l] = nullptr;
+        swapSampleSet(part, l, set, true);
+        // notes later in this block start on the new set (the context is filled at block start)
+        parts_[part].ctx.sampleSets[l] = currentSets_[part][l];
+    }
+    retiredStages_.push(st);  // last: the garbage thread may free it at once (its sets are moved out)
+}
+
 void Engine::songNotesOff() {
     for (int k = 0; k < kNumParts; ++k) {
         partEvent(k, Event::control(EventType::AllNotesOff, 0.0f));
@@ -923,6 +1032,15 @@ void Engine::songChase() {
         seen[ch][slot] = true;
         if (slot != 64) handleEvent(ev);  // no sustain: nothing is held after a jump
     }
+    // programs: the latest program change on each channel (the loader stages it if needed)
+    int prog[16];
+    for (int c = 0; c < 16; ++c) prog[c] = song_->initialProgram[c] < 0 ? 0 : song_->initialProgram[c];
+    for (size_t i = 0; i < songIdx_; ++i) {
+        const Event& ev = song_->events[i].event;
+        if (ev.type == EventType::ProgramChange) prog[ev.channel & 15] = ev.controller & 127;
+    }
+    for (int c = 0; c < 16 && c < kNumParts; ++c)
+        if (song_->channelUsed[c]) songProgramChange(c, prog[c]);
     // bend ranges: replay the RPN selection in order
     int msb[16], lsb[16];
     float range[16];
@@ -982,8 +1100,13 @@ void Engine::songUpdate() {
             songIdx_ = 0;
             songWasPlaying_ = false;
             statSongPos_.store(0.0, std::memory_order_relaxed);
+            // staged programs stay: the next song's loader may already have staged one
+            // (a stale one is harmless: same GM program, same sound, replaced when needed)
+            for (int k = 0; k < kNumParts; ++k)
+                if (s) songProg_[k].store(s->initialProgram[k] < 0 ? 0 : s->initialProgram[k], std::memory_order_relaxed);
         }
     }
+    takeStagedPrograms();
     if (!song_) {
         songWasPlaying_ = false;
         return;
@@ -1010,7 +1133,11 @@ void Engine::runSong(int frameOffset, int frames) {
     const double end = (double)(songFrames_ + frameOffset + frames) / sampleRate_;
     const auto& ev = song_->events;
     int budget = 256;  // per control block (dense passages: the rest follows in the next one)
-    while (songIdx_ < ev.size() && ev[songIdx_].time < end && budget-- > 0) handleEvent(ev[songIdx_++].event);
+    while (songIdx_ < ev.size() && ev[songIdx_].time < end && budget-- > 0) {
+        const Event& e = ev[songIdx_++].event;
+        if (e.type == EventType::ProgramChange) songProgramChange(e.channel & 15, e.controller & 127);
+        else handleEvent(e);
+    }
 }
 
 // ------------------------------------------------------------ step sequencer
@@ -1326,7 +1453,12 @@ void Engine::advanceRetiring(int n) {
     for (auto& r : retiring_) {
         if (!r.set) continue;
         r.frames -= n;
-        if (r.frames <= 0 && retired_.push(r.set)) r.set = nullptr;  // queue full: retry next block
+        if (r.frames > 0) continue;
+        // normally every voice has faded out of it by now; a voice that was not
+        // rendered meanwhile must not keep reading it after it is freed
+        for (auto& v : voices_)
+            if (v.active()) v.dropSet(r.set);
+        if (retired_.push(r.set)) r.set = nullptr;  // queue full: retry next block
     }
 }
 

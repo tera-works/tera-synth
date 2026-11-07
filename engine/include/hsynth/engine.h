@@ -197,6 +197,36 @@ public:
     // increments every time a song reaches its end on its own (playlists advance on it)
     uint32_t songEndCount() const { return songEnds_.load(std::memory_order_relaxed); }
 
+    // ---- song program changes (any non-audio thread) ----
+    // Mid-song program changes switch a part's sound without loading anything on
+    // the audio thread: the host (SongProgramLoader, gm_bank.h) loads the next
+    // program's preset ahead of time and stages it here. The engine applies it
+    // at the song's program change to that program on the part's channel, or at
+    // once if the song already passed it. Voices still sounding fade out on the
+    // sample layers that change. One staged program per part; a newer one
+    // replaces it.
+    struct StagedProgram {
+        int program = -1;
+        bool keepSound = false;               // same preset: only the program number changes
+        float params[P::kNumParams] = {};     // the part parameters (isPartParam) are used
+        SampleSet* sets[kNumLayers] = {};     // owned until applied (nullptr = empty layer)
+        std::string setNames[kNumLayers], setPaths[kNumLayers];
+        int appliedPart = -1;                 // set by the engine
+        StagedProgram() = default;
+        StagedProgram(const StagedProgram&) = delete;
+        StagedProgram& operator=(const StagedProgram&) = delete;
+        ~StagedProgram() { for (SampleSet* s : sets) delete s; }
+    };
+    void stagePartProgram(int part, std::unique_ptr<StagedProgram> staged);
+    // the program the part plays (-1 unknown), as set by setPartProgram() or a staged program
+    int partProgram(int part) const { return validPart(part) ? appliedProg_[part].load(std::memory_order_relaxed) : -1; }
+    // the latest program change the song passed on the part's channel (-1 none)
+    int songProgram(int part) const { return validPart(part) ? songProg_[part].load(std::memory_order_relaxed) : -1; }
+    // the staged program waiting on the audio thread (-1 none)
+    int stagedProgram(int part) const { return validPart(part) ? stagedProg_[part].load(std::memory_order_relaxed) : -1; }
+    // after loading a preset for `program` into the part (song start): what it plays now
+    void setPartProgram(int part, int program);
+
     // Live state of the parts for player / mixer UIs (any thread).
     struct PartMeter {
         float level = 0;       // output peak since the previous call
@@ -311,6 +341,15 @@ private:
     std::atomic<bool> songUnload_{false};
     Song* song_ = nullptr;
     SpscQueue<Song*> retiredSongs_{8};
+    // song program changes (stagePartProgram)
+    static bool validPart(int part) { return part >= 0 && part < kNumParts; }
+    std::atomic<StagedProgram*> stageIn_[kNumParts] = {};
+    StagedProgram* stage_[kNumParts] = {};   // audio thread
+    SpscQueue<StagedProgram*> retiredStages_{64};
+    std::atomic<int> appliedProg_[kNumParts], songProg_[kNumParts], stagedProg_[kNumParts];
+    void takeStagedPrograms();               // block start
+    void songProgramChange(int part, int program);
+    void applyStage(int part);
     std::atomic<bool> songPlay_{false};
     bool songWasPlaying_ = false;
     std::atomic<int64_t> songSeekReq_{-1};  // frames, -1 = none

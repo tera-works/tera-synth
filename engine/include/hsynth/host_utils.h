@@ -25,6 +25,10 @@ Preset capturePreset(const Engine& engine, const std::string& name, const std::s
 // rack, impulses, master volume and limiter of the preset are ignored.
 bool applyPartPreset(Engine& engine, int part, const Preset& preset, const std::string& libraryRoot,
                      std::vector<std::string>& warnings);
+// Loads a part preset's samples into a program staged for a mid-song program
+// change (Engine::stagePartProgram); nothing is sent to the engine.
+std::unique_ptr<Engine::StagedProgram> loadStagedProgram(const Preset& preset, const std::string& libraryRoot,
+                                                         std::vector<std::string>& warnings);
 // Part N as a regular preset (global params / impulses are the current global ones).
 Preset capturePartPreset(const Engine& engine, int part, const std::string& name, const std::string& libraryRoot);
 // Switches the engine to multi-timbral mode and loads all 16 parts, their mix

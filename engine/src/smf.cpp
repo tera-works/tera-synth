@@ -157,6 +157,10 @@ bool parseSmf(const uint8_t* data, size_t size, Song& out, std::string& error) {
                 out.bankMsb[ch] = bank[ch];
             }
             out.programChanges.push_back({sec, ch, r.d1});
+            // in the stream too: the engine switches to a staged program at this point
+            Event pc = Event::control(EventType::ProgramChange, 0.0f, r.d1);
+            pc.channel = (uint8_t)ch;
+            out.events.push_back({sec, pc});
             continue;
         }
         if (type == 0xB0 && r.d1 == 0) bank[ch] = r.d2;
