@@ -1,18 +1,25 @@
 """Converts the sampled library (SFZ instruments with WAV samples) to FLAC, losslessly.
 
-usage: python desktop/tools/flac_library.py [LIBRARY_DIR] [--jobs N] [--keep-wav] [--dry-run]
+usage: python desktop/tools/flac_library.py [LIBRARY_DIR] [--jobs N] [--watch] [--delete-wav] [--dry-run]
        (default LIBRARY_DIR: desktop/data/library/user)
 
 For every instrument folder (a folder with .sfz files):
-  1. each WAV the SFZ files use is encoded to FLAC with ffmpeg (compression level 8);
+  1. each WAV the SFZ files use is encoded to FLAC with ffmpeg (compression level 8),
+     written next to the WAV;
   2. the WAV's "smpl" chunk (root key, loop) is embedded in the FLAC as an
      APPLICATION "riff" block, which the engine's FLAC reader understands, so
      the sample behaves exactly like the WAV did;
   3. the FLAC is decoded again and compared with the WAV, sample by sample;
   4. only when every sample of the folder checks out, the SFZ files are
-     rewritten to the .flac names and the WAVs are deleted (--keep-wav keeps them).
+     rewritten to the .flac names. The WAVs are never replaced or changed: they
+     stay next to the FLACs as the originals (--delete-wav removes them after the check).
 Folders changed in the last 10 minutes are skipped (the sampler may still be
 writing them; it writes the .sfz last). Run it again later for new instruments.
+
+--watch runs alongside the sampler (soniccell_start.bat starts it): once a minute
+it converts the instruments finished since the last pass, with 2 jobs at low CPU
+priority so the capture is not disturbed, and ends by itself when hsynth_sampler
+is no longer running and everything is converted.
 Needs ffmpeg on the PATH. Test material only: never distribute the result.
 """
 import argparse
@@ -27,6 +34,9 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT = os.path.normpath(os.path.join(HERE, '..', 'data', 'library', 'user'))
 QUIET_SECONDS = 600
+WATCH_QUIET_SECONDS = 60
+# ffmpeg at below-normal priority, so a conversion running next to the sampler cannot starve the capture
+LOW_PRIORITY = 0x00004000 if os.name == 'nt' else 0
 
 
 def wav_chunks(data):
@@ -71,7 +81,7 @@ def add_riff_block(flac, smpl):
 
 
 def convert(wav):
-    """WAV -> FLAC next to it, verified. Returns (flac path, wav bytes, flac bytes)."""
+    """WAV -> FLAC next to it, verified; the WAV is only read. Returns (flac path, wav bytes, flac bytes)."""
     flac = wav[:-4] + '.flac'
     data = open(wav, 'rb').read()
     (fmt_tag, channels, rate, _, align, bits), pcm, smpl = wav_chunks(data)
@@ -81,7 +91,8 @@ def convert(wav):
     # and the engine streams a FLAC only when it knows its length
     tmp = flac + '.enc'
     subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', wav, '-map_metadata', '-1', '-c:a', 'flac',
-                    '-compression_level', '8', '-f', 'flac', tmp], capture_output=True, check=True)
+                    '-compression_level', '8', '-f', 'flac', tmp], capture_output=True, check=True,
+                   creationflags=LOW_PRIORITY)
     with open(tmp, 'rb') as f:
         enc = f.read()
     os.remove(tmp)
@@ -91,7 +102,7 @@ def convert(wav):
     # lossless check: decode again and compare with the WAV's sample data
     raw = 's16le' if bits == 16 else 's24le'
     dec = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'flac', '-i', '-', '-f', raw, '-'],
-                         input=out, capture_output=True, check=True).stdout
+                         input=out, capture_output=True, check=True, creationflags=LOW_PRIORITY).stdout
     if dec != pcm[:len(pcm) - len(pcm) % align]:
         raise ValueError('FLAC does not decode to the same samples')
     tmp = flac + '.tmp'
@@ -113,79 +124,127 @@ def sfz_wavs(sfz):
     return txt, [os.path.normpath(os.path.join(d, base + s.replace('\\', '/'))) for _, s in SAMPLE_RE.findall(txt)]
 
 
-def folder_quiet(d):
+def folder_quiet(d, seconds):
     newest = 0
     for root, _, files in os.walk(d):
         for f in files:
             newest = max(newest, os.path.getmtime(os.path.join(root, f)))
-    return time.time() - newest > QUIET_SECONDS
+    return time.time() - newest > seconds
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('library', nargs='?', default=DEFAULT)
-    ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 4) - 2))
-    ap.add_argument('--keep-wav', action='store_true')
-    ap.add_argument('--dry-run', action='store_true')
-    a = ap.parse_args()
+def sampler_running():
+    if os.name != 'nt':
+        return subprocess.run(['pgrep', '-f', 'hsynth_sampler'], capture_output=True).returncode == 0
+    out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq hsynth_sampler.exe', '/NH'],
+                         capture_output=True, text=True).stdout
+    return 'hsynth_sampler' in out.lower()
+
+
+def run_pass(a, pool, quiet, give_up):
+    """Converts every quiet folder that still uses WAVs. Returns (converted, failed, waiting)."""
     folders = {}
     for root, _, files in os.walk(a.library):
         sfzs = [os.path.join(root, f) for f in files if f.lower().endswith('.sfz')]
         if sfzs:
             folders[root] = sfzs
-    total_w = total_f = done = skipped = failed = 0
+    total_w = total_f = done = skipped = failed = waiting = 0
     t0 = time.time()
-    with ThreadPoolExecutor(a.jobs) as pool:
-        for n, (d, sfzs) in enumerate(sorted(folders.items()), 1):
-            parsed = [(s, *sfz_wavs(s)) for s in sfzs]
-            wavs = sorted({w for _, _, ws in parsed for w in ws})
-            if not wavs:
-                continue
-            if not folder_quiet(d):
-                print(f'skip (changed in the last {QUIET_SECONDS // 60} min): {d}')
-                skipped += 1
-                continue
-            missing = [w for w in wavs if not os.path.isfile(w)]
-            if missing:
-                print(f'skip (missing {len(missing)} WAV, e.g. {missing[0]}): {d}')
-                skipped += 1
-                continue
-            if a.dry_run:
-                total_w += sum(os.path.getsize(w) for w in wavs)
-                done += 1
-                continue
-            try:
-                results = list(pool.map(convert, wavs))
-            except Exception as e:  # leave the folder as it was
-                print(f'FAILED {d}: {e}')
-                for w in wavs:
-                    f = w[:-4] + '.flac'
-                    if os.path.exists(f):
-                        os.remove(f)
-                failed += 1
-                continue
-            for sfz, txt, _ in parsed:
-                new = SAMPLE_RE.sub(lambda m: m.group(1) + m.group(2)[:-4] + '.flac', txt)
-                tmp = sfz + '.tmp'
-                with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
-                    f.write(new)
-                os.replace(tmp, sfz)
-            if not a.keep_wav:
-                for w in wavs:
-                    os.remove(w)
-            wb, fb = sum(r[1] for r in results), sum(r[2] for r in results)
-            total_w += wb
-            total_f += fb
+    for n, (d, sfzs) in enumerate(sorted(folders.items()), 1):
+        if d in give_up:
+            continue
+        parsed = [(s, *sfz_wavs(s)) for s in sfzs]
+        wavs = sorted({w for _, _, ws in parsed for w in ws})
+        if not wavs:
+            continue  # converted already
+        if not folder_quiet(d, quiet):
+            if not a.watch:
+                print(f'skip (changed in the last {quiet // 60} min): {d}')
+            skipped += 1
+            waiting += 1
+            continue
+        missing = [w for w in wavs if not os.path.isfile(w)]
+        if missing:
+            print(f'skip (missing {len(missing)} WAV, e.g. {missing[0]}): {d}', flush=True)
+            skipped += 1
+            give_up.add(d)
+            continue
+        if a.dry_run:
+            total_w += sum(os.path.getsize(w) for w in wavs)
             done += 1
-            print(f'[{n}/{len(folders)}] {os.path.relpath(d, a.library)}: {len(wavs)} samples, '
-                  f'{wb / 1e6:.1f} -> {fb / 1e6:.1f} MB ({fb * 100 / wb:.0f} %)', flush=True)
+            continue
+        try:
+            results = list(pool.map(convert, wavs))
+        except Exception as e:  # leave the folder as it was
+            print(f'FAILED {d}: {e}', flush=True)
+            for w in wavs:
+                f = w[:-4] + '.flac'
+                if os.path.exists(f):
+                    os.remove(f)
+            failed += 1
+            give_up.add(d)
+            continue
+        for sfz, txt, _ in parsed:
+            new = SAMPLE_RE.sub(lambda m: m.group(1) + m.group(2)[:-4] + '.flac', txt)
+            tmp = sfz + '.tmp'
+            with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(new)
+            os.replace(tmp, sfz)
+        if a.delete_wav:
+            for w in wavs:
+                os.remove(w)
+        wb, fb = sum(r[1] for r in results), sum(r[2] for r in results)
+        total_w += wb
+        total_f += fb
+        done += 1
+        print(f'{time.strftime("%H:%M:%S")} [{n}/{len(folders)}] {os.path.relpath(d, a.library)}: {len(wavs)} samples, '
+              f'{wb / 1e6:.1f} -> {fb / 1e6:.1f} MB ({fb * 100 / wb:.0f} %)', flush=True)
     if a.dry_run:
         print(f'dry run: {done} folders, {total_w / 1e9:.2f} GB of WAV would be converted; {skipped} skipped')
-        return
-    pct = total_f * 100 / total_w if total_w else 0
-    print(f'done: {done} folders, {total_w / 1e9:.2f} GB -> {total_f / 1e9:.2f} GB ({pct:.0f} %), '
-          f'{skipped} skipped, {failed} failed, {time.time() - t0:.0f} s')
-    sys.exit(1 if failed else 0)
+    elif done or failed or not a.watch:
+        pct = total_f * 100 / total_w if total_w else 0
+        print(f'{time.strftime("%H:%M:%S")} pass done: {done} folders, {total_w / 1e9:.2f} GB -> '
+              f'{total_f / 1e9:.2f} GB ({pct:.0f} %), {skipped} skipped, {failed} failed, '
+              f'{time.time() - t0:.0f} s', flush=True)
+    return done, failed, waiting
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('library', nargs='?', default=DEFAULT)
+    ap.add_argument('--jobs', type=int, default=None,
+                    help='parallel ffmpeg runs (default: CPU count - 2; with --watch: 2)')
+    ap.add_argument('--watch', action='store_true',
+                    help='keep converting newly sampled instruments while hsynth_sampler runs')
+    ap.add_argument('--interval', type=int, default=60, help='seconds between passes with --watch')
+    ap.add_argument('--delete-wav', action='store_true', help='remove the WAVs after the check')
+    ap.add_argument('--keep-wav', action='store_true', help=argparse.SUPPRESS)  # always the case now
+    ap.add_argument('--dry-run', action='store_true')
+    a = ap.parse_args()
+    if a.jobs is None:
+        a.jobs = 2 if a.watch else max(1, (os.cpu_count() or 4) - 2)
+    quiet = WATCH_QUIET_SECONDS if a.watch else QUIET_SECONDS
+    give_up = set()  # folders that failed or miss WAVs: not tried again in this run
+    with ThreadPoolExecutor(a.jobs) as pool:
+        if not a.watch or a.dry_run:
+            _, failed, _ = run_pass(a, pool, quiet, give_up)
+            sys.exit(1 if failed else 0)
+        print(f'watching {a.library}: converting finished instruments to FLAC, WAVs are kept '
+              f'({a.jobs} jobs, every {a.interval} s; Ctrl+C to stop)', flush=True)
+        failed = idle = 0
+        try:
+            while True:
+                running = sampler_running()
+                _, f, waiting = run_pass(a, pool, quiet, give_up)
+                failed += f
+                # two idle passes in a row: started together with the sampler, it may not be up yet
+                idle = idle + 1 if not running and not waiting else 0
+                if idle >= 2:
+                    print(f'{time.strftime("%H:%M:%S")} sampler not running and everything converted: '
+                          f'finished ({failed} failed)', flush=True)
+                    sys.exit(1 if failed else 0)
+                time.sleep(a.interval)
+        except KeyboardInterrupt:
+            print('stopped (run it again any time; converted folders are skipped)')
 
 
 if __name__ == '__main__':
