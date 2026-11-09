@@ -140,6 +140,7 @@ void MidiIn::setMultiTimbral(bool on) {
 
 void MidiIn::setUmpInput(bool) {}
 std::string MidiIn::status() const { return ""; }
+bool MidiIn::rescanIfChanged() { return false; }  // winmm: the Rescan button
 
 std::string MidiIn::lastMessage() const {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -235,6 +235,7 @@ private:
 
     // multi / scenes
     std::string partNames_[hsynth::kNumParts];
+    int midiPoll_ = 0;
     static constexpr int kScenes = 16;
     struct SceneSlot { std::string name; bool used = false; };
     SceneSlot scenes_[kScenes];

@@ -352,7 +352,7 @@ void App::init(float dpiScale) {
 void App::startRemote() {
     RemoteControl::Config cfg;
     cfg.deviceName = "HSynth Desktop";
-    cfg.version = "0.8.3";
+    cfg.version = "0.8.4";
     cfg.libraryRoot = pathToUtf8(lib_.libraryRoot());
     cfg.presetDirs = {pathToUtf8(lib_.dataDir() / "presets" / "factory"), pathToUtf8(lib_.userPresetDir())};
     cfg.userPresetDir = pathToUtf8(lib_.userPresetDir());
@@ -578,6 +578,7 @@ void App::frame() {
         engineStats_ = engine_.stats();
         audioStats_ = audio_.stats();
         engine_.collectGarbage();
+        if (++midiPoll_ % 8 == 0 && midi_.rescanIfChanged()) midiPorts_ = midi_.openPorts();  // CoreMIDI: plugged in
         const int pc = midi_.takeProgramChange();
         if (pc >= 0 && !presets_.empty()) {
             log("MIDI program change " + std::to_string(pc));
