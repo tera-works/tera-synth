@@ -1,4 +1,5 @@
-"""Publishes an IPA built by .github/workflows/ios.yml (in this private repository)
+"""Publishes an IPA built by the "iOS distribution" workflow (in the public build repository
+filled by mirror_build.py; older tags: in this private repository)
 to the public AltStore repository and rebuilds its source.json. Run on a PC with
 git credentials for GitHub (the token comes from `git credential fill` and is
 never printed). Python stdlib only; reuses distribute.py's IPA checks.
@@ -33,6 +34,7 @@ import distribute  # noqa: E402
 
 PRIVATE = 'tera-works/tera-synth'
 PUBLIC = 'tera-works/tera-synth-ios'
+BUILD = 'tera-works/tera-synth-ios-build'  # public: free Actions minutes (mirror_build.py)
 WORKFLOW = 'ios.yml'
 # commits in the public repository: never the account's e-mail address
 IDENTITY = {'name': 'tera-works', 'email': '240604790+tera-works@users.noreply.github.com'}
@@ -106,12 +108,21 @@ def git(*args):
 # ---------------------------------------------------------------- build
 
 def fetch_package(tag, dest):
+    # the build runs in the public build repository (mirror_build.py pushed the tag there);
+    # older releases were built here in the private repository, on the tag's own commit
     sha = git('rev-parse', f'{tag}^{{commit}}')
-    runs = must(api('GET', f'/repos/{PRIVATE}/actions/workflows/{WORKFLOW}/runs?per_page=50'), 'workflow runs')['workflow_runs']
-    runs = [r for r in runs if r['head_sha'] == sha and r['conclusion'] == 'success']
-    distribute.require(bool(runs), f'no successful {WORKFLOW} run for {tag} ({sha[:7]}): push the tag and wait for the build')
+    repo, runs = BUILD, []
+    for repo in (BUILD, PRIVATE):
+        st, body = api('GET', f'/repos/{repo}/actions/workflows/{WORKFLOW}/runs?per_page=50', ok=(200, 404))
+        if st != 200:
+            continue
+        runs = [r for r in body['workflow_runs'] if r['conclusion'] == 'success' and
+                (r['head_branch'] == tag if repo == BUILD else r['head_sha'] == sha)]
+        if runs:
+            break
+    distribute.require(bool(runs), f'no successful {WORKFLOW} run for {tag}: run mirror_build.py {tag} and wait for the build')
     run = runs[0]
-    arts = must(api('GET', f"/repos/{PRIVATE}/actions/runs/{run['id']}/artifacts"), 'artifacts')['artifacts']
+    arts = must(api('GET', f"/repos/{repo}/actions/runs/{run['id']}/artifacts"), 'artifacts')['artifacts']
     art = next((a for a in arts if a['name'] == 'ios-package' and not a['expired']), None)
     distribute.require(art is not None, f"run {run['id']} has no ios-package artifact (expired?)")
     print(f"build: run {run['id']} ({run['html_url']})")
