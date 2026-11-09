@@ -85,19 +85,34 @@ def must(result, what):
     return out
 
 
+def _get(url):
+    """GET without credentials, retrying GitHub's temporary 5xx / network errors."""
+    import time
+    for attempt in range(6):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'tera-works-publisher/1.0', 'Accept': '*/*'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == 5:
+                raise RuntimeError(f'GET {url}: HTTP {e.code}') from e
+        except urllib.error.URLError:
+            if attempt == 5:
+                raise
+        time.sleep(2 + attempt * 3)
+
+
 def download(url, auth):
     """GET a URL; API redirects to storage are followed without the token."""
     if not auth:
-        with urllib.request.urlopen(url) as r:
-            return r.read()
+        return _get(url)
     req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token(), 'Accept': 'application/vnd.github+json'})
     try:
         with urllib.request.build_opener(_NoRedirect).open(req) as r:
             return r.read()
     except urllib.error.HTTPError as e:
         if e.code in (301, 302, 303, 307, 308):
-            with urllib.request.urlopen(e.headers['Location']) as r:
-                return r.read()
+            return _get(e.headers['Location'])
         raise
 
 
@@ -160,6 +175,19 @@ def releases():
         page += 1
 
 
+def asset_bytes(api_url):
+    """A release asset through the API (octet-stream; the storage redirect is followed without the token)."""
+    req = urllib.request.Request(api_url, headers={'Authorization': 'Bearer ' + token(), 'Accept': 'application/octet-stream',
+                                                   'User-Agent': 'tera-works-publisher/1.0'})
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=60) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            return _get(e.headers['Location'])
+        raise
+
+
 def manifests():
     result = []
     for rel in releases():
@@ -167,7 +195,11 @@ def manifests():
         if 'manifest.json' not in assets:
             continue
         distribute.require('app.ipa' in assets and 'icon.png' in assets, 'incomplete release: ' + rel['tag_name'])
-        m = json.loads(download(assets['manifest.json']['browser_download_url'], auth=False))
+        try:
+            raw = download(assets['manifest.json']['browser_download_url'], auth=False)
+        except Exception:  # the download link failed (GitHub 5xx): the same file through the API
+            raw = asset_bytes(assets['manifest.json']['url'])
+        m = json.loads(raw)
         v = m['versions'][0]
         distribute.require(v['size'] == assets['app.ipa']['size'], 'release IPA size mismatch: ' + rel['tag_name'])
         v['downloadURL'] = assets['app.ipa']['browser_download_url']
