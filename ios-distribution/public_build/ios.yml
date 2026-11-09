@@ -1,5 +1,5 @@
-# Unsigned IPA for AltStore, built from the snapshot that mirror_build.py pushes with each
-# release tag; publish_public.py (in the development repository) publishes it.
+# Unsigned IPA for AltStore, built from the snapshot in src/ that mirror_build.py pushes
+# with each release tag; publish_public.py (in the development repository) publishes it.
 name: iOS distribution
 on:
   push:
@@ -19,11 +19,12 @@ jobs:
         with:
           persist-credentials: false
       - name: XcodeGen
-        run: brew install xcodegen && cd ios && xcodegen
+        run: brew install xcodegen && cd src/ios && xcodegen
       - run: python3 ios-distribution/scripts/distribute.py build
+        working-directory: src
       - uses: actions/upload-artifact@v4
         with:
           name: ios-package
-          path: dist/*
+          path: src/dist/*
           if-no-files-found: error
           retention-days: 30

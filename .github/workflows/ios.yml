@@ -1,6 +1,6 @@
 # Unsigned IPA for AltStore (ios-distribution/, docs/ALTSTORE.md).
-# Releases are built in the public repository tera-works/tera-synth-ios-build
-# (free minutes): `python ios-distribution/scripts/mirror_build.py vX.Y.Z` pushes
+# Releases are built in the public AltStore repository tera-works/tera-synth-ios
+# (src/, free minutes): `python ios-distribution/scripts/mirror_build.py vX.Y.Z` pushes
 # the source snapshot and the tag there, then publish_public.py publishes the IPA.
 # This private copy runs by hand only (macOS minutes count 10x here).
 name: iOS distribution

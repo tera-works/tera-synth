@@ -1,5 +1,5 @@
-"""Publishes an IPA built by the "iOS distribution" workflow (in the public build repository
-filled by mirror_build.py; older tags: in this private repository)
+"""Publishes an IPA built by the "iOS distribution" workflow (in the public AltStore repository,
+src/ filled by mirror_build.py; older tags: in this private repository)
 to the public AltStore repository and rebuilds its source.json. Run on a PC with
 git credentials for GitHub (the token comes from `git credential fill` and is
 never printed). Python stdlib only; reuses distribute.py's IPA checks.
@@ -34,7 +34,7 @@ import distribute  # noqa: E402
 
 PRIVATE = 'tera-works/tera-synth'
 PUBLIC = 'tera-works/tera-synth-ios'
-BUILD = 'tera-works/tera-synth-ios-build'  # public: free Actions minutes (mirror_build.py)
+BUILD = PUBLIC  # the IPA is built here too (src/, mirror_build.py): free minutes on a public repository
 WORKFLOW = 'ios.yml'
 # commits in the public repository: never the account's e-mail address
 IDENTITY = {'name': 'tera-works', 'email': '240604790+tera-works@users.noreply.github.com'}
@@ -108,7 +108,7 @@ def git(*args):
 # ---------------------------------------------------------------- build
 
 def fetch_package(tag, dest):
-    # the build runs in the public build repository (mirror_build.py pushed the tag there);
+    # the build runs in the public AltStore repository (mirror_build.py pushed the tag there);
     # older releases were built here in the private repository, on the tag's own commit
     sha = git('rev-parse', f'{tag}^{{commit}}')
     repo, runs = BUILD, []
