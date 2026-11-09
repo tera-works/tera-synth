@@ -352,7 +352,7 @@ void App::init(float dpiScale) {
 void App::startRemote() {
     RemoteControl::Config cfg;
     cfg.deviceName = "HSynth Desktop";
-    cfg.version = "0.8.0";
+    cfg.version = "0.8.1";
     cfg.libraryRoot = pathToUtf8(lib_.libraryRoot());
     cfg.presetDirs = {pathToUtf8(lib_.dataDir() / "presets" / "factory"), pathToUtf8(lib_.userPresetDir())};
     cfg.userPresetDir = pathToUtf8(lib_.userPresetDir());
