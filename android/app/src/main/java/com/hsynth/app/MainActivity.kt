@@ -517,6 +517,7 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) return
         if (requestCode == PlayerPanel.REQ_FOLDER || requestCode == PlayerPanel.REQ_FILES) player.onActivityResult(requestCode, data)
+        else if (requestCode == MultiPanel.REQ_SETUP_EXPORT || requestCode == MultiPanel.REQ_SETUP_IMPORT) multi.onActivityResult(requestCode, data)
         else libraryPanel.onActivityResult(requestCode, data)
     }
 

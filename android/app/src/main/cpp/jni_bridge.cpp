@@ -27,6 +27,7 @@
 #include "hsynth/midi.h"
 #include "hsynth/preset.h"
 #include "hsynth/remote.h"
+#include "hsynth/setup.h"
 #include "hsynth/sample_set.h"
 
 using namespace hsynth;
@@ -632,6 +633,48 @@ JNI(jstring, nativeSaveMulti)(JNIEnv* env, jobject, jstring path, jstring name, 
     std::string err;
     if (!saveMultiFile(str(env, path), m, err)) return jstr(env, err);
     return jstr(env, "");
+}
+
+// Setup files (setup.h): the whole playing setup. hostJson = the app's own settings,
+// names = JSON array of the part names shown in the app.
+JNI(jstring, nativeSetupJson)(JNIEnv* env, jobject, jstring name, jstring libRoot, jstring hostJson, jstring names) {
+    Json host, n;
+    std::string err;
+    if (!Json::parse(str(env, hostJson), host, err)) host = Json::object();
+    std::vector<std::string> partNames;
+    if (Json::parse(str(env, names), n, err) && n.isArray())
+        for (size_t i = 0; i < n.size(); ++i) partNames.push_back(n.at(i).isString() ? n.at(i).string() : "");
+    return jstr(env, makeSetupJson(*gEngine, str(env, name), str(env, libRoot), &gLearn, host, "", partNames));
+}
+
+JNI(jstring, nativeSetupApply)(JNIEnv* env, jobject, jstring text, jstring libRoot) {
+    Json r = Json::object();
+    SetupResult res;
+    std::string err;
+    if (!applySetupJson(*gEngine, str(env, text), str(env, libRoot), &gLearn, res, err)) {
+        r.set("ok", false);
+        r.set("error", err);
+        return jstr(env, r.dump(0));
+    }
+    if (res.hasState) {
+        {
+            std::lock_guard<std::mutex> lock(gMidiMutex);
+            gMidi.setMultiTimbral(res.multi);
+        }
+        for (int k = 0; k < kNumParts; ++k) songPartForgotten(k);
+        gEditPart.store(res.multi ? gEngine->selectedPart() : 0);
+    }
+    r.set("ok", true);
+    r.set("name", res.name);
+    r.set("state", res.hasState);
+    r.set("multi", res.multi);
+    r.set("midiLearn", res.hasMidiLearn);
+    Json names = Json::array();
+    for (const auto& s : res.partNames) names.push(s);
+    r.set("parts", names);
+    r.set("host", res.host);
+    r.set("warnings", warningsJson(res.warnings));
+    return jstr(env, r.dump(0));
 }
 
 JNI(jstring, nativeLoadMulti)(JNIEnv* env, jobject, jstring path, jstring libRoot) {

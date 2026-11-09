@@ -96,6 +96,10 @@ object NativeEngine {
     external fun nativeGetPartMix(part: Int, id: Int): Float
     external fun nativeSaveMulti(path: String, name: String, libraryRoot: String): String
     external fun nativeLoadMulti(path: String, libraryRoot: String): String
+    /** Setup file (engine setup.h): state + MIDI learn + [hostJson] app settings; [names] = JSON array of part names. */
+    external fun nativeSetupJson(name: String, libraryRoot: String, hostJson: String, names: String): String
+    /** Applies a setup file's text; returns {ok, error, name, state, multi, midiLearn, parts[], host{}, warnings[]}. */
+    external fun nativeSetupApply(text: String, libraryRoot: String): String
     external fun nativeLearnArm(param: Int)
     external fun nativeLearnCancel()
     external fun nativeLearnArmed(): Int

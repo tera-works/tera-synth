@@ -98,6 +98,13 @@ object L10n {
             "Scan で BLE MIDI のキーボードやコントローラーを探し、タップすると接続します（次回は自動で再接続）。" +
             "Peripheral をオンにすると、PC やタブレットからこの端末に Bluetooth で接続して、演奏や SysEx リモート操作ができます。",
         "Searching…" to "検索中…",
+        "Export setup…" to "セットアップを書き出す…",
+        "Import setup…" to "セットアップを読み込む…",
+        "A setup file holds the parts (channel, preset, mix), effects, MIDI learn and polyphony, for this app, the desktop app and iPhone." to
+            "セットアップファイルには、パート（MIDI チャンネル・プリセット・ミックス）、エフェクト、MIDI Learn、最大発音数がまとめて入ります。PC 版・iPhone 版とも共通です。",
+        "setup exported" to "セットアップを書き出しました",
+        "setup import failed: %s" to "セットアップを読み込めませんでした: %s",
+        "setup \"%s\" imported" to "セットアップ「%s」を読み込みました",
         "Advertising, waiting for a connection" to "接続を待っています（アドバタイズ中）",
         "Connected: %s" to "接続中: %s",
         "Bluetooth permission denied" to "Bluetooth の権限が許可されませんでした",

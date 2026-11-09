@@ -60,6 +60,10 @@ class DragNumber(ctx: Context, private val min: Float, private val max: Float, p
  * Parts on the same channel layer; different key ranges split.
  */
 class MultiPanel(private val a: MainActivity) {
+    companion object {
+        const val REQ_SETUP_EXPORT = 120
+        const val REQ_SETUP_IMPORT = 121
+    }
     val view: LinearLayout
     private val refreshers = mutableListOf<() -> Unit>()
     private val sceneButtons = mutableListOf<LedButton>()
@@ -83,6 +87,12 @@ class MultiPanel(private val a: MainActivity) {
         mode.body.addView(multiSwitch, LinearLayout.LayoutParams(-2, -2))
         mode.body.addView(Ui.text(a, "Multi mode: 16 parts, layered by MIDI channel and split by key range. The on-screen keyboard plays the channel of the part being edited.", 12f, Ui.DIM),
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(4) })
+        mode.body.addView(Ui.buttonRow(a,
+            Ui.button(a, "Export setup…") { exportSetup() },
+            Ui.button(a, "Import setup…") { importSetup() },
+        ), LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+        mode.body.addView(Ui.text(a, "A setup file holds the parts (channel, preset, mix), effects, MIDI learn and polyphony, for this app, the desktop app and iPhone.", 12f, Ui.DIM),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(2) })
 
         val scenes = Hw.Section(a, "Scenes")
         val row = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
@@ -230,6 +240,79 @@ class MultiPanel(private val a: MainActivity) {
                 a.log("scene ${i + 1} recalled")
                 updateScenes()
                 refresh()
+            }
+        }
+    }
+
+    private fun exportSetup() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            type = "application/json"
+            putExtra(android.content.Intent.EXTRA_TITLE, "setup.json")
+        }
+        @Suppress("DEPRECATION")
+        a.startActivityForResult(intent, REQ_SETUP_EXPORT)
+    }
+
+    private fun importSetup() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(android.content.Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream"))
+        }
+        @Suppress("DEPRECATION")
+        a.startActivityForResult(intent, REQ_SETUP_IMPORT)
+    }
+
+    private fun hostSettings() = JSONObject().apply {
+        put("voices", a.prefs.getInt("voices", 128))
+        put("quality", a.prefs.getInt("quality", 1))
+        put("mpe", a.prefs.getBoolean("mpe", false))
+    }
+
+    private fun applyHostSettings(h: JSONObject) {
+        val e = a.prefs.edit()
+        if (h.has("voices")) h.optInt("voices", 128).coerceIn(8, 256).let { NativeEngine.nativeSetMaxVoices(it); e.putInt("voices", it) }
+        if (h.has("quality")) h.optInt("quality", 1).coerceIn(0, 2).let { NativeEngine.nativeSetQuality(it); e.putInt("quality", it) }
+        if (h.has("mpe")) h.optBoolean("mpe").let { NativeEngine.nativeSetMpe(it); e.putBoolean("mpe", it) }
+        e.apply()
+    }
+
+    fun onActivityResult(requestCode: Int, data: android.content.Intent?) {
+        val u = data?.data ?: return
+        val root = a.library.libraryRoot.absolutePath
+        when (requestCode) {
+            REQ_SETUP_EXPORT -> {
+                val name = a.library.displayName(u).substringBeforeLast('.').ifEmpty { "Setup" }
+                val json = NativeEngine.nativeSetupJson(name, root, hostSettings().toString(), JSONArray(a.partNames.toList()).toString())
+                a.loader.execute {
+                    try {
+                        a.library.exportText(u, json)
+                        a.ui.post { a.log(L10n.t("setup exported")) }
+                    } catch (e: Exception) {
+                        a.ui.post { a.log("export failed: ${e.message}", Ui.ERR) }
+                    }
+                }
+            }
+            REQ_SETUP_IMPORT -> a.loader.execute {
+                val text = try {
+                    a.contentResolver.openInputStream(u)?.use { it.readBytes().decodeToString() } ?: ""
+                } catch (e: Exception) { "" }
+                val r = JSONObject(NativeEngine.nativeSetupApply(text, root))
+                a.runOnUiThread {
+                    if (!r.optBoolean("ok")) { a.log(L10n.f("setup import failed: %s", r.optString("error")), Ui.ERR); return@runOnUiThread }
+                    r.optJSONArray("warnings")?.let { w -> for (i in 0 until w.length()) a.log("  " + w.getString(i), Ui.WARN) }
+                    if (r.optBoolean("state")) {
+                        val p = r.optJSONArray("parts")
+                        if (p != null) for (k in 0 until minOf(16, p.length())) a.partNames[k] = p.getString(k)
+                        a.currentPresetName = a.partNames[0].ifEmpty { a.currentPresetName }
+                        a.setEditPart(NativeEngine.nativeEditPart())
+                    }
+                    r.optJSONObject("host")?.let { applyHostSettings(it) }
+                    if (r.optBoolean("midiLearn")) NativeEngine.nativeLearnSave(File(a.filesDir, "midi_map.json").absolutePath)
+                    a.log(L10n.f("setup \"%s\" imported", r.optString("name")))
+                    refresh()
+                }
             }
         }
     }

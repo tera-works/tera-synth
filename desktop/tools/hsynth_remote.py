@@ -13,6 +13,8 @@ Examples:
   python hsynth_remote.py -p HSynth set filter.cutoff=1200 filter.type=LP24
   python hsynth_remote.py -p HSynth state-save my_sound.json
   python hsynth_remote.py -p HSynth state-load my_sound.json
+  python hsynth_remote.py -p HSynth setup-save band.json         (parts + effects + MIDI learn + settings)
+  python hsynth_remote.py -p HSynth setup-load band.json
   python hsynth_remote.py -p HSynth presets piano
   python hsynth_remote.py -p HSynth load "Grand Piano" --part 2
   python hsynth_remote.py -p HSynth note 60 --vel 0.8 --dur 0.5
@@ -542,6 +544,11 @@ def run_command(c, argv):
     s.add_argument('--full', action='store_true', help='every parameter (default: only non-default ones)')
     s = sub.add_parser('state-load')
     s.add_argument('file', help='a state saved by state-save, or a preset / multi JSON')
+    s = sub.add_parser('setup-save')
+    s.add_argument('file')
+    s.add_argument('--name', default='', help='setup name (default: the file name)')
+    s = sub.add_parser('setup-load')
+    s.add_argument('file', help='an hsynth-setup file (from any HSynth app)')
     s = sub.add_parser('presets')
     s.add_argument('query', nargs='?', default='')
     s.add_argument('--category', default='')
@@ -653,6 +660,18 @@ def run_command(c, argv):
         if 'state' in state and 'format' not in state:
             state = state['state']
         r = c.request({'op': 'set_state', 'state': state}, timeout=60)
+    elif a.cmd == 'setup-save':
+        name = a.name or os.path.splitext(os.path.basename(a.file))[0]
+        r = c.request({'op': 'setup_get', 'name': name}, timeout=60)
+        if r.get('ok'):
+            with open(a.file, 'w', encoding='utf-8') as f:
+                json.dump(r['setup'], f, ensure_ascii=False, indent=2)
+            print(f'saved {a.file}')
+            return 0
+    elif a.cmd == 'setup-load':
+        with open(a.file, encoding='utf-8') as f:
+            setup = json.load(f)
+        r = c.request({'op': 'setup_set', 'setup': setup}, timeout=120)
     elif a.cmd == 'presets':
         out, off = [], 0
         while True:

@@ -313,9 +313,18 @@ private:
         float ccVolume = 1.0f;     // CC7 (multi mode)
         float ccPan = 0.0f;        // CC10 as -1..1 offset (multi mode)
         float pedal = 0.0f;        // sustain pedal 0..1 (CC64, half pedal)
-        float ccExpr = 1.0f;       // CC11 as part level (multi mode, GM songs)
+        float ccExpr = 1.0f;       // CC11 as part level (unless the preset routes "expression" itself)
+        float exprLevel = 1.0f;    // the level CC11 gives this block (1 when the preset routes it)
+        float singleGain = 1.0f;   // smoothed expression level of single-part mode
         float ccRev = 0.0f;        // CC91 reverb send (adds to send A)
         float ccCho = 0.0f;        // CC93
+        // standard controllers for every preset (see partEvent): CC94 delay send, CC5 portamento
+        // time, CC74 brightness, CC71 resonance, CC1 vibrato (when the preset ignores the wheel)
+        float ccDly = 0.0f;
+        float ccGlide = -1.0f;     // seconds, < 0 = the preset's own voice.glide
+        float ccCutoffOct = 0.0f;
+        float ccReso = 0.0f;
+        float vibPhase = 0.0f;
         float gain[4] = {};        // smoothed send L/R, dry L/R
         float target[4] = {};
         // mono / legato note stack (last note priority) and glide source
@@ -477,6 +486,8 @@ private:
     }
     void updateInserts(int part);
     void updatePartTargets();
+    // CC1 vibrato / CC11 level / CC5, CC71, CC74 into the part's voice context (every block)
+    void standardControllers(PartState& ps, int n);
     void processMulti(float* L, float* R, int n);
     void swapSampleSet(int part, int layer, SampleSet* s, bool playing);
     // Parallel voice rendering of a whole block (no arpeggiator running):

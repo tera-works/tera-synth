@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -11,6 +12,7 @@
 #include "hsynth/json.h"
 #include "hsynth/preset.h"
 #include "hsynth/sample_set.h"
+#include "hsynth/setup.h"
 #include "hsynth/wav.h"
 #include "imgui.h"
 #include "platform.h"
@@ -208,6 +210,94 @@ void App::saveSettings() {
     out << j.dump(2);
 }
 
+// ------------------------------------------------------------------ setup files
+
+Json App::hostSettingsJson() const {
+    // settings that mean the same on every host (device names / audio buffers stay local)
+    Json h = Json::object();
+    h.set("voices", s_.voices);
+    h.set("quality", s_.quality);
+    h.set("mpe", s_.mpe);
+    return h;
+}
+
+void App::applyHostSettings(const Json& host) {
+    if (const Json* v = host.find("voices"); v && v->isNumber()) {
+        s_.voices = std::clamp((int)v->number(), 8, 256);
+        engine_.setMaxVoices(s_.voices);
+    }
+    if (const Json* v = host.find("quality"); v && v->isNumber()) {
+        s_.quality = std::clamp((int)v->number(), 0, 2);
+        engine_.setQuality((Quality)s_.quality);
+    }
+    if (const Json* v = host.find("mpe")) {
+        s_.mpe = v->boolean();
+        midi_.setMpe(s_.mpe);
+    }
+    saveSettings();
+}
+
+void App::importSetup(const std::string& file) {
+    const std::string root = pathToUtf8(lib_.libraryRoot());
+    runAsync([this, file, root] {
+        SetupResult res;
+        std::string err;
+        const bool ok = applySetupJson(engine_, readFile(utf8ToPath(file)), root, &learn_, res, err);
+        post([this, ok, err, res, file] {
+            if (!ok) { log("setup import failed: " + err, 2); return; }
+            for (auto& w : res.warnings) log("  " + w, 1);
+            if (res.hasState) {
+                midi_.setMultiTimbral(res.multi);
+                if (!res.multi) engine_.selectPart(0);
+                for (int k = 0; k < kNumParts && k < (int)res.partNames.size(); ++k) partNames_[k] = res.partNames[(size_t)k];
+                if (!res.partNames.empty()) currentPresetName_ = res.partNames[0];
+            }
+            applyHostSettings(res.host);
+            if (res.hasMidiLearn) {
+                std::string e;
+                learn_.save(pathToUtf8(lib_.dataDir() / "midi_map.json"), e);
+            }
+            log("setup \"" + res.name + "\" imported from " + file);
+        });
+    });
+}
+
+void App::drawSetups() {
+    ImGui::Spacing();
+    ImGui::TextColored(kAccent, "Setup (export / import)");
+    ImGui::TextColored(kDim, "Parts and their channels, presets, mix, effects, MIDI learn and polyphony in one file.");
+    if (ImGui::Button("Export setup...")) {
+        std::error_code ec;
+        fs::create_directories(lib_.dataDir() / "setups", ec);
+        const std::string path = platform::saveFile({{"HSynth setup (*.json)", "*.json"}}, "setup.json", "json");
+        if (!path.empty()) {
+            const std::string name = pathToUtf8(utf8ToPath(path).stem());
+            std::vector<std::string> names(partNames_, partNames_ + kNumParts);
+            const std::string text = makeSetupJson(engine_, name, pathToUtf8(lib_.libraryRoot()), &learn_,
+                                                   hostSettingsJson(), "", names);
+            std::ofstream out(utf8ToPath(path), std::ios::binary);
+            out << text;
+            if (out) log("setup exported: " + path);
+            else log("could not write " + path, 2);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Import setup...")) {
+        const auto files = platform::openFiles({{"HSynth setup (*.json)", "*.json"}}, false);
+        if (!files.empty()) importSetup(files.front());
+    }
+    // setups kept in data/setups: one click
+    std::error_code ec;
+    const fs::path dir = lib_.dataDir() / "setups";
+    if (fs::is_directory(dir, ec)) {
+        for (const auto& f : fs::directory_iterator(dir, ec)) {
+            if (f.path().extension() != ".json") continue;
+            const std::string label = "Load " + pathToUtf8(f.path().stem());
+            if (ImGui::SmallButton(label.c_str())) importSetup(pathToUtf8(f.path()));
+        }
+    }
+}
+
 // ------------------------------------------------------------------ init
 
 void App::init(float dpiScale) {
@@ -276,6 +366,8 @@ void App::startRemote() {
         midi_.setMpe(on);
         post([this, on] { s_.mpe = on; });
     };
+    hooks.hostSettings = [this](Json& host) { host = hostSettingsJson(); };
+    hooks.applyHostSettings = [this](const Json& host) { post([this, host] { applyHostSettings(host); }); };
     hooks.presetLoaded = [this](int part, const std::string& name) {
         post([this, part, name] {
             if (part >= 0 && part < kNumParts) partNames_[part] = name;
@@ -1431,6 +1523,7 @@ void App::drawMonitor() {
     }
     drawMidiOut();
     drawMidiMap();
+    drawSetups();
     ImGui::EndChild();
 
     ImGui::SameLine();

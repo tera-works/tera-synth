@@ -96,6 +96,11 @@ F0 7D 48 53 01 7F 01 01 00 00 01 00 7B 22 6F 70 22 3A 22 68 65 6C 6C 6F 22 7D F7
 
 `get_state` → ファイルに保存 → `set_state` で、音を丸ごと PC にバックアップ・復元できます。省略された値は既定値として読み込まれます。
 
+| op | 要求 | 応答 |
+|---|---|---|
+| `setup_get` | `name` | `setup`: セットアップファイル（`hsynth-setup`。状態 + MIDI Learn + 同時発音数などの設定、[CONTROLLERS.md](CONTROLLERS.md)） |
+| `setup_set` | `setup`（アプリが書き出したセットアップファイルの中身） | `name`, `multi`, `warnings` |
+
 ### モード・パート・ミックス
 
 | op | 要求 | 応答 |
@@ -184,6 +189,8 @@ python desktop/tools/hsynth_remote.py -p "Galaxy" mode multi
 python desktop/tools/hsynth_remote.py -p "Galaxy" mix 3 volume=0.7 pan=-0.3 channel=4
 python desktop/tools/hsynth_remote.py -p "Galaxy" state-save mysound.json    # 状態を丸ごと PC へ
 python desktop/tools/hsynth_remote.py -p "Galaxy" state-load mysound.json    # PC から丸ごと戻す
+python desktop/tools/hsynth_remote.py -p "Galaxy" setup-save band.json       # セットアップ（状態 + MIDI Learn + 設定）
+python desktop/tools/hsynth_remote.py -p "Galaxy" setup-load band.json
 python desktop/tools/hsynth_remote.py -p "Galaxy" presets piano
 python desktop/tools/hsynth_remote.py -p "Galaxy" load "Grand Piano" --part 2
 python desktop/tools/hsynth_remote.py -p "Galaxy" save "My Lead" --category Lead

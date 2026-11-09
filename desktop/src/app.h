@@ -14,6 +14,7 @@
 
 #include "audio_out.h"
 #include "hsynth/engine.h"
+#include "hsynth/json.h"
 #include "hsynth/midi_learn.h"
 #include "hsynth/params.h"
 #include "hsynth/preset_index.h"
@@ -111,6 +112,11 @@ private:
     void drawSceneBar();
     void drawZones(float width, float height);
     void drawMidiMap();
+    // setup files (engine setup.h): export / import the whole playing setup
+    void drawSetups();
+    hsynth::Json hostSettingsJson() const;
+    void applyHostSettings(const hsynth::Json& host);  // UI thread
+    void importSetup(const std::string& file);
     bool paramContextMenu(const hsynth::ParamInfo& info, int id, float& v);  // true if v changed
     // browser
     void rescanBrowser();

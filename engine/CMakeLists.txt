@@ -38,6 +38,7 @@ add_library(hsynth STATIC
     src/preset_index.cpp
     src/midi_learn.cpp
     src/remote.cpp
+    src/setup.cpp
     src/ble_midi.cpp
     src/smf.cpp
     src/gm_bank.cpp
@@ -93,7 +94,7 @@ endif()
 
 if(HSYNTH_BUILD_TESTS AND (NOT ANDROID OR HSYNTH_DEVICE_TESTS))
     enable_testing()
-    add_executable(hsynth_tests tests/test_main.cpp tests/test_dsp.cpp tests/test_engine.cpp tests/test_io.cpp tests/test_fx.cpp tests/test_multi.cpp tests/test_voice.cpp tests/test_sfz.cpp tests/test_flac.cpp tests/test_quality.cpp tests/test_realtime.cpp tests/test_parallel.cpp tests/test_streaming.cpp tests/test_browser.cpp tests/test_fm8.cpp tests/test_fx_extra.cpp tests/test_v07.cpp tests/test_song.cpp tests/test_remote.cpp tests/test_ble.cpp)
+    add_executable(hsynth_tests tests/test_main.cpp tests/test_dsp.cpp tests/test_engine.cpp tests/test_io.cpp tests/test_fx.cpp tests/test_multi.cpp tests/test_voice.cpp tests/test_sfz.cpp tests/test_flac.cpp tests/test_quality.cpp tests/test_realtime.cpp tests/test_parallel.cpp tests/test_streaming.cpp tests/test_browser.cpp tests/test_fm8.cpp tests/test_fx_extra.cpp tests/test_v07.cpp tests/test_song.cpp tests/test_remote.cpp tests/test_ble.cpp tests/test_controllers.cpp)
     target_link_libraries(hsynth_tests PRIVATE hsynth Threads::Threads)
     if(ANDROID)
         set(HSYNTH_TESTS_ROOT "${HSYNTH_DEVICE_ROOT}/tests")
