@@ -1516,6 +1516,13 @@ void App::drawMonitor() {
     if (midiPorts_.empty()) ImGui::TextColored(kDim, "no MIDI input ports");
     for (auto& p : midiPorts_) ImGui::BulletText("%s", p.c_str());
     ImGui::Text("events %d   last %s", midi_.eventCount(), midi_.lastMessage().c_str());
+    if (const std::string st = midi_.status(); !st.empty()) ImGui::TextColored(kDim, "%s", st.c_str());
+#ifdef __APPLE__
+    {
+        bool ump = midi_.umpInput();
+        if (ImGui::Checkbox("MIDI 2.0 input (UMP)", &ump)) midiPorts_ = (midi_.setUmpInput(ump), midi_.openPorts());
+    }
+#endif
     if (remote_) {
         const std::string port = remote_->replyPort();
         ImGui::TextColored(kDim, "SysEx remote: %u requests%s%s", remote_->requests(), port.empty() ? "" : ", replies to ",

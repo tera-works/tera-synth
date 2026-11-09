@@ -138,6 +138,9 @@ void MidiIn::setMultiTimbral(bool on) {
     translator_.setMultiTimbral(on);
 }
 
+void MidiIn::setUmpInput(bool) {}
+std::string MidiIn::status() const { return ""; }
+
 std::string MidiIn::lastMessage() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_;
