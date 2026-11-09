@@ -75,7 +75,10 @@ bool applySetupJson(Engine& engine, const std::string& text, const std::string& 
     }
     if (learn && map && map->isObject()) {
         std::string e;
-        if (learn->fromJson(map->dump(0), e)) out.hasMidiLearn = true;
+        if (learn->fromJson(map->dump(0), e)) {
+            out.hasMidiLearn = true;
+            learn->syncStandardOverrides(engine);
+        }
         else out.warnings.push_back("MIDI learn: " + e);
     }
     if (const Json* h = root.find("host"); h && h->isObject()) out.host = *h;

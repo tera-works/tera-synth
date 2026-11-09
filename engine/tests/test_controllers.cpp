@@ -149,3 +149,22 @@ TEST(setup_round_trip_multi_and_midi_learn) {
     SetupResult r2;
     CHECK(!applySetupJson(b, "{\"format\":\"hsynth-preset\"}", "", &lb, r2, err));
 }
+
+TEST(controllers_learned_cc_replaces_the_standard_response) {
+    // CC1 learned to a part parameter: that part gets no vibrato (the parameter moves instead)
+    Engine a;
+    plainVoice(a, VaWave::Sine);
+    MidiLearn learn;
+    learn.setMappings({MidiMapping{-1, 1, P::insp(fx::Tremolo, fx::tremolo::Depth), 0, 0.0f, 1.0f}});
+    const uint8_t msg[3] = {0xB0, 1, 127};
+    learn.onMidi(msg, 3, a);
+    CHECK(a.standardCcOverridden(0, 1));
+    CHECK(!a.standardCcOverridden(1, 1));
+    CHECK_NEAR(a.getPartParam(0, P::insp(fx::Tremolo, fx::tremolo::Depth)), 1.0, 1e-4);
+    auto x = render(a, {{0.0, cc(1, 127)}, {0.0, Event::noteOn(1, 69, 1.0f)}}, 1.0);
+    CHECK_NEAR(zeroCrossFreq(x, 48000, 9600, 40000), 440.0, 1.0);
+    // mapping removed: the standard response is back with the next CC1
+    learn.setMappings({});
+    learn.onMidi(msg, 3, a);
+    CHECK(!a.standardCcOverridden(0, 1));
+}

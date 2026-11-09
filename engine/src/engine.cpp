@@ -1557,7 +1557,28 @@ void Engine::updateInserts(int part) {
                                  q == (int)Quality::High);
 }
 
-void Engine::standardControllers(PartState& ps, int n) {
+int Engine::standardCcIndex(int cc) {
+    for (int i = 0; i < 7; ++i)
+        if (kStandardCcs[i] == cc) return i;
+    return -1;
+}
+
+void Engine::setStandardCcOverride(int part, int cc, bool on) {
+    const int i = standardCcIndex(cc);
+    if (i < 0 || part < 0 || part >= kNumParts) return;
+    if (on) ccOverride_[part].fetch_or(1u << i, std::memory_order_relaxed);
+    else ccOverride_[part].fetch_and(~(1u << i), std::memory_order_relaxed);
+}
+
+bool Engine::standardCcOverridden(int part, int cc) const {
+    const int i = standardCcIndex(cc);
+    return i >= 0 && part >= 0 && part < kNumParts && (ccOverride_[part].load(std::memory_order_relaxed) >> i) & 1u;
+}
+
+void Engine::standardControllers(int part, int n) {
+    PartState& ps = parts_[part];
+    const uint32_t ovr = ccOverride_[part].load(std::memory_order_relaxed);
+    auto learned = [ovr](int cc) { return ((ovr >> standardCcIndex(cc)) & 1u) != 0; };
     // Does the preset route the mod wheel / expression itself (mod matrix)? Then it keeps
     // its own response and the standard one (vibrato / part level) stays out of the way.
     bool wheel = false, expr = false;
@@ -1569,18 +1590,20 @@ void Engine::standardControllers(PartState& ps, int n) {
             expr = expr || src == (int)ModSource::Expression || via == (int)ModSource::Expression;
         }
     }
-    ps.exprLevel = expr ? 1.0f : ps.ccExpr;
+    ps.exprLevel = expr || learned(11) ? 1.0f : ps.ccExpr;
     // CC1: vibrato 5.5 Hz, up to +-0.5 semitone at full wheel
-    if (!wheel && ps.ctx.modWheel > 0.0f) {
+    if (!wheel && !learned(1) && ps.ctx.modWheel > 0.0f) {
         ps.vibPhase += 2.0f * 3.14159265f * 5.5f * (float)n / sampleRate_;
         if (ps.vibPhase > 2.0f * 3.14159265f) ps.vibPhase -= 2.0f * 3.14159265f;
         ps.ctx.vibrato = ps.ctx.modWheel * 0.5f * std::sin(ps.vibPhase);
     } else {
         ps.ctx.vibrato = 0.0f;
     }
-    ps.ctx.ccCutoffOct = ps.ccCutoffOct;
-    ps.ctx.ccReso = ps.ccReso;
-    ps.ctx.ccGlide = ps.ccGlide;
+    ps.ctx.ccCutoffOct = learned(74) ? 0.0f : ps.ccCutoffOct;
+    ps.ctx.ccReso = learned(71) ? 0.0f : ps.ccReso;
+    ps.ctx.ccGlide = learned(5) ? -1.0f : ps.ccGlide;
+    ps.revSend = learned(91) ? 0.0f : ps.ccRev * 0.6f;
+    ps.dlySend = learned(94) ? 0.0f : ps.ccDly * 0.6f;
 }
 
 void Engine::updatePartTargets() {
@@ -1835,7 +1858,7 @@ void Engine::processMulti(float* L, float* R, int n) {
         float* bl = bus(k, 0);
         float* br = bus(k, 1);
         {
-            const float sa = std::min(1.0f, ps.p[P::SendA] + ps.ccRev * 0.6f), sb = std::min(1.0f, ps.p[P::SendB] + ps.ccDly * 0.6f);
+            const float sa = std::min(1.0f, ps.p[P::SendA] + ps.revSend), sb = std::min(1.0f, ps.p[P::SendB] + ps.dlySend);
             {
                 float pk = 0.0f;
                 for (int i = 0; i < n; ++i) pk = std::max(pk, std::max(std::fabs(bl[i]), std::fabs(br[i])));
@@ -1992,7 +2015,7 @@ void Engine::process(float* L, float* R, int n) {
         ps.ctx.pitchBendSemis = ps.pitchBend * (ps.rpnBend >= 0.0f ? ps.rpnBend : ps.p[P::BendRange]);
         ps.ctx.pedal = ps.pedal;
         ps.ctx.superKnob = p_[P::SuperKnob];  // one Super Knob for every part
-        standardControllers(ps, n);
+        standardControllers((int)(&ps - parts_), n);
     }
     VoiceContext& ctx0 = parts_[0].ctx;
 
@@ -2032,8 +2055,8 @@ void Engine::process(float* L, float* R, int n) {
             }
         }
         // send buses (post insert)
-        const float sa = std::min(1.0f, p_[P::SendA] + parts_[0].ccRev * 0.6f),
-                    sb = std::min(1.0f, p_[P::SendB] + parts_[0].ccDly * 0.6f);
+        const float sa = std::min(1.0f, p_[P::SendA] + parts_[0].revSend),
+                    sb = std::min(1.0f, p_[P::SendB] + parts_[0].dlySend);
         if (sa > 0.0f || sb > 0.0f) {
             sendUsed_ = true;
             for (int i = 0; i < n; ++i) {
