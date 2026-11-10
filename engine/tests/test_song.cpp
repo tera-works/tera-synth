@@ -193,6 +193,68 @@ TEST(song_gm_bank_selection) {
     CHECK(empty.pick(0, false) == nullptr);
 }
 
+TEST(song_bank_select_soniccell_banks) {
+    // the parser: CC0 / CC32 before a program change make a patch key; without them, the plain program
+    SmfWriter w;
+    w.bytes = {'M', 'T', 'h', 'd'};
+    w.be32(6);
+    w.be16(0);
+    w.be16(1);
+    w.be16(480);
+    std::vector<uint8_t> t;
+    for (const auto& m : std::vector<std::vector<uint8_t>>{
+             {0xB0, 0, 87}, {0xB0, 32, 67}, {0xC0, 17},   // ch 1: PRESET D #18
+             {0xC1, 30},                                   // ch 2: GM program 31, no bank
+             {0xB9, 0, 86}, {0xB9, 32, 64}, {0xC9, 7},     // ch 10: PRESET Rhythm #8
+             {0x90, 60, 100}, {0x91, 60, 100}, {0x99, 36, 100}}) {
+        SmfWriter::vlq(t, 0);
+        t.insert(t.end(), m.begin(), m.end());
+    }
+    SmfWriter::vlq(t, 480);
+    t.insert(t.end(), {0xB0, 0, 121, 0, 32, 0, 0, 0xC0, 81});  // ch 1 later: GM2 Capital #82 (running status)
+    SmfWriter::vlq(t, 0);
+    t.insert(t.end(), {0xFF, 0x2F, 0x00});
+    w.track(t);
+    Song s;
+    std::string err;
+    CHECK(parseSmf(w.bytes.data(), w.bytes.size(), s, err));
+    CHECK(s.initialProgram[0] == patchKey(87, 67, 17));
+    CHECK(patchMsb(s.initialProgram[0]) == 87 && patchLsb(s.initialProgram[0]) == 67 && patchProgram(s.initialProgram[0]) == 17);
+    CHECK(s.initialProgram[1] == 30 && !patchHasBank(s.initialProgram[1]));
+    CHECK(s.initialProgram[9] == patchKey(86, 64, 7));
+    CHECK(s.programChanges.size() == 4 && s.programChanges.back().program == patchKey(121, 0, 81));
+    int streamKey = -1;
+    for (const auto& e : s.events)
+        if (e.event.type == EventType::ProgramChange && e.event.channel == 0) streamKey = (int)e.event.value;
+    CHECK(streamKey == patchKey(121, 0, 81));
+
+    // the bank: SonicCell captures by their own bank numbers; PRESET banks never answer a plain GM program
+    std::vector<PresetInfo> ps;
+    for (const char* n : {"SC GM2 Capital 082 Saw Wave", "SC GM2 Capital 031 DistortionGt", "SC PRESET D 018 Super Saw",
+                          "SC PRESET B 058 LP Dist", "SC GM2 Var #1 031 Feedback Gt", "SC PRESET Rhythm 008 Rock Kit 1",
+                          "SC GM2 Rhythm Sets 001 GM2 STANDARD", "SC GM2 Rhythm Sets 017 GM2 POWER"}) {
+        PresetInfo p;
+        p.name = n;
+        p.category = "SonicCell";
+        p.file = std::string(n) + ".json";
+        ps.push_back(p);
+    }
+    GmBank b;
+    b.build(ps);
+    CHECK(b.pick(patchKey(87, 67, 17), false)->name == "SC PRESET D 018 Super Saw");
+    CHECK(b.pick(patchKey(87, 65, 57), false)->name == "SC PRESET B 058 LP Dist");
+    CHECK(b.pick(patchKey(121, 1, 30), false)->name == "SC GM2 Var #1 031 Feedback Gt");
+    CHECK(b.pick(patchKey(121, 2, 30), false)->name == "SC GM2 Capital 031 DistortionGt");  // missing variation
+    CHECK(b.pick(patchKey(0, 0, 81), false)->name == "SC GM2 Capital 082 Saw Wave");        // GM bank 0 = GM
+    CHECK(b.pick(patchKey(86, 64, 7), true)->name == "SC PRESET Rhythm 008 Rock Kit 1");
+    CHECK(b.pick(patchKey(120, 0, 16), true)->name == "SC GM2 Rhythm Sets 017 GM2 POWER");
+    // plain programs as before: PRESET D 018 is not GM program 17, the variation is not program 30
+    CHECK(b.pick(17, false)->name != "SC PRESET D 018 Super Saw");
+    CHECK(b.pick(30, false)->name == "SC GM2 Capital 031 DistortionGt");
+    CHECK(b.pick(0, true)->name == "SC GM2 Rhythm Sets 001 GM2 STANDARD");
+    CHECK(std::string(gmProgramName(patchKey(87, 67, 81))) == "Lead 2 (sawtooth)");
+}
+
 TEST(song_meters_seek_chase_and_end) {
     auto song = std::make_unique<Song>();
     auto ctl = [](int cc, float v) {
