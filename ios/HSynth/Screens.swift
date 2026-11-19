@@ -397,6 +397,12 @@ struct SystemScreen: View {
                     }
                     Text("Audio Input をオンにすると、マイクの音をボコーダーやルーパーに使えます（最初に許可を求めます）。")
                         .font(.system(size: 11)).foregroundColor(Hw.engrave)
+                    HStack {
+                        HwButton(title: "Screen On", lit: model.keepScreenOn) { model.keepScreenOn.toggle() }
+                        HwButton(title: "Background", lit: model.backgroundPlay) { model.backgroundPlay.toggle() }
+                    }
+                    Text("Screen On: オンにすると、HSynth を開いている間は画面が自動で消えません。Background: オンにすると、ほかのアプリに切り替えても、画面を消しても、MIDI キーボードで演奏でき、曲も鳴り続けます（電池を多めに使います）。オフにすると、バックグラウンドでは再生中の曲だけが鳴ります。イヤホンや Bluetooth の出力を抜き差ししたときは、自動で出力を開き直します。")
+                        .font(.system(size: 11)).foregroundColor(Hw.engrave)
                 }
                 Panel(title: "Recording") {
                     HStack {
