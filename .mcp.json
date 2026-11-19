@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hsynth": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["desktop/tools/hsynth_mcp.py"]
+    }
+  }
+}

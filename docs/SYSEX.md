@@ -211,6 +211,46 @@ python desktop/tools/hsynth_remote.py -p "Galaxy" shell                      # �
 
 ---
 
+## 4.1 Windows / Mac 版を CLI・AI（MCP）から操作する
+
+デスクトップ版は、MIDI のほかに、**同じ PC の中だけ**で使える TCP の窓口（`127.0.0.1:47800`）でも要求を受けます。
+仮想 MIDI ポート（loopMIDI など）は要りません。Monitor 画面の「Local control (CLI / MCP / AI)」でオン / オフできます（最初からオン）。
+中身はこの文書の SysEx と同じで、1 行に 1 つのメッセージを 16 進で送ります（`F0 7D 48 53 ... F7`）。応答と変更通知も同じ形で返ります。
+
+```bash
+python desktop/tools/hsynth_remote.py status                 # -p / --ble / --sim がなければ --tcp と同じ
+python desktop/tools/hsynth_remote.py --tcp set filter.cutoff=1200
+python desktop/tools/hsynth_remote.py --tcp req '{"op":"host.player","cmd":"play","index":0}'
+```
+
+**MCP サーバー** `desktop/tools/hsynth_mcp.py`（Python の標準ライブラリだけ）を使うと、Claude Code などの AI がツールとして操作できます。
+リポジトリの `.mcp.json` に登録してあるので、このフォルダーで Claude Code を開くと「hsynth」を使うか聞かれます。ほかの場所からは
+`claude mcp add hsynth -- python <リポジトリ>/desktop/tools/hsynth_mcp.py`。
+
+| MCP ツール | 内容 |
+|---|---|
+| `hsynth_status` / `hsynth_log` | 状態、アプリのメッセージ |
+| `hsynth_params` / `hsynth_get` / `hsynth_set` | パラメーターの一覧・読み出し・設定（名前で） |
+| `hsynth_presets` / `hsynth_load_preset` | プリセットの検索・読み込み |
+| `hsynth_play_notes` / `hsynth_panic` | 音符を鳴らす（時刻・長さ・チャンネル指定）、全消音 |
+| `hsynth_mix` / `hsynth_mode` / `hsynth_select_part` | パートのミックス、シングル / マルチ、編集パート |
+| `hsynth_player` / `hsynth_live` / `hsynth_phrase` | MIDI ファイルのプレーヤー、セットリスト、フレーズレコーダー |
+| `hsynth_tab` / `hsynth_screenshot` | 画面のタブ切り替え、ウィンドウの画像（AI が画面を見られる） |
+| `hsynth_setup_save` / `hsynth_setup_load` | セットアップファイル（全アプリ共通） |
+| `hsynth_request` | 上にない要求をそのまま送る |
+
+デスクトップ版だけの要求（`host.*`、MIDI 経由でも使えます）:
+
+| op | 内容 |
+|---|---|
+| `host.tab` `{"tab":"Player"}` | 画面のタブを切り替える |
+| `host.screenshot` `{"file"?}` | ウィンドウを BMP で保存し、パスを返す（ほかのウィンドウの後ろにあっても撮れる） |
+| `host.log` `{"lines"?}` | メッセージログ |
+| `host.player` `{"cmd":"list|play|toggle|pause|stop|next|prev|repeat","index"?,"repeat"?}` | Player 画面の曲・プレイリスト |
+| `host.live` `{"cmd":"list|recall|next|prev|add_current","index"?,"list"?}` | Live 画面のセットリスト |
+
+起動直後はライブラリを調べるので、窓口が開くまで 1 分ほどかかることがあります（ライブラリが大きいとき）。
+
 ## 5. 自作の機器・ソフトから使うには
 
 1. JSON を ASCII で作る（非 ASCII 文字は `\uXXXX`）。

@@ -14,6 +14,7 @@
 
 #include "audio_out.h"
 #include "hsynth/engine.h"
+#include "hsynth/gm_bank.h"
 #include "hsynth/json.h"
 #include "hsynth/midi_learn.h"
 #include "hsynth/params.h"
@@ -22,6 +23,7 @@
 #include "midi_in.h"
 #include "midi_out.h"
 #include "remote_link.h"
+#include "local_control.h"
 
 struct ImVec2;
 
@@ -49,6 +51,8 @@ struct AppSettings {
     bool midiOutClock = false;
     bool midiOutEcho = true;  // screen / PC keyboard notes also go to the MIDI output
     int midiOutChannel = 0;
+    bool localControl = true;  // CLI / MCP control on 127.0.0.1 (local_control.h)
+    int localPort = 47800;
 };
 
 class App {
@@ -230,8 +234,16 @@ private:
 
     // SysEx remote control (docs/SYSEX.md)
     std::unique_ptr<RemoteLink> remote_;
-    uint32_t remoteSeen_ = 0;
+    std::unique_ptr<LocalControl> local_;  // CLI / MCP on this PC
+    std::string localError_;
+    uint32_t remoteSeen_ = 0, localSeen_ = 0;
     void startRemote();
+    void startLocal();
+    hsynth::RemoteControl::Config remoteCfg_;
+    hsynth::RemoteControl::Hooks remoteHooks_;
+    // "host.*" requests of the remote protocol (worker thread): screenshot, tab, log, player, live
+    bool hostOp(const std::string& op, const hsynth::Json& req, hsynth::Json& reply);
+    bool runOnUi(std::function<void()> fn, int timeoutMs = 5000);  // waits for the UI thread
 
     // multi / scenes
     std::string partNames_[hsynth::kNumParts];
@@ -243,12 +255,73 @@ private:
     int sceneEdit_ = -1;
     char sceneName_[64] = "";
 
+    // screens of the phone apps (app_mobile.cpp)
+    // Player: MIDI files in <data>/midi, playlists (<data>/playlists.json), 16-channel mixer
+    struct Playlist { std::string name; std::vector<std::string> songs; };
+    fs::path songsDir() const;
+    void refreshSongs();
+    void loadPlaylists();
+    void savePlaylists();
+    std::string loadSongFile(const std::string& path);  // any thread; "" = ok
+    void playSong(int index);
+    void playerNext(bool manual);
+    void playerApplyMix();
+    void playerTick();
+    double songTempoAt(double t) const;
+    void drawPlayer();
+    void drawPlaylist();
+    std::vector<fs::path> allSongs_, songs_;
+    std::vector<Playlist> playlists_;
+    int activePlaylist_ = -1, songIndex_ = -1, repeatMode_ = 1;  // repeat: 0 off, 1 all, 2 one
+    uint32_t lastSongEnd_ = 0;
+    bool songsScanned_ = false, playerShowList_ = false, playlistEdit_ = false;
+    std::atomic<bool> songLoading_{false};
+    std::string songName_, playerMsg_;
+    std::vector<std::pair<double, double>> songTempos_;
+    std::vector<hsynth::SongPart> songParts_;
+    std::unique_ptr<hsynth::SongProgramLoader> programs_;
+    mutable std::mutex songMutex_;
+    bool chMute_[hsynth::kNumParts] = {}, chSolo_[hsynth::kNumParts] = {}, chVolSet_[hsynth::kNumParts] = {};
+    float chVol_[hsynth::kNumParts] = {}, chLevel_[hsynth::kNumParts] = {};
+    float seekTarget_ = -1;
+    char playlistName_[64] = "";
+    // Live: set lists in <data>/setlists (library presets, sound / multi snapshots)
+    struct SetEntry { int kind = 0; std::string name, file; };  // kind 0 library (file = preset path), 1 sound, 2 multi
+    struct SetList { std::string name; std::vector<SetEntry> entries; };
+    fs::path setListDir() const;
+    void loadSetLists();
+    void saveSetLists();
+    void addCurrentToSet();
+    void recallSetEntry(int k);
+    void drawLive();
+    std::vector<SetList> setLists_;
+    int activeSet_ = -1, setCurrent_ = -1;
+    bool setEdit_ = false, setListsLoaded_ = false;
+    char setName_[64] = "";
+    // Sample: record the input / output, trim, loop, save as an instrument
+    void drawSample();
+    std::vector<float> takeL_, takeR_;
+    int takeRate_ = 48000, takeRoot_ = 60, dragHandle_ = -1;
+    int64_t takeStart_ = 0, takeEnd_ = 0, loopStart_ = 0, loopEnd_ = 0;
+    bool takeLoop_ = false, takeNormalize_ = true, takeFromInput_ = true, sampling_ = false;
+    char takeName_[64] = "My Sample";
+    std::string sampleMsg_;
+    // Perform: Super Knob, scale lock, chord mode, phrase recorder
+    void drawPerform();
+    std::string phraseMsg_;
+    // Edit graphs
+    void drawEnvGraph(int attackId, int decayId, int sustainId, int releaseId);
+    void drawFilterGraph();
+    void drawFmAlgorithm(int layer);
+    int envDrag_ = -1;
+
     // autotest
     void autotestStep();
     bool autotest_ = false;
     fs::path autotestDir_;
     double autotestStart_ = -1;
     int autotestStage_ = 0;
+    double autotestMark_ = 0;  // time a stage started (stages after the song load)
     int forceTab_ = -1;
     std::string screenshotRequest_;
     bool quitRequested_ = false;

@@ -21,6 +21,9 @@ Examples:
   python hsynth_remote.py -p HSynth watch --what params status
   python hsynth_remote.py -p HSynth req '{"op":"phrase","cmd":"record","bars":4}'
   python hsynth_remote.py -p HSynth shell          (type JSON or commands interactively)
+  python hsynth_remote.py --tcp status          (the Windows / Mac app on this PC: no MIDI driver needed)
+  python hsynth_remote.py --tcp req '{"op":"host.screenshot"}'
+  python hsynth_remote.py status                (no -p / --ble / --sim: same as --tcp)
   python hsynth_remote.py --sim engine/build-desktop/hsynth_remote_sim.exe hello   (no MIDI needed)
   python hsynth_remote.py ble-scan                     (Bluetooth LE MIDI devices nearby; pip install bleak)
   python hsynth_remote.py --ble Galaxy status         (straight over Bluetooth, no MIDI driver needed)
@@ -265,6 +268,58 @@ class Sim:
     def close(self):
         self.p.stdin.close()
         self.p.wait(5)
+
+
+LOCAL_PORT = 47800
+
+
+class Tcp:
+    """The desktop app's local control (127.0.0.1:47800): the same SysEx, one hex line each."""
+
+    def __init__(self, where=None):
+        import socket
+        host, _, port = (where or '').rpartition(':') if where and ':' in where else ('127.0.0.1', '', where or LOCAL_PORT)
+        self.addr = (host or '127.0.0.1', int(port))
+        try:
+            self.sock = socket.create_connection(self.addr, timeout=3)
+        except OSError as e:
+            raise SystemExit(f'HSynth is not listening on {self.addr[0]}:{self.addr[1]} ({e}). Start hsynth_desktop '
+                             f'and turn on Monitor > "Local control (CLI / MCP / AI)".')
+        self.sock.settimeout(None)
+        self.rx = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+        self.name = f'tcp {self.addr[0]}:{self.addr[1]}'
+
+    def _read(self):
+        buf = b''
+        while True:
+            try:
+                data = self.sock.recv(65536)
+            except OSError:
+                break
+            if not data:
+                break
+            buf += data
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                line = line.strip()
+                if line:
+                    self.rx.put(bytes(int(x, 16) for x in line.split()))
+
+    def send(self, msg):
+        self.sock.sendall((' '.join(f'{b:02X}' for b in msg) + '\n').encode('ascii'))
+
+    def recv(self, timeout):
+        try:
+            return self.rx.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
 
 
 BLE_SERVICE = '03b80e5a-ede8-4b33-a751-6ce34ec4c700'
@@ -778,11 +833,15 @@ def main():
     ap.add_argument('--out', help='output port (default: --port)')
     ap.add_argument('--device', type=int, default=ALL_DEVICES, help='device id 0..126 (default 127 = all)')
     ap.add_argument('--ble', metavar='NAME', help='connect over Bluetooth LE MIDI to this device (pip install bleak)')
+    ap.add_argument('--tcp', nargs='?', const=str(LOCAL_PORT), metavar='[HOST:]PORT',
+                    help=f'the desktop app on this PC (local control, default 127.0.0.1:{LOCAL_PORT})')
     ap.add_argument('--sim', help='path of hsynth_remote_sim (instead of MIDI)')
     ap.add_argument('--sim-args', default='', help='arguments for the simulator')
     ap.add_argument('-v', '--verbose', action='store_true', help='print the SysEx bytes')
     ap.add_argument('command', nargs=argparse.REMAINDER)
     a = ap.parse_args()
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')  # song / preset names (the Windows console code page is not UTF-8)
     if not a.command:
         ap.print_help()
         return 2
@@ -799,6 +858,8 @@ def main():
         port = Sim(a.sim, shlex.split(a.sim_args))
     elif a.ble:
         port = Ble(a.ble)
+    elif a.tcp or not (a.port or a.inp or a.out):
+        port = Tcp(a.tcp)
     else:
         port = backend_class()(a.inp or a.port, a.out or a.port)
     try:

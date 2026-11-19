@@ -14,6 +14,7 @@
 #include "hsynth/sample_set.h"
 #include "hsynth/setup.h"
 #include "hsynth/wav.h"
+#include <future>
 #include "imgui.h"
 #include "platform.h"
 
@@ -102,7 +103,13 @@ void App::shutdown() {
         taskCv_.notify_all();
         loader_.join();
     }
+    if (local_) local_->stop();
+    local_.reset();
     remote_.reset();  // before the MIDI ports and the engine
+    {
+        std::lock_guard<std::mutex> lock(songMutex_);
+        if (programs_) programs_->stop();
+    }
     midi_.closeAll();
     audio_.stop();
     saveSettings();
@@ -178,6 +185,8 @@ void App::loadSettings() {
     if (auto x = j.find("midiOutClock")) s_.midiOutClock = x->boolean();
     if (auto x = j.find("midiOutEcho")) s_.midiOutEcho = x->boolean();
     num("midiOutChannel", s_.midiOutChannel);
+    if (auto x = j.find("localControl")) s_.localControl = x->boolean();
+    num("localPort", s_.localPort);
     if (auto x = j.find("lastPreset"); x && x->isString()) s_.lastPreset = x->string();
 }
 
@@ -206,6 +215,8 @@ void App::saveSettings() {
     j.set("midiOutClock", s_.midiOutClock);
     j.set("midiOutEcho", s_.midiOutEcho);
     j.set("midiOutChannel", s_.midiOutChannel);
+    j.set("localControl", s_.localControl);
+    j.set("localPort", s_.localPort);
     std::ofstream out(lib_.dataDir() / "settings.json", std::ios::binary);
     out << j.dump(2);
 }
@@ -218,6 +229,9 @@ Json App::hostSettingsJson() const {
     h.set("voices", s_.voices);
     h.set("quality", s_.quality);
     h.set("mpe", s_.mpe);
+#ifdef __APPLE__
+    h.set("umpInput", midi_.umpInput());
+#endif
     return h;
 }
 
@@ -234,6 +248,12 @@ void App::applyHostSettings(const Json& host) {
         s_.mpe = v->boolean();
         midi_.setMpe(s_.mpe);
     }
+#ifdef __APPLE__
+    if (const Json* v = host.find("umpInput")) {
+        midi_.setUmpInput(v->boolean());
+        midiPorts_ = midi_.openPorts();
+    }
+#endif
     saveSettings();
 }
 
@@ -352,7 +372,7 @@ void App::init(float dpiScale) {
 void App::startRemote() {
     RemoteControl::Config cfg;
     cfg.deviceName = "HSynth Desktop";
-    cfg.version = "0.8.6";
+    cfg.version = "0.8.7";
     cfg.libraryRoot = pathToUtf8(lib_.libraryRoot());
     cfg.presetDirs = {pathToUtf8(lib_.dataDir() / "presets" / "factory"), pathToUtf8(lib_.userPresetDir())};
     cfg.userPresetDir = pathToUtf8(lib_.userPresetDir());
@@ -375,7 +395,26 @@ void App::startRemote() {
             log("remote: preset \"" + name + "\"");
         });
     };
+    hooks.loadSong = [this](const std::string& path, Json& info) -> std::string {
+        const std::string err = loadSongFile(path);
+        if (!err.empty()) return err;
+        info.set("name", pathToUtf8(utf8ToPath(path).stem()));
+        info.set("length", engine_.songLength());
+        return "";
+    };
+    hooks.extra = [this](const std::string& op, const Json& req, Json& reply) { return hostOp(op, req, reply); };
+    remoteCfg_ = cfg;
+    remoteHooks_ = hooks;
     remote_ = std::make_unique<RemoteLink>(engine_, midi_, cfg, hooks);
+    if (s_.localControl) startLocal();
+}
+
+void App::startLocal() {
+    if (local_) local_->stop();
+    local_ = std::make_unique<LocalControl>(engine_, remoteCfg_, remoteHooks_);
+    localError_.clear();
+    if (local_->start(s_.localPort, localError_)) log("local control (CLI / MCP): 127.0.0.1:" + std::to_string(s_.localPort));
+    else log("local control: " + localError_, 1);
 }
 
 void App::startAudio() {
@@ -602,6 +641,7 @@ void App::frame() {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     drawTopBar();
+    playerTick();
     if (ImGui::BeginTabBar("tabs")) {
         auto flag = [&](int i) { return forceTab_ == i ? ImGuiTabItemFlags_SetSelected : 0; };
         if (ImGui::BeginTabItem("Play", nullptr, flag(0))) { drawPlay(); ImGui::EndTabItem(); }
@@ -609,6 +649,10 @@ void App::frame() {
         if (ImGui::BeginTabItem("Browser", nullptr, flag(4))) { drawBrowser(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Multi", nullptr, flag(5))) { drawMulti(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Seq", nullptr, flag(6))) { drawSeq(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Perform", nullptr, flag(7))) { drawPerform(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Live", nullptr, flag(8))) { drawLive(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Player", nullptr, flag(9))) { drawPlayer(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Sample", nullptr, flag(10))) { drawSample(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Library", nullptr, flag(2))) { drawLibrary(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Monitor", nullptr, flag(3))) { drawMonitor(); ImGui::EndTabItem(); }
         forceTab_ = -1;
@@ -745,8 +789,58 @@ void App::autotestStep() {
                 ++autotestStage_;
             }
             break;
-        case 25:
-            if (t > 21.0) {
+        case 25: if (t > 20.6) { forceTab_ = 7; ++autotestStage_; } break;
+        case 26:
+            if (t > 21.2) {
+                shot("11_perform.bmp");
+                forceTab_ = 1;
+                for (int i = 0; i < (int)kPages.size(); ++i)
+                    if (std::string(kPages[(size_t)i].title) == "Env") forceEditPage_ = i;
+                ++autotestStage_;
+            }
+            break;
+        case 27:
+            if (t > 21.8) {
+                shot("12_edit_env.bmp");
+                for (int i = 0; i < (int)kPages.size(); ++i)
+                    if (std::string(kPages[(size_t)i].title) == "FM") forceEditPage_ = i;
+                ++autotestStage_;
+            }
+            break;
+        case 28:
+            if (t > 22.4) {
+                shot("13_edit_fm.bmp");
+                refreshSongs();
+                if (!songs_.empty()) playSong(0);
+                forceTab_ = 9;
+                ++autotestStage_;
+            }
+            break;
+        case 29:
+            if (t > 25.0 && (!songLoading_ || t > 45.0)) {
+                shot("14_player.bmp");
+                log("player: " + std::to_string(songs_.size()) + " songs, \"" + songName_ + "\" " +
+                    (engine_.songPlaying() ? "playing" : "stopped") + " at " + std::to_string(engine_.songPosition()) + " s, voices " +
+                    std::to_string(engine_.stats().activeVoices));
+                forceTab_ = 8;
+                autotestMark_ = t;
+                ++autotestStage_;
+            }
+            break;
+        case 30:
+            if (t > autotestMark_ + 2.5) {
+                log("player: after 2.5 s " + std::string(engine_.songPlaying() ? "playing" : "stopped") + " at " +
+                    std::to_string(engine_.songPosition()) + " s, voices " + std::to_string(engine_.stats().activeVoices));
+                engine_.songPlay(false);
+                shot("15_live.bmp");
+                forceTab_ = 10;
+                autotestMark_ = t;
+                ++autotestStage_;
+            }
+            break;
+        case 31: if (t > autotestMark_ + 0.6) { shot("16_sample.bmp"); autotestMark_ = t; ++autotestStage_; } break;
+        case 32:
+            if (t > autotestMark_ + 0.6) {
                 std::vector<float> inter;
                 const size_t frames = audio_.stopRecording(inter);
                 std::vector<float> l(frames), r(frames);
@@ -1114,6 +1208,10 @@ void App::drawEdit() {
     for (std::string g : page.groups) {
         if (const auto pos = g.find("%L"); pos != std::string::npos) g.replace(pos, 2, layerName);
         ImGui::TextColored(kAccent, "%s", g.c_str());
+        if (g == "Amp Env") drawEnvGraph(P::AmpAttack, P::AmpDecay, P::AmpSustain, P::AmpRelease);
+        if (g == "Mod Env") drawEnvGraph(P::Env2Attack, P::Env2Decay, P::Env2Sustain, P::Env2Release);
+        if (g == "Filter") drawFilterGraph();
+        if (g == layerName + " / FM") drawFmAlgorithm(editLayer_);
         if (g == "Mod Matrix") ImGui::TextColored(kDim, "destination += source x via x amount   (via 'none' = 1)");
         for (int i = 0; i < (int)table.size(); ++i) {
             const ParamInfo& info = table[(size_t)i];
@@ -1528,6 +1626,21 @@ void App::drawMonitor() {
         const std::string port = remote_->replyPort();
         ImGui::TextColored(kDim, "SysEx remote: %u requests%s%s", remote_->requests(), port.empty() ? "" : ", replies to ",
                            port.c_str());
+    }
+    {
+        bool on = s_.localControl;
+        if (ImGui::Checkbox("Local control (CLI / MCP / AI)", &on)) {
+            s_.localControl = on;
+            saveSettings();
+            if (!on && local_) { local_->stop(); local_.reset(); log("local control off"); }
+            if (on) startLocal();
+        }
+        ImGui::SameLine();
+        if (local_ && local_->running())
+            ImGui::TextColored(kDim, "127.0.0.1:%d   %d client(s), %u requests", local_->port(), local_->clients(), local_->requests());
+        else if (!localError_.empty())
+            ImGui::TextColored(kWarn, "%s", localError_.c_str());
+        ImGui::TextColored(kDim, "python desktop/tools/hsynth_remote.py --tcp status   |   MCP: desktop/tools/hsynth_mcp.py");
     }
     drawMidiOut();
     drawMidiMap();

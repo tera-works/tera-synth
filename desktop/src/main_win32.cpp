@@ -90,13 +90,41 @@ void setVsync(int interval) {
     if (auto f = (Fn)(void*)wglGetProcAddress("wglSwapIntervalEXT")) f(interval);
 }
 
-// Save the back buffer as a 24-bit BMP (used by --autotest).
-void saveScreenshot(const std::string& path) {
+// Save the frame as a 24-bit BMP (--autotest, host.screenshot). The draw data is rendered
+// again into an offscreen framebuffer: the back buffer has nothing where other windows
+// cover this one, which is the usual case when an AI agent asks for a screenshot.
+void saveScreenshot(const std::string& path, ImDrawData* drawData) {
+    using GenFb = void(APIENTRY*)(GLsizei, GLuint*);
+    using BindFb = void(APIENTRY*)(GLenum, GLuint);
+    using FbTex = void(APIENTRY*)(GLenum, GLenum, GLenum, GLuint, GLint);
+    static auto genFb = (GenFb)(void*)wglGetProcAddress("glGenFramebuffers");
+    static auto bindFb = (BindFb)(void*)wglGetProcAddress("glBindFramebuffer");
+    static auto fbTex = (FbTex)(void*)wglGetProcAddress("glFramebufferTexture2D");
+    static auto delFb = (GenFb)(void*)wglGetProcAddress("glDeleteFramebuffers");
+    constexpr GLenum kFramebuffer = 0x8D40, kColor0 = 0x8CE0;
     const int w = g_width, h = g_height;
     std::vector<unsigned char> px((size_t)w * h * 3);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadBuffer(GL_BACK);
-    glReadPixels(0, 0, w, h, 0x80E0 /*GL_BGR*/, GL_UNSIGNED_BYTE, px.data());
+    GLuint fb = 0, tex = 0;
+    if (genFb && bindFb && fbTex && delFb && drawData) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        genFb(1, &fb);
+        bindFb(kFramebuffer, fb);
+        fbTex(kFramebuffer, kColor0, GL_TEXTURE_2D, tex, 0);
+        glViewport(0, 0, w, h);
+        glClearColor(0.067f, 0.078f, 0.10f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(drawData);
+        glReadPixels(0, 0, w, h, 0x80E0 /*GL_BGR*/, GL_UNSIGNED_BYTE, px.data());
+        bindFb(kFramebuffer, 0);
+        delFb(1, &fb);
+        glDeleteTextures(1, &tex);
+    } else {
+        glReadBuffer(GL_BACK);
+        glReadPixels(0, 0, w, h, 0x80E0 /*GL_BGR*/, GL_UNSIGNED_BYTE, px.data());
+    }
     const int rowSize = (w * 3 + 3) & ~3;
     BITMAPFILEHEADER fh{};
     BITMAPINFOHEADER ih{};
@@ -244,7 +272,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         const std::string shot = app.takeScreenshotRequest();
-        if (!shot.empty()) saveScreenshot(shot);
+        if (!shot.empty()) saveScreenshot(shot, ImGui::GetDrawData());
         SwapBuffers(g_dc);
         if (app.wantsQuit()) done = true;
     }

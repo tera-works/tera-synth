@@ -44,6 +44,8 @@ if(WIN32)
         src/app.cpp
         src/app_browser.cpp
         src/app_perform.cpp
+        src/app_mobile.cpp
+        src/local_control.cpp
         src/midi_out_win32.cpp
         src/audio_out.cpp
         src/miniaudio_impl.cpp
@@ -57,7 +59,7 @@ if(WIN32)
         UNICODE _UNICODE NOMINMAX
         HSYNTH_DEFAULT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
         HSYNTH_DEFAULT_FACTORY_DIR="${HSYNTH_ROOT}/android/app/src/main/assets")
-    target_link_libraries(hsynth_desktop PRIVATE hsynth imgui opengl32 gdi32 dwmapi winmm ole32 comdlg32 shell32 uuid imm32)
+    target_link_libraries(hsynth_desktop PRIVATE hsynth imgui opengl32 gdi32 dwmapi winmm ole32 comdlg32 shell32 uuid imm32 ws2_32)
     if(MINGW)
         # static runtime: no dependency on whichever libstdc++ DLL is on PATH
         # -municode: wWinMain entry point
@@ -87,6 +89,8 @@ elseif(APPLE)
         src/app.cpp
         src/app_browser.cpp
         src/app_perform.cpp
+        src/app_mobile.cpp
+        src/local_control.cpp
         src/audio_out.cpp
         src/miniaudio_impl.cpp
         src/midi_in_coremidi.cpp

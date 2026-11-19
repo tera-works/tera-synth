@@ -41,12 +41,24 @@
 |---|---|
 | PC（Windows / macOS） | Monitor 画面 →「Setup (export / import)」→「Export setup...」/「Import setup...」。`desktop/data/setups/` に置いたファイルは「Load 名前」ボタンで 1 回で読み込めます |
 | Android | Multi 画面 →「セットアップを書き出す…」/「セットアップを読み込む…」 |
-| iPhone / iPad | System 画面 →「Setup」パネル →「Export…」/「Import…」 |
+| iPhone / iPad | System 画面 →「Setup」パネル →「Export…」/「Import…」/「Save to setups」、`setups` フォルダーのファイルは「Load 名前」 |
 | PC から SysEx で | `hsynth_remote.py setup-save band.json` / `setup-load band.json`（[SYSEX.md](SYSEX.md)） |
 
 - サンプルの場所は、ライブラリのフォルダーからの相対パスで入っています。読み込む側にも同じライブラリ（例: `library/user/soniccell/...`）が必要です。
 - 書き出したときにシングルモードならシングルの音色として、マルチモードなら 16 パートとして読み込まれます。
 - オーディオ機器名やバッファーなど、その機械に固有の設定は入りません。
+- どのアプリで書き出したファイルも、どのアプリでも読み込めます。設定（`host`）は、各アプリが自分の持っている項目を書き、読むときは自分に関係する項目だけを使います（ほかは無視）。
+
+| `host` の項目 | 意味 | Windows | Mac | iPhone | Android |
+|---|---|---|---|---|---|
+| `voices` | 同時発音数 | ○ | ○ | ○（上限 128） | ○ |
+| `quality` | 品質 0 Low / 1 Normal / 2 High | ○ | ○ | ○ | ○ |
+| `mpe` | MPE で受ける | ○ | ○ | － | ○ |
+| `umpInput` | MIDI 2.0（UMP）で受ける | － | ○ | ○ | － |
+| `screenOn` | 開いている間は画面を消さない | － | － | ○ | 常にオン |
+| `background` | バックグラウンド・画面オフでも演奏できる | － | － | ○ | － |
+
+- 置き場所: Windows / Mac は `desktop/data/setups/`、iPhone は「ファイル」アプリの HSynth > `setups`（System 画面の「Load …」ボタン、「Save to setups」で保存）。
 
 ## 3. おすすめセットアップ「SonicCell Keyboard」
 
