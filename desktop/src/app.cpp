@@ -105,6 +105,7 @@ void App::shutdown() {
     }
     if (local_) local_->stop();
     local_.reset();
+    if (listThread_.joinable()) listThread_.join();
     remote_.reset();  // before the MIDI ports and the engine
     {
         std::lock_guard<std::mutex> lock(songMutex_);
@@ -326,10 +327,17 @@ void App::init(float dpiScale) {
     fs::create_directories(lib_.dataDir(), ec);
     loadSettings();
     log("HSynth desktop - data folder: " + pathToUtf8(lib_.dataDir()));
+    auto t0 = std::chrono::steady_clock::now();
+    auto lap = [&](const char* what) {
+        const auto t1 = std::chrono::steady_clock::now();
+        log(std::string("startup: ") + what + " " + std::to_string((int)std::chrono::duration<double, std::milli>(t1 - t0).count()) + " ms");
+        t0 = t1;
+    };
     const std::string err = lib_.syncFactory();
     if (!err.empty()) log(err, 2);
+    lap("sync factory");
     applyStreamingSettings();
-    refreshLists();
+    refreshLists();  // in the background: the window, audio and control ports do not wait for it
     refreshScenes();
     {
         std::string e;
@@ -348,7 +356,9 @@ void App::init(float dpiScale) {
         for (int i = 0; i < (int)devices_.size(); ++i)
             if (devices_[(size_t)i].name == s_.deviceName) s_.deviceIndex = i;
     }
+    lap("audio devices");
     startAudio();
+    lap("audio start");
 
     midi_.setMpe(s_.mpe);
     midiPorts_ = midi_.openAll();
@@ -437,8 +447,26 @@ void App::startAudio() {
 }
 
 void App::refreshLists() {
-    presets_ = lib_.presets();
-    samples_ = lib_.sampleSources();
+    // preset and sample lists of a large library take a while: scanned on a thread of their own
+    if (listScanning_) { listRescan_ = true; return; }
+    listScanning_ = true;
+    if (listThread_.joinable()) listThread_.join();
+    listThread_ = std::thread([this] {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto presets = lib_.presets();
+        auto samples = lib_.sampleSources();
+        const int ms = (int)std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        post([this, presets = std::move(presets), samples = std::move(samples), ms]() mutable {
+            presets_ = std::move(presets);
+            samples_ = std::move(samples);
+            listScanning_ = false;
+            log("library: " + std::to_string(presets_.size()) + " presets, " + std::to_string(samples_.size()) +
+                " sample sets (" + std::to_string(ms) + " ms)");
+            if (currentPreset_.empty() && !presets_.empty() && (s_.lastPreset.empty() || !fs::exists(utf8ToPath(s_.lastPreset))))
+                loadPreset(presets_.front().file);  // first start: the list was not there yet
+            if (listRescan_) { listRescan_ = false; refreshLists(); }
+        });
+    });
     rescanBrowser();
 }
 

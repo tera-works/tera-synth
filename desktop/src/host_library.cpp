@@ -6,6 +6,14 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include "hsynth/json.h"
 
@@ -33,6 +41,35 @@ fs::path uniquePath(const fs::path& dir, const std::string& name) {
         p = dir / utf8ToPath(stem + " (" + std::to_string(i) + ")" + e);
         if (!fs::exists(p)) return p;
     }
+}
+
+// The entries of one folder: name + directory flag. On Windows FindFirstFileEx hands the
+// attributes over with the names; std::filesystem asks the file system once per file
+// there (a library of 90,000 samples took 40 s to list that way).
+struct DirItem { fs::path path; bool dir; };
+std::vector<DirItem> listDir(const fs::path& d) {
+    std::vector<DirItem> out;
+#ifdef _WIN32
+    WIN32_FIND_DATAW fd;
+    const std::wstring pattern = (d / L"*").wstring();
+    HANDLE h = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        const std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;  // no junction loops
+        out.push_back({d / n, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0});
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+#else
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(d, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        std::error_code e2;
+        if (it->is_symlink(e2)) continue;
+        out.push_back({it->path(), it->is_directory(e2)});
+    }
+#endif
+    return out;
 }
 
 std::string presetTitle(const fs::path& f) {
@@ -69,11 +106,9 @@ std::string HostLibrary::syncFactory() {
 
 std::vector<HostLibrary::Entry> HostLibrary::presets() const {
     std::vector<Entry> f, u;
-    std::error_code ec;
     for (auto& [dir, list, user] : {std::tuple{data_ / "presets" / "factory", &f, false}, std::tuple{userPresetDir(), &u, true}}) {
-        if (!fs::exists(dir)) continue;
-        for (auto& e : fs::directory_iterator(dir, ec))
-            if (e.is_regular_file() && ext(e.path()) == ".json") list->push_back({e.path(), presetTitle(e.path()), user});
+        for (const auto& e : listDir(dir))
+            if (!e.dir && ext(e.path) == ".json") list->push_back({e.path, presetTitle(e.path), user});
     }
     std::sort(f.begin(), f.end(), [](auto& a, auto& b) { return a.file.filename() < b.file.filename(); });
     std::sort(u.begin(), u.end(), [](auto& a, auto& b) { return lower(a.title) < lower(b.title); });
@@ -88,32 +123,27 @@ std::vector<HostLibrary::Entry> HostLibrary::sampleSources() const {
     std::error_code ec;
     if (!fs::exists(root)) return out;
     const std::string rootStr = pathToUtf8(root) + "/";
-    // WAVs that belong to an SFZ instrument (same folder or one level up) are not
-    // listed separately. Cached per folder: large libraries have hundreds of WAVs.
-    std::map<fs::path, bool> sfzDirCache;
-    auto dirHasSfz = [&](const fs::path& d) {
-        if (d.empty()) return false;
-        auto it = sfzDirCache.find(d);
-        if (it != sfzDirCache.end()) return it->second;
-        bool has = false;
-        std::error_code e2;
-        if (fs::exists(d, e2))
-            for (auto& x : fs::directory_iterator(d, e2))
-                if (x.is_regular_file() && ext(x.path()) == ".sfz") { has = true; break; }
-        sfzDirCache[d] = has;
-        return has;
-    };
-    for (auto it = fs::recursive_directory_iterator(root, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec || !it->is_regular_file()) continue;
-        const fs::path& p = it->path();
-        const std::string e = ext(p);
-        const bool user = pathToUtf8(p).rfind(pathToUtf8(userRoot), 0) == 0;
-        // lexical prefix strip: fs::relative() queries the file system per call
-        std::string rel = pathToUtf8(p);
-        if (rel.rfind(rootStr, 0) == 0) rel = rel.substr(rootStr.size());
-        if (e == ".sfz") out.push_back({p, rel, user});
-        else if (e == ".wav" && !dirHasSfz(p.parent_path()) && !dirHasSfz(p.parent_path().parent_path()))
-            out.push_back({p, rel, user});
+    const std::string userStr = pathToUtf8(userRoot);
+    // Every SFZ, and the WAVs that do not belong to an SFZ instrument (one in the same
+    // folder or one level up). One listing per folder, depth first.
+    std::vector<std::pair<fs::path, bool>> stack{{root, false}};  // folder, its parent has an SFZ
+    while (!stack.empty()) {
+        const auto [dir, parentSfz] = stack.back();
+        stack.pop_back();
+        const std::vector<DirItem> items = listDir(dir);
+        bool hasSfz = false;
+        for (const auto& it : items)
+            if (!it.dir && ext(it.path) == ".sfz") { hasSfz = true; break; }
+        for (const auto& it : items) {
+            if (it.dir) { stack.push_back({it.path, hasSfz}); continue; }
+            const std::string e = ext(it.path);
+            if (e != ".sfz" && (e != ".wav" || hasSfz || parentSfz)) continue;
+            // lexical prefix strip: fs::relative() queries the file system per call
+            std::string rel = pathToUtf8(it.path);
+            const bool user = rel.rfind(userStr, 0) == 0;
+            if (rel.rfind(rootStr, 0) == 0) rel = rel.substr(rootStr.size());
+            out.push_back({it.path, rel, user});
+        }
     }
     std::sort(out.begin(), out.end(), [](auto& a, auto& b) {
         return a.user != b.user ? !a.user : lower(a.title) < lower(b.title);

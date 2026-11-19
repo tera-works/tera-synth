@@ -249,7 +249,7 @@ python desktop/tools/hsynth_remote.py --tcp req '{"op":"host.player","cmd":"play
 | `host.player` `{"cmd":"list|play|toggle|pause|stop|next|prev|repeat","index"?,"repeat"?}` | Player 画面の曲・プレイリスト |
 | `host.live` `{"cmd":"list|recall|next|prev|add_current","index"?,"list"?}` | Live 画面のセットリスト |
 
-起動直後はライブラリを調べるので、窓口が開くまで 1 分ほどかかることがあります（ライブラリが大きいとき）。
+窓口は起動して 1 秒ほどで開きます。プリセットとサンプルの一覧は裏で作るので、大きなライブラリでは数秒あとに揃います（`host.log` に「library: … presets」と出ます）。
 
 ## 5. 自作の機器・ソフトから使うには
 

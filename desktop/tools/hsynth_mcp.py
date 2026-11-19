@@ -343,7 +343,7 @@ def handle(msg):
             'capabilities': {'tools': {}},
             'serverInfo': SERVER,
             'instructions': 'HSynth is a hybrid synthesizer running on this PC. Start the desktop app first '
-                            '(desktop/build/hsynth_desktop.exe); the library scan can take a minute. Use '
+                            '(desktop/build/hsynth_desktop.exe); it answers within a few seconds. Use '
                             'hsynth_params / hsynth_get before setting values, and hsynth_screenshot to see the UI.'}})
     elif method == 'ping':
         send({'jsonrpc': '2.0', 'id': mid, 'result': {}})

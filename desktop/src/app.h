@@ -172,6 +172,8 @@ private:
     std::string currentPresetName_ = "Init";
     std::string presetComment_;
     std::atomic<bool> busy_{false};
+    std::thread listThread_;  // refreshLists()
+    bool listScanning_ = false, listRescan_ = false;
 
     // play state
     int mouseNote_ = -1;
