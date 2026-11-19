@@ -23,6 +23,7 @@
 #include "midi_in.h"
 #include "midi_out.h"
 #include "remote_link.h"
+#include "hw_ui.h"
 #include "local_control.h"
 
 struct ImVec2;
@@ -121,7 +122,14 @@ private:
     hsynth::Json hostSettingsJson() const;
     void applyHostSettings(const hsynth::Json& host);  // UI thread
     void importSetup(const std::string& file);
-    bool paramContextMenu(const hsynth::ParamInfo& info, int id, float& v);  // true if v changed
+    bool paramContextMenu(const hsynth::ParamInfo& info, int id, float& v, bool inlineInfo = true);  // true if v changed
+    void showLcd(const std::string& text);  // the header LCD shows this for a moment
+    std::string lcdOverride_;
+    double lcdOverrideUntil_ = 0;
+    unsigned int lastParamItem_ = 0;  // ImGuiID of the last parameter control (flow layout)
+    float typeValue_ = 0;
+    int tab_ = 0;
+    char presetFilter_[96] = "";
     // browser
     void rescanBrowser();
     void updateBrowserResults();

@@ -12,8 +12,8 @@ using namespace hsynth;
 
 namespace {
 
-const ImVec4 kAccent(0.31f, 0.76f, 0.97f, 1.0f);
-const ImVec4 kDim(0.55f, 0.58f, 0.64f, 1.0f);
+const ImVec4 kAccent(1.0f, 0.62f, 0.22f, 1.0f);  // LED orange
+const ImVec4 kDim(0.63f, 0.65f, 0.70f, 1.0f);  // engraved
 constexpr size_t kUndoDepth = 100;
 
 std::string noteName(int n) {

@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "app.h"
+#include "hw_ui.h"
 #include "hsynth/host_utils.h"
 #include "hsynth/preset.h"
 #include "hsynth/streaming.h"
@@ -15,8 +16,8 @@ using namespace hsynth;
 
 namespace {
 
-const ImVec4 kAccent(0.31f, 0.76f, 0.97f, 1.0f);
-const ImVec4 kDim(0.55f, 0.58f, 0.64f, 1.0f);
+const ImVec4 kAccent(1.0f, 0.62f, 0.22f, 1.0f);  // LED orange
+const ImVec4 kDim(0.63f, 0.65f, 0.70f, 1.0f);  // engraved
 const ImVec4 kWarn(1.0f, 0.72f, 0.30f, 1.0f);
 const ImVec4 kStar(1.0f, 0.82f, 0.25f, 1.0f);
 
@@ -51,11 +52,13 @@ void App::saveMidiMap() {
 
 // ------------------------------------------------------------------ MIDI learn
 
-bool App::paramContextMenu(const ParamInfo& info, int id, float& v) {
+bool App::paramContextMenu(const ParamInfo& info, int id, float& v, bool inlineInfo) {
     bool changed = false;
     const std::string mapped = learn_.describe(id);
     const bool armed = learn_.armedParam() == id;
-    if (armed) {
+    if (!inlineInfo) {
+        if (armed) ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), hw::kLed, 3, 0, 2);
+    } else if (armed) {
         ImGui::SameLine();
         ImGui::TextColored(kWarn, "move a knob / slider on your MIDI controller...");
     } else if (!mapped.empty()) {
@@ -63,7 +66,7 @@ bool App::paramContextMenu(const ParamInfo& info, int id, float& v) {
         ImGui::TextColored(kDim, "[%s]", mapped.c_str());
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s%s%s\nright-click: reset / MIDI learn, ctrl+click: type a value", info.name.c_str(),
+        ImGui::SetTooltip("%s%s%s\ndrag up / down (Shift: fine), double-click: default\nright-click: reset / MIDI learn, ctrl+click: type a value", info.name.c_str(),
                           mapped.empty() ? "" : "\nMIDI: ", mapped.c_str());
     if (ImGui::BeginPopupContextItem("param_ctx")) {
         ImGui::TextColored(kAccent, "%s", info.label.c_str());
@@ -638,9 +641,8 @@ void App::drawSceneBar() {
         ImGui::PushID(i);
         const SceneSlot& s = scenes_[i];
         const bool cur = i == currentScene_;
-        if (cur) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (!s.used) ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-        if (ImGui::Button(std::to_string(i + 1).c_str(), ImVec2(30 * d, 0))) {
+        if (i) ImGui::SameLine(0, 4 * d);
+        if (hw::Button(std::to_string(i + 1).c_str(), s.used ? &cur : nullptr, 44 * d, true)) {
             if (s.used) recallScene(i);
             else {
                 sceneEdit_ = i;
@@ -648,8 +650,6 @@ void App::drawSceneBar() {
                 ImGui::OpenPopup("store");
             }
         }
-        if (!s.used) ImGui::PopStyleColor();
-        if (cur) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s\nclick: %s   right-click: store / clear", s.used ? s.name.c_str() : "(empty)",
                               s.used ? "recall" : "store the current setup");

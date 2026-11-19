@@ -46,6 +46,7 @@ if(WIN32)
         src/app_perform.cpp
         src/app_mobile.cpp
         src/local_control.cpp
+        src/hw_ui.cpp
         src/midi_out_win32.cpp
         src/audio_out.cpp
         src/miniaudio_impl.cpp
@@ -91,6 +92,7 @@ elseif(APPLE)
         src/app_perform.cpp
         src/app_mobile.cpp
         src/local_control.cpp
+        src/hw_ui.cpp
         src/audio_out.cpp
         src/miniaudio_impl.cpp
         src/midi_in_coremidi.cpp

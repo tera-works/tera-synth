@@ -22,8 +22,8 @@ using namespace hsynth;
 
 namespace {
 
-const ImVec4 kAccent(0.31f, 0.76f, 0.97f, 1.0f);
-const ImVec4 kDim(0.55f, 0.58f, 0.64f, 1.0f);
+const ImVec4 kAccent(1.0f, 0.62f, 0.22f, 1.0f);  // LED orange
+const ImVec4 kDim(0.63f, 0.65f, 0.70f, 1.0f);  // engraved
 const ImVec4 kWarn(1.0f, 0.72f, 0.30f, 1.0f);
 const ImVec4 kErr(0.94f, 0.33f, 0.31f, 1.0f);
 
@@ -670,22 +670,23 @@ void App::frame() {
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     drawTopBar();
     playerTick();
-    if (ImGui::BeginTabBar("tabs")) {
-        auto flag = [&](int i) { return forceTab_ == i ? ImGuiTabItemFlags_SetSelected : 0; };
-        if (ImGui::BeginTabItem("Play", nullptr, flag(0))) { drawPlay(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Edit", nullptr, flag(1))) { drawEdit(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Browser", nullptr, flag(4))) { drawBrowser(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Multi", nullptr, flag(5))) { drawMulti(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Seq", nullptr, flag(6))) { drawSeq(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Perform", nullptr, flag(7))) { drawPerform(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Live", nullptr, flag(8))) { drawLive(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Player", nullptr, flag(9))) { drawPlayer(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Sample", nullptr, flag(10))) { drawSample(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Library", nullptr, flag(2))) { drawLibrary(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Monitor", nullptr, flag(3))) { drawMonitor(); ImGui::EndTabItem(); }
-        forceTab_ = -1;
-        ImGui::EndTabBar();
+    if (forceTab_ >= 0) { tab_ = forceTab_; forceTab_ = -1; }
+    ImGui::Separator();
+    ImGui::BeginChild("screen", ImVec2(0, 0));
+    switch (tab_) {
+        case 1: drawEdit(); break;
+        case 2: drawLibrary(); break;
+        case 3: drawMonitor(); break;
+        case 4: drawBrowser(); break;
+        case 5: drawMulti(); break;
+        case 6: drawSeq(); break;
+        case 7: drawPerform(); break;
+        case 8: drawLive(); break;
+        case 9: drawPlayer(); break;
+        case 10: drawSample(); break;
+        default: drawPlay(); break;
     }
+    ImGui::EndChild();
     ImGui::End();
     if (autotest_) autotestStep();
 }
@@ -913,68 +914,139 @@ void App::autotestStep() {
 }
 
 void App::drawTopBar() {
-    if (ImGui::Button("<")) stepPreset(-1);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(260 * dpiScale_);
-    if (ImGui::BeginCombo("##preset", currentPresetName_.c_str())) {
-        for (auto& e : presets_) {
-            const std::string label = e.title + (e.user ? "  (user)" : "") + "##" + pathToUtf8(e.file);
-            if (ImGui::Selectable(label.c_str(), e.file == currentPreset_)) loadPreset(e.file);
-        }
-        ImGui::EndCombo();
+    const float s = dpiScale_;
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const float barH = 66 * s;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float right = ImGui::GetWindowPos().x + ImGui::GetWindowWidth();
+    dl->AddRectFilledMultiColor(ImVec2(ImGui::GetWindowPos().x, p0.y - 8 * s), ImVec2(right, p0.y + barH),
+                                IM_COL32(41, 41, 43, 255), IM_COL32(41, 41, 43, 255), IM_COL32(23, 23, 25, 255),
+                                IM_COL32(23, 23, 25, 255));
+    // logo
+    {
+        ImFont* f = hw::fonts().logo;
+        if (f) ImGui::PushFont(f);
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + 12 * s));
+        ImGui::TextColored(hw::v4(hw::kLed), "H");
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted("SYNTH");
+        if (f) ImGui::PopFont();
     }
-    ImGui::SameLine();
-    if (ImGui::Button(">")) stepPreset(1);
-    ImGui::SameLine();
-    float vol = engine_.getParam(P::MasterVolume);
-    ImGui::SetNextItemWidth(160 * dpiScale_);
-    if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) engine_.setParam(P::MasterVolume, vol);
-    ImGui::SameLine();
+    auto at = [&](float gap, float dy) {
+        ImGui::SameLine(0, gap * s);
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, p0.y + dy * s));
+    };
+    // the LCD: preset (or the control being moved) and the engine state; click = preset list
+    at(16, 4);
+    {
+        const bool over = !lcdOverride_.empty() && ImGui::GetTime() < lcdOverrideUntil_;
+        std::string main = over ? lcdOverride_ : currentPresetName_;
+        if (engine_.multiTimbral() && !over)
+            main = std::to_string(engine_.selectedPart() + 1) + ": " + partNames_[engine_.selectedPart()];
+        const auto& es = engineStats_;
+        const auto& as = audioStats_;
+        char sub[200];
+        std::snprintf(sub, sizeof sub, "VOICE %d/%d  DSP %d%% (PK %d%%)  LATE %d  %s %d/%d%s", es.activeVoices,
+                      engine_.maxVoices(), (int)(es.cpuLoad * 100), (int)(es.cpuLoadPeak * 100), as.lateCallbacks,
+                      as.running ? "AUDIO" : "AUDIO OFF", as.sampleRate, as.periodFrames, busy_ ? "  LOADING" : "");
+        hw::Lcd2(main.c_str(), sub, 430 * s);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("click: preset list");
+        if (ImGui::IsItemClicked()) {
+            ImGui::OpenPopup("presetlist");
+            presetFilter_[0] = 0;
+        }
+        if (ImGui::BeginPopup("presetlist")) {
+            ImGui::SetNextItemWidth(420 * s);
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::InputTextWithHint("##pf", "search", presetFilter_, sizeof presetFilter_);
+            ImGui::BeginChild("pl", ImVec2(420 * s, 460 * s));
+            std::string want = presetFilter_;
+            for (auto& c : want) c = (char)std::tolower((unsigned char)c);
+            for (auto& e : presets_) {
+                if (!want.empty()) {
+                    std::string t = e.title;
+                    for (auto& c : t) c = (char)std::tolower((unsigned char)c);
+                    if (t.find(want) == std::string::npos) continue;
+                }
+                const std::string label = e.title + (e.user ? "  (user)" : "") + "##" + pathToUtf8(e.file);
+                if (ImGui::Selectable(label.c_str(), e.file == currentPreset_)) {
+                    loadPreset(e.file);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndChild();
+            ImGui::EndPopup();
+        }
+    }
+    at(8, 14);
+    if (hw::Button("<")) stepPreset(-1);
+    at(4, 14);
+    if (hw::Button(">")) stepPreset(1);
+    // master volume
+    at(14, 8);
+    {
+        float vol = engine_.getParam(P::MasterVolume);
+        ImGui::BeginGroup();
+        hw::Label("Volume");
+        ImGui::PushStyleColor(ImGuiCol_Text, hw::v4(hw::kLcdFg));
+        ImGui::SetNextItemWidth(110 * s);
+        if (ImGui::SliderFloat("##vol", &vol, 0.0f, 1.0f, "%.2f")) engine_.setParam(P::MasterVolume, vol);
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
+    }
+    at(14, 14);
     {
         const bool playing = engine_.transportPlaying();
-        if (playing) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.55f, 0.3f, 1.0f));
-        if (ImGui::Button(playing ? "Stop##transport" : "Play##transport")) setTransport(!playing);
-        if (playing) ImGui::PopStyleColor();
+        if (hw::Button("Run##transport", &playing)) setTransport(!playing);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("transport: step sequencers (free mode), MIDI clock out");
-        ImGui::SameLine();
+        at(6, 8);
         float tempo = engine_.getParam(P::fxChain(P::FxTempo));
-        ImGui::SetNextItemWidth(90 * dpiScale_);
-        if (ImGui::DragFloat("##tempo", &tempo, 0.2f, 20, 300, "%.1f bpm")) engine_.setParam(P::fxChain(P::FxTempo), tempo);
-        ImGui::SameLine();
+        ImGui::BeginGroup();
+        hw::Label("Tempo");
+        ImGui::PushStyleColor(ImGuiCol_Text, hw::v4(hw::kLcdFg));
+        ImGui::SetNextItemWidth(100 * s);
+        if (ImGui::DragFloat("##tempo", &tempo, 0.2f, 20, 300, "%.1f BPM")) engine_.setParam(P::fxChain(P::FxTempo), tempo);
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
+        at(14, 14);
         ImGui::BeginDisabled(undo_.empty());
-        if (ImGui::Button("Undo")) undo();
+        if (hw::Button("Undo")) undo();
         ImGui::EndDisabled();
-        ImGui::SameLine();
+        at(4, 14);
         ImGui::BeginDisabled(redo_.empty());
-        if (ImGui::Button("Redo")) redo();
+        if (hw::Button("Redo")) redo();
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (comparing_) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.45f, 0.1f, 1.0f));
-        if (ImGui::Button(comparing_ ? "Compare: saved" : "Compare")) toggleCompare();
-        if (comparing_) ImGui::PopStyleColor();
+        at(4, 14);
+        const bool cmp = comparing_;
+        if (hw::Button("Compare", &cmp)) toggleCompare();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("switch between your edit and the preset as loaded");
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Panic")) {
+    at(4, 14);
+    if (hw::Button("Panic")) {
         engine_.sendEvent(Event::control(EventType::AllSoundOff, 0));
         for (auto& h : held_) h = 0;
     }
-    ImGui::SameLine();
-    const auto& es = engineStats_;
-    const auto& as = audioStats_;
-    const bool hot = es.cpuLoadPeak > 0.8f || as.lateCallbacks > 0;
-    ImGui::TextColored(hot ? kWarn : kDim, "  voices %d/%d   DSP %.0f%% (peak %.0f%%)   late cb %d   %s %d Hz / %d   %s",
-                       es.activeVoices, engine_.maxVoices(), es.cpuLoad * 100, es.cpuLoadPeak * 100, as.lateCallbacks,
-                       as.running ? "audio" : "AUDIO OFF", as.sampleRate, as.periodFrames, busy_ ? "loading..." : "");
-    if (engine_.multiTimbral()) {
-        ImGui::TextColored(kAccent, "Multi: presets load into part %d", engine_.selectedPart() + 1);
-        if (currentScene_ >= 0) {
-            ImGui::SameLine();
-            ImGui::TextColored(kDim, "   scene %d  %s", currentScene_ + 1, scenes_[currentScene_].name.c_str());
-        }
-    } else if (!presetComment_.empty()) {
-        ImGui::TextColored(kDim, "%s", presetComment_.c_str());
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + barH + 4 * s));
+
+    // mode buttons (the phone apps' header row)
+    struct Mode { const char* name; int tab; };
+    static const Mode kModes[] = {{"Play", 0}, {"Edit", 1}, {"Browser", 4}, {"Multi", 5}, {"Seq", 6}, {"Perform", 7},
+                                  {"Live", 8}, {"Player", 9}, {"Sample", 10}, {"Library", 2}, {"Monitor", 3}};
+    for (int i = 0; i < (int)(sizeof kModes / sizeof kModes[0]); ++i) {
+        if (i) ImGui::SameLine(0, 5 * s);
+        const bool on = tab_ == kModes[i].tab;
+        if (hw::Button(kModes[i].name, &on)) tab_ = kModes[i].tab;
     }
+    if (engine_.multiTimbral()) {
+        ImGui::SameLine(0, 16 * s);
+        std::string sc;
+        if (currentScene_ >= 0) sc = "   scene " + std::to_string(currentScene_ + 1) + " " + scenes_[currentScene_].name;
+        ImGui::TextColored(hw::v4(hw::kEngrave), "MULTI: presets load into part %d%s", engine_.selectedPart() + 1, sc.c_str());
+    } else if (!presetComment_.empty()) {
+        ImGui::SameLine(0, 16 * s);
+        ImGui::TextColored(hw::v4(hw::kEngrave), "%s", presetComment_.c_str());
+    }
+    ImGui::Dummy(ImVec2(0, 2 * s));
 }
 
 // ------------------------------------------------------------------ play
@@ -1014,18 +1086,70 @@ void App::handlePcKeyboard() {
 
 void App::drawPlay() {
     const float d = dpiScale_;
+    const auto& table = paramTable();
+    // preset
+    hw::BeginPanel("Preset");
+    hw::Lcd(currentPresetName_.c_str(), 260 * d, false, true);
+    if (hw::Button("<##pp")) stepPreset(-1);
+    ImGui::SameLine(0, 4 * d);
+    if (hw::Button(">##pn")) stepPreset(1);
+    ImGui::SameLine(0, 4 * d);
+    if (hw::Button("All Off")) {
+        engine_.sendEvent(Event::control(EventType::AllSoundOff, 0));
+        for (auto& h : held_) h = 0;
+    }
+    hw::EndPanel();
+    // the sound's main knobs
+    hw::SameLinePanel();
+    hw::BeginPanel("Sound");
+    lastParamItem_ = 0;
+    for (const char* n : {"filter.cutoff", "filter.reso", "amp.attack", "amp.release", "filter.envamt"}) {
+        const int id = findParam(n);
+        if (id >= 0) drawParam(table[(size_t)id], id);
+    }
+    hw::EndPanel();
+    // macro knobs, each with "+" to route it
+    hw::SameLinePanel();
+    hw::BeginPanel("Macros");
+    for (int i = 0; i < 4; ++i) {
+        if (i) ImGui::SameLine(0, 6 * d);
+        ImGui::BeginGroup();
+        ImGui::PushID(i);
+        lastParamItem_ = 0;
+        drawParam(table[(size_t)(P::Macro1 + i)], P::Macro1 + i);
+        if (hw::Button("+ assign", nullptr, 74 * d, true)) ImGui::OpenPopup("assign");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("route macro %d to a destination", i + 1);
+        quickAssign("assign", (ModSource)((int)ModSource::Macro1 + i));
+        ImGui::PopID();
+        ImGui::EndGroup();
+    }
+    hw::EndPanel();
+    // keyboard
+    hw::SameLinePanel();
+    hw::BeginPanel("Keyboard");
+    hw::Label("Octave");
+    if (hw::Button("<##oct")) s_.firstNote = std::max(12, s_.firstNote - 12);
+    ImGui::SameLine(0, 4 * d);
+    hw::Lcd(std::to_string(s_.firstNote / 12 - 1).c_str(), 44 * d);
+    ImGui::SameLine(0, 4 * d);
+    if (hw::Button(">##oct")) s_.firstNote = std::min(96, s_.firstNote + 12);
+    ImGui::SameLine(0, 14 * d);
+    if (hw::Button("-##keys")) s_.whiteKeys = std::max(7, s_.whiteKeys - 7);
+    ImGui::SameLine(0, 4 * d);
+    hw::Lcd((std::to_string(s_.whiteKeys) + " keys").c_str(), 90 * d);
+    ImGui::SameLine(0, 4 * d);
+    if (hw::Button("+##keys")) s_.whiteKeys = std::min(52, s_.whiteKeys + 7);
+    const bool hold = sustain_;
+    if (hw::Button("Hold", &hold)) {
+        sustain_ = !sustain_;
+        engine_.sendEvent(Event::control(EventType::Sustain, sustain_ ? 1.0f : 0.0f));
+    }
+    ImGui::SameLine(0, 4 * d);
+    const bool slide = s_.slideBend;
+    if (hw::Button("Slide = bend", &slide)) s_.slideBend = !s_.slideBend;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("left / right drag on a key = per-note pitch (MPE style)");
+    hw::EndPanel();
     drawSceneBar();
-    drawMacros();
-    if (ImGui::Button("Oct -")) s_.firstNote = std::max(12, s_.firstNote - 12);
-    ImGui::SameLine();
-    if (ImGui::Button("Oct +")) s_.firstNote = std::min(96, s_.firstNote + 12);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(120 * d);
-    ImGui::SliderInt("white keys", &s_.whiteKeys, 7, 52);
-    ImGui::SameLine();
-    ImGui::Checkbox("Slide = per-note bend (MPE style)", &s_.slideBend);
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Hold (sustain)", &sustain_)) engine_.sendEvent(Event::control(EventType::Sustain, sustain_ ? 1.0f : 0.0f));
     ImGui::TextColored(kDim,
                        "PC keys: A W S E D F T G Y H U J K O L P ;  = C%d..   Z/X octave   C/V velocity (%.2f)   Space sustain   "
                        "Mouse: click height = velocity, drag up/down = per-note timbre",
@@ -1036,12 +1160,18 @@ void App::drawPlay() {
     const float h = std::max(120.0f * d, avail.y - 4 * d);
 
     // pitch bend (springs back) and mod wheel
-    ImGui::VSliderFloat("##bend", ImVec2(stripW, h), &bend_, -1.0f, 1.0f, "Bend\n%.2f");
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hw::v4(IM_COL32(20, 21, 23, 255)));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, hw::v4(IM_COL32(28, 29, 32, 255)));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, hw::v4(IM_COL32(34, 35, 38, 255)));
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 10 * d);
+    ImGui::VSliderFloat("##bend", ImVec2(stripW, h), &bend_, -1.0f, 1.0f, "BEND\n%.2f");
     if (ImGui::IsItemActive()) engine_.sendEvent(Event::control(EventType::PitchBend, bend_));
     else if (bend_ != 0.0f) { bend_ = 0.0f; engine_.sendEvent(Event::control(EventType::PitchBend, 0.0f)); }
     ImGui::SameLine();
-    if (ImGui::VSliderFloat("##mod", ImVec2(stripW, h), &mod_, 0.0f, 1.0f, "Mod\n%.2f"))
+    if (ImGui::VSliderFloat("##mod", ImVec2(stripW, h), &mod_, 0.0f, 1.0f, "MOD\n%.2f"))
         engine_.sendEvent(Event::control(EventType::ModWheel, mod_));
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
     ImGui::SameLine();
     drawKeyboard(ImGui::GetContentRegionAvail().x, h);
 }
@@ -1104,8 +1234,8 @@ void App::drawKeyboard(float width, float height) {
     if (ImGui::IsItemDeactivated()) stopNote();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 white = IM_COL32(236, 238, 242, 255), whiteOn = IM_COL32(120, 200, 245, 255);
-    const ImU32 black = IM_COL32(24, 26, 32, 255), blackOn = IM_COL32(40, 140, 200, 255);
+    const ImU32 white = IM_COL32(226, 228, 232, 255), whiteOn = IM_COL32(255, 170, 90, 255);
+    const ImU32 black = IM_COL32(22, 23, 26, 255), blackOn = IM_COL32(230, 120, 20, 255);
     const ImU32 border = IM_COL32(60, 64, 72, 255), label = IM_COL32(90, 96, 110, 255);
     for (int i = 0; i < whites; ++i) {
         const int n = whiteToNote(i);
@@ -1128,71 +1258,137 @@ void App::drawKeyboard(float width, float height) {
 
 // ------------------------------------------------------------------ edit
 
+namespace {
+// knob position 0..1 <-> parameter value (log for exponential ranges)
+float toNorm(const ParamInfo& p, float v) {
+    if (p.max <= p.min) return 0.0f;
+    if (p.curve == ParamCurve::Exp && p.min > 0) return std::clamp(std::log(v / p.min) / std::log(p.max / p.min), 0.0f, 1.0f);
+    return std::clamp((v - p.min) / (p.max - p.min), 0.0f, 1.0f);
+}
+float fromNorm(const ParamInfo& p, float n) {
+    float v = p.curve == ParamCurve::Exp && p.min > 0 ? p.min * std::pow(p.max / p.min, n) : p.min + (p.max - p.min) * n;
+    if (p.kind == ParamKind::Int) v = std::round(v);
+    return std::clamp(v, p.min, p.max);
+}
+std::string fmtValue(const ParamInfo& p, float v) {
+    char b[48];
+    switch (p.kind) {
+        case ParamKind::Enum: {
+            const int i = (int)std::lround(v);
+            return i >= 0 && i < (int)p.options.size() ? p.options[(size_t)i] : std::to_string(i);
+        }
+        case ParamKind::Bool: return v > 0.5f ? "on" : "off";
+        case ParamKind::Int: std::snprintf(b, sizeof b, "%d %s", (int)std::lround(v), p.unit.c_str()); break;
+        default:
+            if (p.unit == "Hz" && v >= 1000.0f) std::snprintf(b, sizeof b, "%.2f kHz", v / 1000.0f);
+            else if (p.unit == "s" && v < 1.0f) std::snprintf(b, sizeof b, "%.0f ms", v * 1000.0f);
+            else if (std::fabs(v) >= 100.0f) std::snprintf(b, sizeof b, "%.0f %s", v, p.unit.c_str());
+            else if (std::fabs(v) >= 10.0f) std::snprintf(b, sizeof b, "%.1f %s", v, p.unit.c_str());
+            else std::snprintf(b, sizeof b, "%.2f %s", v, p.unit.c_str());
+    }
+    std::string s = b;
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+}
+}  // namespace
+
+// One parameter as a hardware control: knob (numbers), LCD selector (choices) or LED
+// switch (on / off). Consecutive parameters flow left to right and wrap.
 void App::drawParam(const ParamInfo& info, int id) {
+    const float s = dpiScale_;
+    const float w = info.kind == ParamKind::Enum ? 170 * s : 74 * s;
+    // flow: on the same line as the previous parameter control if it fits
+    if (ImGui::GetItemID() == lastParamItem_ && lastParamItem_ != 0) {
+        const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+        if (ImGui::GetItemRectMax().x + 10 * s + w < right) ImGui::SameLine(0, 6 * s);
+    }
     ImGui::PushID(id);
     float v = getP(id);
     bool changed = false;
-    ImGui::SetNextItemWidth(std::min(520.0f * dpiScale_, ImGui::GetContentRegionAvail().x - 200 * dpiScale_));
     switch (info.kind) {
         case ParamKind::Enum: {
-            int idx = (int)std::lround(v);
-            const char* preview = idx >= 0 && idx < (int)info.options.size() ? info.options[(size_t)idx].c_str() : "?";
-            if (ImGui::BeginCombo(info.label.c_str(), preview)) {
+            const int idx = (int)std::lround(v);
+            const std::string preview = fmtValue(info, v);
+            if (hw::BeginLcdCombo("##e", info.label.c_str(), preview.c_str(), w)) {
                 for (int k = 0; k < (int)info.options.size(); ++k)
                     if (ImGui::Selectable(info.options[(size_t)k].c_str(), k == idx)) { v = (float)k; changed = true; }
-                ImGui::EndCombo();
+                hw::EndLcdCombo();
             }
+            ImGui::EndGroup();
             break;
         }
         case ParamKind::Bool: {
             bool b = v > 0.5f;
-            if (ImGui::Checkbox(info.label.c_str(), &b)) { v = b ? 1.0f : 0.0f; changed = true; }
-            break;
-        }
-        case ParamKind::Int: {
-            int i = (int)std::lround(v);
-            const std::string fmt = "%d " + info.unit;
-            if (ImGui::SliderInt(info.label.c_str(), &i, (int)info.min, (int)info.max, fmt.c_str())) { v = (float)i; changed = true; }
+            if (hw::Switch("##b", &b, info.label.c_str())) { v = b ? 1.0f : 0.0f; changed = true; }
             break;
         }
         default: {
-            const std::string fmt = (std::fabs(info.max) >= 100 ? "%.1f " : "%.3f ") + info.unit;
-            const ImGuiSliderFlags fl = info.curve == ParamCurve::Exp && info.min > 0 ? ImGuiSliderFlags_Logarithmic : 0;
-            changed = ImGui::SliderFloat(info.label.c_str(), &v, info.min, info.max, fmt.c_str(), fl);
+            float n = toNorm(info, v);
+            bool reset = false;
+            const std::string val = fmtValue(info, v);
+            const bool bipolar = info.min < 0 && info.max > 0;
+            if (hw::Knob("##k", &n, info.label.c_str(), val.c_str(), &reset, bipolar)) { v = fromNorm(info, n); changed = true; }
+            if (reset) { v = info.def; changed = true; }
+            if (ImGui::IsItemClicked() && ImGui::GetIO().KeyCtrl) { typeValue_ = v; ImGui::OpenPopup("type"); }
+            if (ImGui::BeginPopup("type")) {
+                ImGui::Text("%s (%s)", info.label.c_str(), info.unit.c_str());
+                ImGui::SetNextItemWidth(160 * s);
+                if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+                if (ImGui::InputFloat("##val", &typeValue_, 0, 0, "%.4g", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    v = std::clamp(typeValue_, info.min, info.max);
+                    changed = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
             break;
         }
     }
-    if (paramContextMenu(info, id, v)) changed = true;
-    if (changed) setP(id, v);
+    if (paramContextMenu(info, id, v, false)) changed = true;
+    if (changed) {
+        setP(id, v);
+        showLcd(info.label + "  " + fmtValue(info, v));
+    }
     ImGui::PopID();
+    lastParamItem_ = ImGui::GetItemID();
+}
+
+void App::showLcd(const std::string& text) {
+    lcdOverride_ = text;
+    lcdOverrideUntil_ = ImGui::GetTime() + 1.5;
 }
 
 void App::drawEdit() {
     const auto& table = paramTable();
-    if (ImGui::BeginTabBar("pages")) {
-        for (int i = 0; i < (int)kPages.size(); ++i) {
-            const ImGuiTabItemFlags fl = forceEditPage_ == i ? ImGuiTabItemFlags_SetSelected : 0;
-            if (ImGui::BeginTabItem(kPages[(size_t)i].title, nullptr, fl)) { editPage_ = i; ImGui::EndTabItem(); }
-        }
-        forceEditPage_ = -1;
-        ImGui::EndTabBar();
+    const float s = dpiScale_;
+    // pages as a row of buttons (LED = this page)
+    if (forceEditPage_ >= 0) { editPage_ = forceEditPage_; forceEditPage_ = -1; }
+    for (int i = 0; i < (int)kPages.size(); ++i) {
+        if (i) ImGui::SameLine(0, 4 * s);
+        const bool on = editPage_ == i;
+        if (hw::Button(kPages[(size_t)i].title, &on, 0, true)) editPage_ = i;
     }
+    ImGui::Dummy(ImVec2(0, 2 * s));
     const EditPage& page = kPages[(size_t)editPage_];
     if (page.groups.empty()) {
+        ImGui::BeginChild("fxpage", ImVec2(0, 0));
         drawFx();
+        ImGui::EndChild();
         return;
     }
     const std::string layerName = std::string("Layer ") + (char)('A' + editLayer_);
+    ImGui::BeginChild("params", ImVec2(0, 0));
     if (page.perLayer) {
-        ImGui::Text("Layer:");
+        hw::BeginPanel("Layer", 0);
         for (int l = 0; l < 3; ++l) {
-            ImGui::SameLine();
-            const std::string b = std::string(1, (char)('A' + l));
-            if (ImGui::RadioButton(b.c_str(), editLayer_ == l)) editLayer_ = l;
+            if (l) ImGui::SameLine(0, 4 * s);
+            const bool on = editLayer_ == l;
+            const std::string b1 = std::string(1, (char)('A' + l));
+            if (hw::Button(b1.c_str(), &on, 54 * s)) editLayer_ = l;
         }
         if (engine_.multiTimbral()) {
-            ImGui::SameLine();
-            ImGui::TextColored(kAccent, "   editing part %d (%s)", editPart() + 1, partNames_[editPart()].c_str());
+            ImGui::SameLine(0, 16 * s);
+            hw::Lcd(("PART " + std::to_string(editPart() + 1) + "  " + partNames_[editPart()]).c_str(), 300 * s, true);
         }
         const int typeId = P::layer(editLayer_, P::LType);
         const int type = (int)std::lround(getP(typeId));
@@ -1200,55 +1396,58 @@ void App::drawEdit() {
         const std::string typeName = table[(size_t)typeId].options[(size_t)type];
         std::string want = expected;
         for (auto& c : want) c = (char)std::tolower((unsigned char)c);
+        lastParamItem_ = 0;
         drawParam(table[(size_t)typeId], typeId);
         if (typeName != want) {
-            ImGui::SameLine();
+            ImGui::SameLine(0, 12 * s);
             ImGui::TextColored(kWarn, "layer is '%s' - switch Type to '%s' to hear these", typeName.c_str(), want.c_str());
         }
         if (expected == "WT") {
             const std::string name = engine_.partSampleSetName(editPart(), editLayer_);
-            ImGui::Text("User table: %s", name.empty() ? "(none - built-in tables only)" : name.c_str());
+            hw::Lcd(("TABLE  " + (name.empty() ? std::string("(built-in tables only)") : name)).c_str(), 420 * s);
             ImGui::SameLine();
-            if (ImGui::Button("Load .wav...")) {
+            if (hw::Button("Load .wav...", nullptr, 0, true)) {
                 const auto files = platform::openFiles({{"Wavetable (*.wav)", "*.wav"}}, false);
                 if (!files.empty()) loadWavetable(editLayer_, utf8ToPath(files.front()));
             }
             ImGui::SameLine();
-            if (ImGui::Button("Unload##wt")) { engine_.setPartSampleSet(editPart(), editLayer_, nullptr); engine_.collectGarbage(); }
+            if (hw::Button("Unload##wt", nullptr, 0, true)) { engine_.setPartSampleSet(editPart(), editLayer_, nullptr); engine_.collectGarbage(); }
             ImGui::TextColored(kDim, "Serum-style 2048-sample frames (up to 256) or one single cycle of any length; select Table 'user'");
         }
         if (expected == "PCM") {
             const std::string name = engine_.partSampleSetName(editPart(), editLayer_);
-            ImGui::Text("Samples: %s", name.empty() ? "(none)" : name.c_str());
+            hw::Lcd(("SAMPLES  " + (name.empty() ? std::string("(none)") : name)).c_str(), 420 * s);
             ImGui::SameLine();
-            if (ImGui::Button("Choose...")) ImGui::OpenPopup("choose_samples");
+            if (hw::Button("Choose...", nullptr, 0, true)) ImGui::OpenPopup("choose_samples");
             ImGui::SameLine();
-            if (ImGui::Button("Unload")) { engine_.setPartSampleSet(editPart(), editLayer_, nullptr); engine_.collectGarbage(); }
+            if (hw::Button("Unload", nullptr, 0, true)) { engine_.setPartSampleSet(editPart(), editLayer_, nullptr); engine_.collectGarbage(); }
             if (ImGui::BeginPopup("choose_samples")) {
+                ImGui::BeginChild("samplelist", ImVec2(520 * s, 420 * s));
                 for (auto& e : samples_)
-                    if (ImGui::Selectable(e.title.c_str())) loadSamples(editLayer_, e.file);
+                    if (ImGui::Selectable(e.title.c_str())) { loadSamples(editLayer_, e.file); ImGui::CloseCurrentPopup(); }
+                ImGui::EndChild();
                 ImGui::EndPopup();
             }
         }
-        ImGui::Separator();
+        hw::EndPanel();
     }
-    ImGui::BeginChild("params", ImVec2(0, 0));
+    const float panelW = ImGui::GetContentRegionAvail().x - 12 * s;
     for (std::string g : page.groups) {
         if (const auto pos = g.find("%L"); pos != std::string::npos) g.replace(pos, 2, layerName);
-        ImGui::TextColored(kAccent, "%s", g.c_str());
+        hw::BeginPanel(g.c_str(), panelW);
         if (g == "Amp Env") drawEnvGraph(P::AmpAttack, P::AmpDecay, P::AmpSustain, P::AmpRelease);
         if (g == "Mod Env") drawEnvGraph(P::Env2Attack, P::Env2Decay, P::Env2Sustain, P::Env2Release);
         if (g == "Filter") drawFilterGraph();
         if (g == layerName + " / FM") drawFmAlgorithm(editLayer_);
         if (g == "Mod Matrix") ImGui::TextColored(kDim, "destination += source x via x amount   (via 'none' = 1)");
+        lastParamItem_ = 0;  // a new flow of controls
         for (int i = 0; i < (int)table.size(); ++i) {
             const ParamInfo& info = table[(size_t)i];
             if (info.group != g) continue;
             if (page.perLayer && info.name.size() > 5 && info.name.compare(info.name.size() - 5, 5, ".type") == 0) continue;
             drawParam(info, i);
-            if (g == "Mod Matrix" && info.name.find(".amt") != std::string::npos) ImGui::Spacing();
         }
-        ImGui::Spacing();
+        hw::EndPanel();
     }
     ImGui::EndChild();
 }

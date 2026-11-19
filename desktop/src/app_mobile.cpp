@@ -28,13 +28,13 @@ using namespace hsynth;
 
 namespace {
 
-const ImVec4 kAccent(0.31f, 0.76f, 0.97f, 1.0f);
-const ImVec4 kDim(0.55f, 0.58f, 0.64f, 1.0f);
+const ImVec4 kAccent(1.0f, 0.62f, 0.22f, 1.0f);  // LED orange
+const ImVec4 kDim(0.63f, 0.65f, 0.70f, 1.0f);  // engraved
 const ImVec4 kWarn(1.0f, 0.72f, 0.30f, 1.0f);
-const ImU32 kLine = IM_COL32(80, 194, 247, 255);
-const ImU32 kFill = IM_COL32(80, 194, 247, 40);
-const ImU32 kGrid = IM_COL32(70, 74, 82, 255);
-const ImU32 kBg = IM_COL32(16, 18, 22, 255);
+const ImU32 kLine = IM_COL32(174, 234, 0, 255);  // LCD
+const ImU32 kFill = IM_COL32(174, 234, 0, 36);
+const ImU32 kGrid = IM_COL32(44, 62, 22, 255);
+const ImU32 kBg = IM_COL32(12, 18, 8, 255);
 
 std::string readText(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -1138,13 +1138,13 @@ void App::drawFmAlgorithm(int layer) {
                 dl->AddLine(ImVec2(pos[i].x + bw * 0.5f, pos[i].y + bh), ImVec2(pos[j].x + bw * 0.5f, pos[j].y), kGrid, 1.5f);
     for (int i = 0; i < n; ++i) {
         const bool carrier = a.carriers & (1u << i);
-        dl->AddRectFilled(pos[i], ImVec2(pos[i].x + bw, pos[i].y + bh), carrier ? IM_COL32(40, 110, 150, 255) : IM_COL32(50, 54, 62, 255), 3);
+        dl->AddRectFilled(pos[i], ImVec2(pos[i].x + bw, pos[i].y + bh), carrier ? IM_COL32(120, 64, 14, 255) : IM_COL32(44, 47, 53, 255), 3);
         dl->AddRect(pos[i], ImVec2(pos[i].x + bw, pos[i].y + bh), kLine, 3);
         const std::string t = std::to_string(i + 1);
         dl->AddText(ImVec2(pos[i].x + bw * 0.5f - 4 * d, pos[i].y + 3 * d), IM_COL32(230, 230, 230, 255), t.c_str());
         if (a.feedbackOp == i) dl->AddCircle(ImVec2(pos[i].x + bw + 5 * d, pos[i].y + 4 * d), 4 * d, IM_COL32(255, 184, 77, 255));
     }
-    ImGui::TextColored(kDim, "Algorithm %d: %d operators; blue = carriers (heard), lines = modulation, ring = feedback", idx + 1, n);
+    ImGui::TextColored(kDim, "Algorithm %d: %d operators; orange = carriers (heard), lines = modulation, ring = feedback", idx + 1, n);
 }
 
 // ================================================================== host ops (CLI / MCP / AI)

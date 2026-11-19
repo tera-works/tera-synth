@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "app.h"
+#include "hw_ui.h"
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_win32.h"
@@ -114,7 +115,7 @@ void saveScreenshot(const std::string& path, ImDrawData* drawData) {
         bindFb(kFramebuffer, fb);
         fbTex(kFramebuffer, kColor0, GL_TEXTURE_2D, tex, 0);
         glViewport(0, 0, w, h);
-        glClearColor(0.067f, 0.078f, 0.10f, 1.0f);
+        glClearColor(14 / 255.0f, 15 / 255.0f, 17 / 255.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(drawData);
         glReadPixels(0, 0, w, h, 0x80E0 /*GL_BGR*/, GL_UNSIGNED_BYTE, px.data());
@@ -146,50 +147,6 @@ void saveScreenshot(const std::string& path, ImDrawData* drawData) {
         fwrite(row.data(), 1, row.size(), f);
     }
     fclose(f);
-}
-
-void loadFonts(float scale) {
-    ImGuiIO& io = ImGui::GetIO();
-    const float size = 17.0f * scale;
-    ImFont* base = nullptr;
-    if (GetFileAttributesW(L"C:\\Windows\\Fonts\\segoeui.ttf") != INVALID_FILE_ATTRIBUTES)
-        base = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", size);
-    if (!base) {
-        ImFontConfig cfg;
-        cfg.SizePixels = 13.0f * scale;
-        io.Fonts->AddFontDefault(&cfg);
-    }
-    // Japanese glyphs for file names / messages
-    const char* jp[] = {"C:\\Windows\\Fonts\\meiryo.ttc", "C:\\Windows\\Fonts\\YuGothM.ttc", "C:\\Windows\\Fonts\\msgothic.ttc"};
-    for (const char* f : jp) {
-        if (GetFileAttributesA(f) == INVALID_FILE_ATTRIBUTES) continue;
-        ImFontConfig cfg;
-        cfg.MergeMode = true;
-        io.Fonts->AddFontFromFileTTF(f, size, &cfg, io.Fonts->GetGlyphRangesJapanese());
-        break;
-    }
-}
-
-void applyStyle(float scale) {
-    ImGui::StyleColorsDark();
-    ImGuiStyle& st = ImGui::GetStyle();
-    st.FrameRounding = 4;
-    st.GrabRounding = 4;
-    st.TabRounding = 4;
-    st.WindowPadding = ImVec2(10, 8);
-    st.FramePadding = ImVec2(8, 5);
-    st.ItemSpacing = ImVec2(8, 6);
-    ImVec4* c = st.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.067f, 0.078f, 0.10f, 1.0f);
-    c[ImGuiCol_ChildBg] = ImVec4(0.09f, 0.10f, 0.13f, 1.0f);
-    c[ImGuiCol_FrameBg] = ImVec4(0.17f, 0.20f, 0.25f, 1.0f);
-    c[ImGuiCol_Button] = ImVec4(0.17f, 0.20f, 0.25f, 1.0f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.30f, 0.38f, 1.0f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.31f, 0.76f, 0.97f, 1.0f);
-    c[ImGuiCol_CheckMark] = ImVec4(0.31f, 0.76f, 0.97f, 1.0f);
-    c[ImGuiCol_TabSelected] = ImVec4(0.16f, 0.36f, 0.50f, 1.0f);
-    c[ImGuiCol_Header] = ImVec4(0.16f, 0.30f, 0.42f, 1.0f);
-    st.ScaleAllSizes(scale);
 }
 
 std::string argValue(int argc, wchar_t** argv, const wchar_t* name) {
@@ -245,8 +202,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     app.init(scale);
     if (app.uiScaleOverride() > 0) scale = app.uiScaleOverride();
     app.setDpiScale(scale);
-    loadFonts(scale);
-    applyStyle(scale);
+    {
+        // hardware-synth look (hw_ui.h): Rajdhani / Share Tech Mono from the factory content + a Japanese font
+        const char* jp = nullptr;
+        for (const char* f : {"C:\\Windows\\Fonts\\meiryo.ttc", "C:\\Windows\\Fonts\\YuGothM.ttc", "C:\\Windows\\Fonts\\msgothic.ttc"})
+            if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { jp = f; break; }
+        hw::loadFonts(scale, factoryDir, jp);
+        hw::applyStyle(scale);
+    }
     if (!autotest.empty()) app.startAutotest(utf8ToPath(autotest));
 
     bool done = false;
@@ -268,7 +231,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         app.frame();
         ImGui::Render();
         glViewport(0, 0, g_width, g_height);
-        glClearColor(0.067f, 0.078f, 0.10f, 1.0f);
+        glClearColor(14 / 255.0f, 15 / 255.0f, 17 / 255.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         const std::string shot = app.takeScreenshotRequest();
