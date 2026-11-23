@@ -6,6 +6,13 @@ DSP エンジン（`engine/`）は OS 非依存の純粋 C++17 で書かれて�
 
 ---
 
+## 📘 ドキュメント（PDF）
+
+| ドキュメント | 内容 |
+|---|---|
+| **[取扱説明書（PDF）](docs/HSynth_取扱説明書.pdf)** | 全 7 画面（STAGE / MULTI / EDIT / LIB / PLAY / SONG / SYS）の操作、Edge TPU AI 2D Morph、4-Stem 分離、全 7 音源フォーマット取り込み、Sound Packs ダウンローダー（BATCH キュー）、専用モジュール／Root セットアップ要約（実機 Pixel 7 スクリーンショット付き） |
+| **[性能詳細レポート（PDF）](docs/HSynth_性能詳細レポート.pdf)** | 229 / 229 テスト、実機ベンチマーク（遅延 3.9–4.8 ms・Edge TPU 591 µs・4-Stem 1.19 s・737 mW）、エンジン／FX／NPU アーキテクチャ、フラッグシップ機との機能比較 |
+
 ## 主な機能
 
 ### 1. マルチエンジン音源 & 45 種エフェクトラック
@@ -43,7 +50,7 @@ DSP エンジン（`engine/`）は OS 非依存の純粋 C++17 で書かれて�
 - `android/root-tuning/` — **Root（Magisk）専用音源モジュール化スクリプト群** → [docs/ANDROID_ROOT_SETUP.md](docs/ANDROID_ROOT_SETUP.md)
 - `desktop/` — Windows ネイティブ版（Dear ImGui + WASAPI）・自動サンプラー `hsynth_sampler` → [docs/WINDOWS.md](docs/WINDOWS.md)
 - `ios/` — iOS 版プロジェクト → [docs/APPLE.md](docs/APPLE.md)
-- `docs/` — [Root セットアップガイド](docs/ANDROID_ROOT_SETUP.md) / [アーキテクチャ](docs/ARCHITECTURE.md) / [ビルド手順](docs/BUILD.md) / [機能一覧](docs/FEATURES.md) / [エフェクト](docs/EFFECTS.md) / [依存関係・ライセンス](docs/THIRD_PARTY.md)
+- `docs/` — [取扱説明書 PDF](docs/HSynth_取扱説明書.pdf) / [性能詳細レポート PDF](docs/HSynth_性能詳細レポート.pdf) / [Root セットアップガイド](docs/ANDROID_ROOT_SETUP.md) / [アーキテクチャ](docs/ARCHITECTURE.md) / [ビルド手順](docs/BUILD.md) / [機能一覧](docs/FEATURES.md) / [エフェクト](docs/EFFECTS.md) / [依存関係・ライセンス](docs/THIRD_PARTY.md)
 
 ---
 
