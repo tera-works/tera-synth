@@ -37,6 +37,9 @@ private:
     int chain_[kInsertSlots] = {};  // insert indices
     int chainLen_ = 0;
     bool inChain_[kNumInsertBlocks] = {};
+    // processed since the last reset (see FxRack::resetBlock): clean blocks are not reset again
+    bool clean_[kNumInsertBlocks] = {};
+    void resetBlock(int k);
     float xfade_[kNumInsertBlocks] = {};
     float on_[kNumInsertBlocks] = {};
     std::vector<float> params_;  // kInsertParamTotal, last seen values

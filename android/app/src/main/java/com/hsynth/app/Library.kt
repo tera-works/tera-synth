@@ -52,8 +52,17 @@ class Library(private val context: Context) {
 
     fun presets(): List<Entry> {
         val f = factoryPresets.listFiles { x -> x.extension == "json" }?.sortedBy { it.name }?.map { presetEntry(it, false) } ?: emptyList()
-        val u = userPresets.listFiles { x -> x.extension == "json" }?.sortedBy { it.name.lowercase() }?.map { presetEntry(it, true) } ?: emptyList()
-        return f + u
+        // user presets: flat files plus (imported banks / installed packs) up to two folders below presets/user
+        val u = ArrayList<File>()
+        fun walk(dir: File, depth: Int) {
+            val kids = dir.listFiles() ?: return
+            for (x in kids) {
+                if (x.isFile && x.extension.equals("json", true) && !x.name.startsWith(".")) u += x
+                else if (x.isDirectory && depth < 2) walk(x, depth + 1)
+            }
+        }
+        walk(userPresets, 0)
+        return f + u.sortedBy { it.path.lowercase() }.map { presetEntry(it, true) }
     }
 
     // preset metadata by path + modification time (parsing every JSON on each refresh was slow)
@@ -73,21 +82,38 @@ class Library(private val context: Context) {
         return e
     }
 
-    /** All loadable sample sources (.sfz and stand-alone .wav). */
+    /** Extensions of the Phase 6 formats that are listed next to .sfz / .wav (opened through [FormatImporter]). */
+    private val formatExts = setOf("sf2", "sf3", "dls", "gig", "dspreset", "dslibrary", "syx", "wt", "vitaltable")
+
+    /**
+     * All loadable sample sources: .sfz and stand-alone .wav / .flac, plus the Phase 6 formats found under
+     * `library/user/{sf2,sfz,ds,dx7,wt}/` (.sf2 .sf3 .dls .gig .dspreset .dslibrary .syx .wt .vitaltable), up to
+     * six folder levels below those roots, so installed sound packs show up at once.
+     */
     fun sampleSources(): List<Entry> {
         // One pass per directory. A folder with an .sfz is an instrument: its WAVs and
         // its sub-folders' WAVs belong to it and are not listed (and not walked).
+        // Decent Sampler libraries (user/ds) are instruments as a whole: their samples are never listed on their own.
         val out = mutableListOf<Entry>()
+        val dsRoot = File(userSamples, "ds").path
         fun walk(dir: File, insideInstrument: Boolean) {
             val files = dir.listFiles() ?: return
             val sfz = files.filter { it.isFile && it.extension.equals("sfz", true) }
             val user = dir.path.startsWith(userSamples.path)
+            // folders below library/user: user/sf2 = 1, user/sf2/<pack> = 2, ... (listed down to 6)
+            val level = if (!user || dir == userSamples) 0 else dir.relativeTo(userSamples).path.split(File.separatorChar).size
+            val inDs = dir.path == dsRoot || dir.path.startsWith(dsRoot + File.separator)
             for (f in sfz) out += Entry(f, f.relativeTo(libraryRoot).path, user)
-            val instrument = insideInstrument || sfz.isNotEmpty()
+            if (level in 1..6) {
+                for (f in files) if (f.isFile && f.extension.lowercase() in formatExts && !f.name.startsWith("."))
+                    out += Entry(f, f.relativeTo(libraryRoot).path, true)
+            }
+            val instrument = insideInstrument || sfz.isNotEmpty() || inDs
             if (!instrument)
-                for (f in files) if (f.isFile && f.extension.equals("wav", true)) out += Entry(f, f.relativeTo(libraryRoot).path, user)
-            if (instrument && sfz.isNotEmpty()) return  // sample folders below an .sfz
-            for (f in files) if (f.isDirectory) walk(f, instrument)
+                for (f in files) if (f.isFile && (f.extension.equals("wav", true) || f.extension.equals("flac", true)))
+                    out += Entry(f, f.relativeTo(libraryRoot).path, user)
+            if (sfz.isNotEmpty()) return  // sample folders below an .sfz
+            for (f in files) if (f.isDirectory && !f.name.startsWith(".")) walk(f, instrument)
         }
         walk(libraryRoot, false)
         return out.sortedWith(compareBy({ it.user }, { it.title.lowercase() }))

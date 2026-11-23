@@ -28,10 +28,28 @@ class MidiInput(private val context: Context, private val onChange: () -> Unit) 
     private val names = mutableMapOf<Int, String>()
     private val executor = Executors.newSingleThreadExecutor()
     val available get() = manager != null
+    @Volatile var onMidiActivity: (() -> Unit)? = null
 
     private inner class Receiver(private val ump: Boolean, private val source: Int) : MidiReceiver() {
+        @Volatile private var reader: Thread? = null
+
+        // Runs on the framework's reader thread of this port. Events are applied as soon as
+        // they arrive (at the start of the next audio callback); the sender's timestamp is
+        // not used for scheduling: lowest latency rather than lowest jitter (for Bluetooth
+        // the timestamps would delay every note by the connection interval to smooth jitter).
         override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
-            NativeEngine.nativeMidi(msg, offset, count, ump, source)
+            val t = Thread.currentThread()
+            if (reader !== t) {
+                reader = t
+                // a fixed name for root tuning scripts; audio-like priority so a note is
+                // passed on at once even when the UI / loaders keep the cores busy
+                runCatching {
+                    t.name = "hsynth-midi"
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                }
+            }
+            NativeEngine.nativeMidi(msg, offset, count, ump, source, timestamp)
+            onMidiActivity?.invoke()
         }
     }
 
@@ -98,9 +116,6 @@ class MidiInput(private val context: Context, private val onChange: () -> Unit) 
         manager?.unregisterDeviceCallback(callback)
         for (id in opened.keys.toList()) close(id)
     }
-
-    /** Opens a device that was connected another way (Bluetooth LE). */
-    fun attach(info: MidiDeviceInfo) = open(info, isUmp(info))
 
     private fun open(info: MidiDeviceInfo, ump: Boolean) {
         val m = manager ?: return

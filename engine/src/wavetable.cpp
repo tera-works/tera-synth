@@ -1,5 +1,6 @@
 #include "hsynth/dsp/wavetable.h"
 #include "hsynth/dsp/simd.h"
+#include <cctype>
 
 #include <cmath>
 #include <cstdio>
@@ -247,7 +248,9 @@ const Wavetable& builtinWavetable(int index) {
 
 std::unique_ptr<Wavetable> loadWavetableFile(const std::string& path, std::string& error) {
     WavData w;
-    const bool flac = path.size() > 5 && (path.compare(path.size() - 5, 5, ".flac") == 0 || path.compare(path.size() - 5, 5, ".FLAC") == 0);
+    std::string ext = path.size() >= 5 ? path.substr(path.size() - 5) : "";
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool flac = ext == ".flac";
     if (!(flac ? readFlac(path, w, error) : readWav(path, w, error))) return nullptr;
     std::vector<float> mono(w.left);
     if (!w.right.empty())

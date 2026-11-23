@@ -33,6 +33,9 @@ struct SampleSet;
 struct StreamSource {
     std::string path;
     bool flac = false;
+    uint64_t flacId = 0;       // identifies a loaded sample, even across address reuse
+    size_t flacStartByte = 0;  // FLAC frame covering the head/ring overlap
+    int64_t flacStartFrame = 0;
     int64_t dataOffset = 0;   // byte offset of frame 0
     int format = 1;           // 1 = integer PCM, 3 = IEEE float
     int bits = 16;            // bits per sample
@@ -57,24 +60,21 @@ struct SampleLoadOptions {
 void setSampleLoadOptions(const SampleLoadOptions& o);
 SampleLoadOptions sampleLoadOptions();
 
-struct StreamFlacState;  // streaming.cpp
+class StreamFileCache;  // streaming.cpp
 
 struct StreamSlot {
-    static constexpr int kRing = 32768;   // frames per channel in the ring
+    static constexpr int kRing = 8192;   // frames per channel in the ring
     static constexpr int kMirror = 32;    // ring[0..kMirror) repeated after the end: any window <= kMirror is contiguous
     enum : int { kFree = 0, kActive = 1, kReleased = 2 };
 
     std::atomic<int> state{kFree};
     // set by the audio thread while the slot is free, read by the streamer
-    const Sample* sample = nullptr;
+    std::atomic<const Sample*> sample{nullptr};
     int64_t start = 0;                    // first streamed frame
     std::atomic<int64_t> written{0};      // frames [start, written) have arrived
     std::atomic<int64_t> low{0};          // the player no longer reads frames below this
+    std::atomic<bool> failed{false};
     std::unique_ptr<float[]> ring[2];
-    // streamer thread only
-    FILE* file = nullptr;
-    std::shared_ptr<StreamFlacState> flac;  // FLAC: compressed data + decoder (kept for reuse)
-
     // Audio thread: pointer to frames [first, first + count) of channel c
     // (count <= kMirror), nullptr if they are not in the ring (yet).
     const float* window(int c, int64_t first, int count) const {
@@ -87,7 +87,9 @@ struct StreamSlot {
 
 class DiskStreamer {
 public:
-    static constexpr int kSlots = 384;
+    // About 64 MiB of rings, enough for 512 single-region voices, their
+    // steal fades, and a second region for most voices.
+    static constexpr int kSlots = 1024;
 
     DiskStreamer() = default;
     ~DiskStreamer() { stop(); }
@@ -120,8 +122,7 @@ public:
 
 private:
     void threadMain();
-    bool fill(StreamSlot& s);  // one chunk; true if something was read
-    bool fillFlac(StreamSlot& s, int64_t w, int64_t n);  // decodes frames [w, w + n) into tmp_
+    bool fill(StreamSlot& s, StreamFileCache& cache);  // one chunk, true if published
 
     std::unique_ptr<StreamSlot[]> slots_;
     std::thread thread_;

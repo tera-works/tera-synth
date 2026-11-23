@@ -40,6 +40,10 @@ public:
     // data, -1 on corrupt data (error set). Frames past totalFrames() are cut.
     int next(std::vector<float>& left, std::vector<float>& right, std::string& error);
 
+    // Checkpoints returned by bytePosition()/position() at frame boundaries.
+    size_t bytePosition() const { return pos_; }
+    void seekFrame(size_t byte, int64_t frame) { pos_ = byte; decoded_ = frame; }
+
 private:
     const uint8_t* d_ = nullptr;
     size_t n_ = 0, pos_ = 0;

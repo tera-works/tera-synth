@@ -2,6 +2,7 @@
 // diffuse), algorithmic reverb (FDN + spring), convolution reverb, slicer,
 // stutter, stereo image.
 #include "fx_blocks.h"
+#include "hsynth/dsp/simd.h"
 
 namespace hsynth {
 namespace fx {
@@ -32,6 +33,7 @@ inline void spillTargets(bool on, float mix, float& dry, float& wet, float& feed
 
 void DelayFx::prepare(float sr) {
     sr_ = sr;
+    highCutHz_ = lowCutHz_ = -1.0f;
     dl_.allocate((int)(4.3f * sr));
     dr_.allocate((int)(4.3f * sr));
     tL_.setTime(0.12f, sr);
@@ -77,8 +79,14 @@ void DelayFx::update(const float* p, const FxContext& c) {
     float hc = p[delay::HighCut];
     if (type_ == 1) hc = std::min(hc, 4500.0f);   // BBD bandwidth
     if (type_ == 2) hc = std::min(hc, 7000.0f);   // tape head loss
-    hc_.set(Biquad::LP, hc, 0.707f, 0, sr_);
-    lc_.set(Biquad::HP, p[delay::LowCut], 0.707f, 0, sr_);
+    if (hc != highCutHz_) {
+        highCutHz_ = hc;
+        hc_.set(Biquad::LP, hc, 0.707f, 0, sr_);
+    }
+    if (p[delay::LowCut] != lowCutHz_) {
+        lowCutHz_ = p[delay::LowCut];
+        lc_.set(Biquad::HP, lowCutHz_, 0.707f, 0, sr_);
+    }
     modDepth_ = p[delay::ModDepth];
     lfo_.setRate(p[delay::ModRate], 0, c.tempo, sr_);
     duck_ = p[delay::Ducking];
@@ -91,6 +99,10 @@ void DelayFx::process(float* L, float* R, int n, const FxContext&) {
     // modulation depth in samples: subtle for digital, chorus-like for BBD/tape
     const float modAmt = modDepth_ * sr_ * (type_ == 0 ? 0.0005f : type_ == 1 ? 0.002f : 0.0015f);
     const float flutInc = 7.3f / sr_;
+    const float targetL = timeL_ * sr_, targetR = timeR_ * sr_;
+    const bool glideL = tL_.value != targetL, glideR = tR_.value != targetR;
+    const bool saturate = (type_ == 1 || type_ == 2);
+    const bool limitFeedback = fb_ > 0.9f;
     float peak = 0.0f;
     for (int i = 0; i < n; ++i) {
         const float feed = feed_.process(feedT), dg = dryS_.process(dryT), wg = wetS_.process(wetT);
@@ -105,12 +117,14 @@ void DelayFx::process(float* L, float* R, int n, const FxContext&) {
             s.value += step;
             return s.value;
         };
-        const float tl = glide(tL_, timeL_ * sr_), tr = glide(tR_, timeR_ * sr_);
-        float mod = lfo_.tick(FxWave::Sine, rng_) * modAmt;
+        const float tl = glideL ? glide(tL_, targetL) : targetL;
+        const float tr = glideR ? glide(tR_, targetR) : targetR;
+        float mod = modAmt != 0.0f ? sinWrappedCycles(lfo_.phase()) * modAmt : 0.0f;
+        lfo_.advance(rng_);
         if (type_ == 2) {
             flutPh_ += flutInc;
             if (flutPh_ >= 1.0f) flutPh_ -= 1.0f;
-            mod += sinCycles(flutPh_) * modDepth_ * 0.0002f * sr_;
+            if (modAmt != 0.0f) mod += sinWrappedCycles(flutPh_) * modDepth_ * 0.0002f * sr_;
         }
         float rl, rr;
         if (type_ == 3) {
@@ -130,12 +144,12 @@ void DelayFx::process(float* L, float* R, int n, const FxContext&) {
         float fl = rl, fr = rr;
         hc_.process(fl, fr);
         lc_.process(fl, fr);
-        if (type_ == 1 || type_ == 2) { fl = fastTanh(fl * 1.3f) * 0.77f; fr = fastTanh(fr * 1.3f) * 0.77f; }
+        if (saturate) { fl = fastTanh(fl * 1.3f) * 0.77f; fr = fastTanh(fr * 1.3f) * 0.77f; }
         if (type_ == 4)
             for (int k = 0; k < 4; ++k) { fl = allpass(apL_[k], apLen_[k], fl, 0.6f); fr = allpass(apR_[k], apLen_[k], fr, 0.6f); }
         fl *= fb_;
         fr *= fb_;
-        if (fb_ > 0.9f) { fl = fastTanh(fl); fr = fastTanh(fr); }  // keeps runaway feedback bounded
+        if (limitFeedback) { fl = fastTanh(fl); fr = fastTanh(fr); }  // keeps runaway feedback bounded
         if (mode_ == 1) {
             dl_.push(0.5f * (inL + inR) + fr);
             dr_.push(fl);
@@ -177,15 +191,32 @@ const float kApMs[8] = {3.1f, 3.7f, 4.3f, 5.1f, 5.9f, 6.7f, 7.3f, 8.1f};
 const float kInApMs[4] = {4.77f, 3.59f, 12.73f, 9.31f};
 const float kErMs[8] = {7.1f, 11.3f, 16.9f, 23.2f, 29.4f, 36.8f, 43.3f, 52.7f};
 constexpr float kMaxScale = 1.6f * 1.6f;
+
+#if defined(HSYNTH_SIMD_NEON) && defined(__aarch64__)
+// The scalar folded sine polynomial, evaluated for four FDN lines.
+inline float32x4_t sinWrapped4(float32x4_t p) {
+    const auto half = vdupq_n_f32(0.5f);
+    auto x = vbslq_f32(vcltq_f32(p, half), p, vsubq_f32(p, vdupq_n_f32(1.0f)));
+    x = vbslq_f32(vcgtq_f32(x, vdupq_n_f32(0.25f)), vsubq_f32(half, x), x);
+    x = vbslq_f32(vcltq_f32(x, vdupq_n_f32(-0.25f)), vsubq_f32(vnegq_f32(half), x), x);
+    const auto y = vmulq_n_f32(x, kTwoPi);
+    const auto y2 = vmulq_f32(y, y);
+    const auto a = vfmaq_n_f32(vdupq_n_f32(0.0083333310f), y2, -0.00019840874f);
+    const auto b = vfmaq_f32(vdupq_n_f32(-0.16666667f), y2, a);
+    return vmulq_f32(y, vfmaq_f32(vdupq_n_f32(1.0f), y2, b));
+}
+#endif
 }  // namespace
 
 void ReverbFx::prepare(float sr) {
     sr_ = sr;
+    size_ = decay_ = lowCutHz_ = -1.0f;
     for (int k = 0; k < kLines; ++k) {
         line_[k].allocate((int)(kLineMs[k] * 0.001f * sr * kMaxScale) + 64);
         ap_[k].allocate((int)(kApMs[k] * 0.001f * sr * kMaxScale) + 4);
         modInc_[k] = (0.31f + 0.11f * (float)k) / sr;
         modPh_[k] = 0.13f * (float)k;
+        erGain_[k] = std::pow(0.82f, (float)k) * ((k & 1) ? -0.5f : 0.5f);
     }
     for (int k = 0; k < 4; ++k) {
         inApLen_[k] = (int)(kInApMs[k] * 0.001f * sr);
@@ -216,35 +247,44 @@ void ReverbFx::reset() {
 }
 void ReverbFx::update(const float* p, const FxContext&) {
     on_ = p[reverb::On] > 0.5f;
-    type_ = (int)clampf(p[reverb::Type], 0, 7);
-    const ReverbType& t = kRvTypes[type_];
+    const int type = (int)clampf(p[reverb::Type], 0, 7);
     const float size = p[reverb::Size];
+    const bool geometryChanged = type != type_ || size != size_;
+    type_ = type;
+    const ReverbType& t = kRvTypes[type_];
     const float scale = t.scale * (0.4f + 1.2f * size);
-    freeze_ = p[reverb::Freeze] > 0.5f;
+    const bool freeze = p[reverb::Freeze] > 0.5f;
     const float decay = std::max(0.05f, p[reverb::Decay] * t.decayMul);
-    for (int k = 0; k < kLines; ++k) {
-        lineLen_[k] = kLineMs[k] * 0.001f * sr_ * scale;
-        apLen_[k] = std::max(1, (int)(kApMs[k] * 0.001f * sr_ * scale));
-        g_[k] = freeze_ ? 1.0f : std::pow(10.0f, -3.0f * lineLen_[k] / (decay * sr_));
+    if (geometryChanged) {
+        size_ = size;
+        const float erScale = t.scale * (0.5f + size);
+        for (int k = 0; k < kLines; ++k) {
+            lineLen_[k] = kLineMs[k] * 0.001f * sr_ * scale;
+            apLen_[k] = std::max(1, (int)(kApMs[k] * 0.001f * sr_ * scale));
+            erTapL_[k] = std::max(1.0f, kErMs[k] * 0.001f * sr_ * erScale);
+            erTapR_[k] = std::max(1.0f, kErMs[k] * 1.13f * 0.001f * sr_ * erScale);
+        }
+        springLen_ = (0.033f + 0.02f * size) * sr_;
+    }
+    if (geometryChanged || freeze != freeze_ || decay != decay_) {
+        freeze_ = freeze;
+        decay_ = decay;
+        for (int k = 0; k < kLines; ++k)
+            g_[k] = freeze_ ? 1.0f : std::pow(10.0f, -3.0f * lineLen_[k] / (decay * sr_));
+        springG_ = freeze_ ? 0.999f : std::pow(10.0f, -3.0f * springLen_ / (decay * sr_));
     }
     dampA_ = freeze_ ? 1.0f : clampf(1.0f - 0.85f * p[reverb::Damp] * t.damp, 0.05f, 1.0f);
     modDepth_ = p[reverb::Modulation] * 8.0f * t.mod * std::min(scale, 1.5f);
     preDelay_ = p[reverb::PreDelay] * 0.001f * sr_;
     diff_ = 0.75f * p[reverb::Diffusion];
     early_ = p[reverb::Early] * t.er;
-    const float erScale = t.scale * (0.5f + size);
-    for (int k = 0; k < 8; ++k) {
-        erTapL_[k] = std::max(1.0f, kErMs[k] * 0.001f * sr_ * erScale);
-        erTapR_[k] = std::max(1.0f, kErMs[k] * 1.13f * 0.001f * sr_ * erScale);
-        erGain_[k] = std::pow(0.82f, (float)k) * ((k & 1) ? -0.5f : 0.5f);
+    if (p[reverb::LowCut] != lowCutHz_) {
+        lowCutHz_ = p[reverb::LowCut];
+        lowCut_.set(Biquad::HP, lowCutHz_, 0.707f, 0, sr_);
     }
-    lowCut_.set(Biquad::HP, p[reverb::LowCut], 0.707f, 0, sr_);
     width_ = p[reverb::Width];
     shimmer_ = type_ == 6 ? p[reverb::Shimmer] * 0.6f : 0.0f;
     mix_ = p[reverb::Mix];
-    // spring tank: dispersive loop, two slightly different springs
-    springLen_ = (0.033f + 0.02f * size) * sr_;
-    springG_ = freeze_ ? 0.999f : std::pow(10.0f, -3.0f * springLen_ / (decay * sr_));
 }
 void ReverbFx::process(float* L, float* R, int n, const FxContext&) {
     float dryT, wetT, feedT;
@@ -284,15 +324,35 @@ void ReverbFx::process(float* L, float* R, int n, const FxContext&) {
             for (int k = 0; k < 4; ++k) d = allpass(inAp_[k], inApLen_[k], d, diff_);
             // read the 8 modulated lines, damp, decay
             float y[kLines];
+#if defined(HSYNTH_SIMD_NEON) && defined(__aarch64__)
+            for (int k = 0; k < kLines; k += 4) {
+                const auto one = vdupq_n_f32(1.0f);
+                auto phase = vaddq_f32(vld1q_f32(modPh_ + k), vld1q_f32(modInc_ + k));
+                phase = vbslq_f32(vcgeq_f32(phase, one), vsubq_f32(phase, one), phase);
+                vst1q_f32(modPh_ + k, phase);
+                auto delay = vld1q_f32(lineLen_ + k);
+                if (modDepth_ != 0.0f)
+                    delay = vfmaq_n_f32(delay, vaddq_f32(one, sinWrapped4(phase)), modDepth_);
+                float taps[4];
+                vst1q_f32(taps, vaddq_f32(delay, one));
+                for (int lane = 0; lane < 4; ++lane) taps[lane] = line_[k + lane].read(taps[lane]);
+                auto lp = vld1q_f32(lp_ + k);
+                lp = vfmaq_n_f32(lp, vsubq_f32(vld1q_f32(taps), lp), dampA_);
+                vst1q_f32(lp_ + k, lp);
+                vst1q_f32(y + k, vmulq_f32(lp, vld1q_f32(g_ + k)));
+            }
+#else
             for (int k = 0; k < kLines; ++k) {
                 modPh_[k] += modInc_[k];
                 if (modPh_[k] >= 1.0f) modPh_[k] -= 1.0f;
-                float v = line_[k].read(lineLen_[k] + modDepth_ * (1.0f + sinCycles(modPh_[k])) + 1.0f);
+                const float modulation = modDepth_ != 0.0f ? modDepth_ * (1.0f + sinWrappedCycles(modPh_[k])) : 0.0f;
+                const float v = line_[k].read(lineLen_[k] + modulation + 1.0f);
                 lp_[k] += dampA_ * (v - lp_[k]);
-                v = lp_[k] * g_[k];
-                if (density) v = allpass(ap_[k], apLen_[k], v, 0.5f);
-                y[k] = v;
+                y[k] = lp_[k] * g_[k];
             }
+#endif
+            if (density)
+                for (int k = 0; k < kLines; ++k) y[k] = allpass(ap_[k], apLen_[k], y[k], 0.5f);
             outL = (y[0] - y[1] + y[2] - y[3] + y[4] - y[5] + y[6] - y[7]) * invN;
             outR = (y[0] + y[1] - y[2] - y[3] + y[4] + y[5] - y[6] - y[7]) * invN;
             // Hadamard feedback matrix (fast Walsh-Hadamard transform)

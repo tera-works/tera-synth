@@ -19,6 +19,8 @@
 
 #include "hsynth/common.h"
 #include "hsynth/params.h"
+#include "hsynth/morph.h"
+#include "hsynth/performance_sequence.h"
 
 namespace hsynth {
 
@@ -31,6 +33,8 @@ struct Preset {
     std::vector<float> params;          // kNumParams values
     std::string samples[kNumLayers];    // library-relative sample/SFZ paths
     std::string impulses[2];            // user IRs: cabinet, IR reverb (library-relative)
+    MorphProgram morph;
+    ArpPattern arpPattern;
     std::vector<std::string> warnings;  // filled by fromJson
 
     Preset();
@@ -78,5 +82,6 @@ bool applyLegacyParam(Preset& p, const std::string& name, float value);
 
 // Parameter metadata as JSON (for generic editors on the host side).
 std::string paramMetadataJson();
+std::string mixMetadataJson();
 
 }  // namespace hsynth

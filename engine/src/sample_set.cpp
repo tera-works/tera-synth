@@ -11,6 +11,7 @@
 #include "hsynth/dsp/resample.h"
 #include "hsynth/flac.h"
 #include "hsynth/wav.h"
+#include "pcm_file.h"
 
 namespace hsynth {
 
@@ -161,74 +162,6 @@ bool endsWithFlac(const std::string& p) {
 
 namespace {
 
-int64_t tell64(FILE* f) {
-#ifdef _WIN32
-    return _ftelli64(f);
-#else
-    return (int64_t)ftello(f);
-#endif
-}
-void seekTo(FILE* f, int64_t pos) {
-#ifdef _WIN32
-    _fseeki64(f, pos, SEEK_SET);
-#else
-    fseeko(f, (off_t)pos, SEEK_SET);
-#endif
-}
-uint32_t le32(const uint8_t* p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-// Header of a WAV file, without reading the sample data.
-struct WavInfo {
-    int format = 0, bits = 0, fileChannels = 0, blockAlign = 0;
-    double rate = 0;
-    int64_t dataOffset = -1, frames = 0;
-    int unity = -1;
-    bool hasLoop = false;
-};
-
-bool readWavInfo(FILE* f, WavInfo& w) {
-    uint8_t h[12];
-    if (std::fread(h, 1, 12, f) != 12 || std::memcmp(h, "RIFF", 4) != 0 || std::memcmp(h + 8, "WAVE", 4) != 0) return false;
-    std::fseek(f, 0, SEEK_END);
-    const int64_t size = tell64(f);
-    int64_t pos = 12, dataSize = 0;
-    while (pos + 8 <= size) {
-        seekTo(f, pos);
-        uint8_t ck[8];
-        if (std::fread(ck, 1, 8, f) != 8) break;
-        const int64_t ckSize = (int64_t)le32(ck + 4);
-        const int64_t body = std::min(ckSize, size - pos - 8);
-        if (std::memcmp(ck, "fmt ", 4) == 0 && body >= 16) {
-            uint8_t b[40] = {};
-            if (std::fread(b, 1, (size_t)std::min<int64_t>(body, 40), f) < 16) return false;
-            w.format = b[0] | b[1] << 8;
-            w.fileChannels = b[2] | b[3] << 8;
-            w.rate = (double)le32(b + 4);
-            w.blockAlign = b[12] | b[13] << 8;
-            w.bits = b[14] | b[15] << 8;
-            if (w.format == 0xFFFE && body >= 40) w.format = b[24] | b[25] << 8;
-        } else if (std::memcmp(ck, "data", 4) == 0) {
-            w.dataOffset = pos + 8;
-            dataSize = body;
-        } else if (std::memcmp(ck, "smpl", 4) == 0 && body >= 36) {
-            uint8_t b[36];
-            if (std::fread(b, 1, 36, f) == 36) {
-                w.unity = (int)le32(b + 12);
-                w.hasLoop = le32(b + 28) > 0;
-            }
-        }
-        pos += 8 + ckSize + (ckSize & 1);
-    }
-    const bool fmtOk = (w.format == 1 && (w.bits == 8 || w.bits == 16 || w.bits == 24 || w.bits == 32)) ||
-                       (w.format == 3 && (w.bits == 32 || w.bits == 64));
-    if (w.dataOffset < 0 || !fmtOk || w.fileChannels <= 0 || w.rate <= 0 || w.blockAlign < w.bits / 8 * w.fileChannels)
-        return false;
-    w.frames = dataSize / w.blockAlign;
-    return true;
-}
-
 // A streamed sample whose head is read from src.
 std::unique_ptr<Sample> headFromSource(FILE* f, const std::string& path, const StreamSource& src, int channels, double rate,
                                        int64_t frames, int unity, int64_t preload) {
@@ -248,11 +181,11 @@ std::unique_ptr<Sample> headFromSource(FILE* f, const std::string& path, const S
     return s;
 }
 
-std::unique_ptr<Sample> streamedWav(const std::string& path, int64_t preload) {
+std::unique_ptr<Sample> streamedWav(const std::string& path, int64_t preload, bool initial = true) {
     std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(path, "rb"), &std::fclose);
     if (!f) return nullptr;
     WavInfo w;
-    if (!readWavInfo(f.get(), w) || w.hasLoop || w.frames <= 2 * preload) return nullptr;
+    if (!readWavInfo(f.get(), w) || w.hasLoop || w.frames <= (initial ? 2 : 1) * preload) return nullptr;
     StreamSource src;
     src.path = path;
     src.dataOffset = w.dataOffset;
@@ -265,23 +198,23 @@ std::unique_ptr<Sample> streamedWav(const std::string& path, int64_t preload) {
 
 // FLAC: only the head is decoded now; the streamer decodes the rest frame by
 // frame from the compressed file (nothing decoded is kept on disk).
-std::unique_ptr<Sample> streamedFlac(const std::string& path, int64_t preload) {
+std::atomic<uint64_t> nextFlacStreamId{1};
+std::unique_ptr<Sample> streamedFlac(const std::string& path, int64_t preload, bool initial = true) {
     std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(path, "rb"), &std::fclose);
     if (!f) return nullptr;
-    std::fseek(f.get(), 0, SEEK_END);
-    const long size = std::ftell(f.get());
-    std::fseek(f.get(), 0, SEEK_SET);
+    seekFile(f.get(), 0, SEEK_END);
+    const int64_t size = tellFile(f.get());
     if (size <= 0) return nullptr;
     // the head is in the first part of the file (a whole read if it is not)
     for (size_t want = std::min<size_t>((size_t)size, 256u << 10);; want = (size_t)size) {
         std::vector<uint8_t> bytes(want);
-        std::fseek(f.get(), 0, SEEK_SET);
+        seekFile(f.get(), 0);
         if (std::fread(bytes.data(), 1, want, f.get()) != want) return nullptr;
         FlacFrameDecoder dec;
         std::string err;
         if (!dec.open(bytes.data(), bytes.size(), err)) return nullptr;
         // unknown length or a loop in the file: decoded fully by the caller
-        if (dec.totalFrames() <= 2 * preload || dec.loopStart() >= 0) return nullptr;
+        if (dec.totalFrames() <= (initial ? 2 : 1) * preload || dec.loopStart() >= 0) return nullptr;
         auto s = std::make_unique<Sample>();
         s->path = path;
         s->channels = dec.channels();
@@ -292,7 +225,12 @@ std::unique_ptr<Sample> streamedFlac(const std::string& path, int64_t preload) {
         std::vector<float> l, r;
         int64_t got = 0;
         bool ok = true;
+        const int64_t overlap = preload - StreamSlot::kMirror;
         while (got < preload) {
+            if (got <= overlap) {
+                s->stream.flacStartByte = dec.bytePosition();
+                s->stream.flacStartFrame = got;
+            }
             const int n = dec.next(l, r, err);
             if (n <= 0) { ok = false; break; }
             const int64_t k = std::min<int64_t>(n, preload - got);
@@ -308,6 +246,7 @@ std::unique_ptr<Sample> streamedFlac(const std::string& path, int64_t preload) {
         s->preloadFrames = preload;
         s->stream.path = path;
         s->stream.flac = true;
+        s->stream.flacId = nextFlacStreamId.fetch_add(1, std::memory_order_relaxed);
         s->stream.blockAlign = 2 * s->channels;  // diskBytes(): counted like 16-bit PCM
         s->stream.fileChannels = s->channels;
         return s;
@@ -315,6 +254,62 @@ std::unique_ptr<Sample> streamedFlac(const std::string& path, int64_t preload) {
 }
 
 }  // namespace
+
+void SampleSet::trimLeadingSilence() {
+    constexpr float kOnsetPeak = 0.001f;  // -60 dBFS, either channel
+    constexpr int64_t kMinLeading = 16;
+    constexpr int64_t kLeadIn = 8;
+    constexpr int64_t kEndGuard = 64;
+    const int64_t streamLead = sampleLoadOptions().preloadFrames / 2;
+    auto ensureHead = [&](const Sample& source, int64_t required) {
+        if (!source.streamed || required <= source.preloadFrames) return true;
+        for (auto& s : samples) {
+            if (s.get() != &source) continue;
+            auto extended = source.stream.flac ? streamedFlac(source.path, required, false)
+                                               : streamedWav(source.path, required, false);
+            if (extended) {
+                // Keep region pointers valid and rebuild the compressed-frame
+                // checkpoint for the new head/ring boundary.
+                *s = std::move(*extended);
+                return true;
+            }
+            std::string error;
+            if (s->loadFully(error)) return true;
+            warnings.push_back("leading silence: " + error);
+            break;
+        }
+        return false;
+    };
+    for (Region& r : regions) {
+        if (!r.sample) continue;
+        const Sample& s = *r.sample;
+        const int64_t start = std::max<int64_t>(0, r.offset);
+        const int64_t end = r.end > 0 ? std::min(r.end, s.frames) : s.frames;
+        if (start >= end - kEndGuard) continue;
+        const int64_t scanEnd = std::min(end, start + (int64_t)(0.05 * s.sampleRate));
+        auto findOnset = [&](int64_t first, int64_t last) {
+            const float* l = s.channel(0);
+            const float* rr = s.channel(1);
+            for (; first < last; ++first)
+                if (std::max(std::fabs(l[first]), std::fabs(rr[first])) > kOnsetPeak) break;
+            return first;
+        };
+        const int64_t headEnd = s.streamed ? std::min(scanEnd, s.preloadFrames) : scanEnd;
+        int64_t onset = findOnset(start, headEnd);
+        if (onset >= headEnd && headEnd < scanEnd) {
+            if (!ensureHead(s, scanEnd)) continue;
+            onset = findOnset(onset, scanEnd);
+        }
+        if (onset >= scanEnd || onset - start < kMinLeading) continue;
+        const int64_t trimmed = onset - kLeadIn;
+        if (trimmed <= start || trimmed >= end - kEndGuard) continue;
+        if (r.loopMode != LoopMode::NoLoop && r.loopStart >= 0 && trimmed >= r.loopStart) continue;
+        // Leave the decoder the usual half-head of lead time when the new
+        // start approaches the handoff. All positions remain file-relative.
+        if (!ensureHead(s, trimmed + streamLead)) continue;
+        r.offset = trimmed;
+    }
+}
 
 // WAV or FLAC (by extension). stream: keep only the head in memory when the
 // sample is long enough and has no loop in the file (see streaming.h).
@@ -379,6 +374,7 @@ std::unique_ptr<SampleSet> loadWavSampleSet(const std::string& path, std::string
     }
     set->regions.push_back(r);
     set->samples.push_back(std::move(s));
+    set->trimLeadingSilence();
     set->prepareMips();
     return set;
 }

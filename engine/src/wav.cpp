@@ -166,7 +166,8 @@ bool writeWav(const std::string& path, const std::vector<float>& left, const std
     std::memcpy(&v[4], &riffSize, 4);  // little-endian hosts (all supported targets)
     std::unique_ptr<FILE, int (*)(FILE*)> f(fopenUtf8(path, "wb"), &std::fclose);
     if (!f) { error = "cannot create " + path; return false; }
-    if (std::fwrite(v.data(), 1, v.size(), f.get()) != v.size()) { error = "write error " + path; return false; }
+    const bool complete = std::fwrite(v.data(), 1, v.size(), f.get()) == v.size();
+    if (std::fclose(f.release()) != 0 || !complete) { error = "write error " + path; return false; }
     return true;
 }
 

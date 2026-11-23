@@ -15,15 +15,15 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 
-/** Small helpers for building the UI in code (no XML layouts needed). */
+/** Small helpers for building the Obsidian Instrument UI in code (no XML layouts needed). */
 object Ui {
     val BG = Hw.CHASSIS
     val PANEL = Hw.PANEL
-    val ACCENT = Hw.LED
-    val TEXT = Color.rgb(222, 226, 234)
-    val DIM = Color.rgb(140, 148, 162)
-    val WARN = Color.rgb(255, 213, 79)
-    val ERR = Color.rgb(239, 83, 80)
+    val ACCENT = Hw.MOD_OSC
+    val TEXT = Hw.SILK
+    val DIM = Hw.ENGRAVE
+    val WARN = Hw.MOD_FILTER
+    val ERR = Hw.MOD_RED
 
     /** Narrow layouts: portrait phones (screens are rebuilt when this changes). */
     fun portrait(ctx: Context) = ctx.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
@@ -31,9 +31,9 @@ object Ui {
     fun dp(ctx: Context, v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
 
     /** tr = false for names (presets, files, parameters) that must not be translated. */
-    fun text(ctx: Context, s: String, size: Float = 14f, color: Int = TEXT, bold: Boolean = false, tr: Boolean = true) = TextView(ctx).apply {
+    fun text(ctx: Context, s: String, size: Float = 13.5f, color: Int = TEXT, bold: Boolean = false, tr: Boolean = true) = TextView(ctx).apply {
         text = if (tr) L10n.t(s) else s
-        textSize = size + 1f  // Rajdhani runs small
+        textSize = size + 0.5f
         setTextColor(color)
         typeface = if (bold) Hw.BOLD else Hw.LABEL
         ellipsize = TextUtils.TruncateAt.END
@@ -42,13 +42,13 @@ object Ui {
     fun button(ctx: Context, s: String, onClick: (View) -> Unit) = Button(ctx).apply {
         text = L10n.t(s)
         isAllCaps = false
-        textSize = 15f
+        textSize = 13.5f
         typeface = Hw.BOLD
         setTextColor(TEXT)
         background = Hw.keyBg(ctx)
         setPadding(dp(ctx, 12), dp(ctx, 4), dp(ctx, 12), dp(ctx, 4))
-        minHeight = dp(ctx, 40)
-        minimumHeight = dp(ctx, 40)
+        minHeight = dp(ctx, 36)
+        minimumHeight = dp(ctx, 36)
         minWidth = 0
         minimumWidth = 0
         setOnClickListener(onClick)
@@ -69,12 +69,12 @@ object Ui {
     fun buttonRow(ctx: Context, vararg buttons: Button) = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         buttons.forEachIndexed { i, b ->
-            b.setPadding(dp(ctx, 1), dp(ctx, 4), dp(ctx, 1), dp(ctx, 4))
+            b.setPadding(dp(ctx, 4), dp(ctx, 4), dp(ctx, 4), dp(ctx, 4))
             b.textSize = 12f
             b.isSingleLine = true
             b.ellipsize = TextUtils.TruncateAt.END
             addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                if (i < buttons.size - 1) marginEnd = dp(ctx, 4)
+                if (i < buttons.size - 1) marginEnd = dp(ctx, 5)
             })
         }
     }
@@ -89,7 +89,10 @@ object Ui {
         val adapter = object : ArrayAdapter<String>(ctx, android.R.layout.simple_spinner_item, items) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
                 (super.getView(position, convertView, parent) as TextView).apply {
-                    setTextColor(Hw.LCD_FG); textSize = 14f; typeface = Hw.MONO
+                    setTextColor(Hw.SILK)
+                    textSize = 13f
+                    typeface = Hw.MONO
+                    setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
                 }
         }
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
@@ -106,9 +109,9 @@ object Ui {
     fun seek(ctx: Context, max: Int, progress: Int, onChange: (Int, Boolean) -> Unit) = SeekBar(ctx).apply {
         this.max = max
         this.progress = progress
-        progressTintList = android.content.res.ColorStateList.valueOf(Hw.LED)
-        thumbTintList = android.content.res.ColorStateList.valueOf(Color.rgb(235, 238, 244))
-        progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(70, 74, 84))
+        progressTintList = android.content.res.ColorStateList.valueOf(Hw.MOD_OSC)
+        thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Hw.PANEL_EDGE)
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) = onChange(p, fromUser)
             override fun onStartTrackingTouch(sb: SeekBar) {}

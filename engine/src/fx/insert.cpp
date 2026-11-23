@@ -26,7 +26,16 @@ void InsertChain::prepare(float sr) {
 }
 
 void InsertChain::reset() {
-    for (auto& b : blocks_) b->reset();
+    for (int k = 0; k < kNumInsertBlocks; ++k) {
+        blocks_[k]->reset();
+        clean_[k] = true;
+    }
+}
+
+void InsertChain::resetBlock(int k) {
+    if (clean_[k]) return;
+    blocks_[k]->reset();
+    clean_[k] = true;
 }
 
 void InsertChain::paramsChanged(const float* p, int oversample, bool highQuality) {
@@ -45,7 +54,7 @@ void InsertChain::paramsChanged(const float* p, int oversample, bool highQuality
         const float* bp = p + P::kInsBlockBase + insertOffset(k);
         const int cnt = kBlockParams[kInsertBlockList[k]];
         if (now[k] && !inChain_[k]) {
-            blocks_[k]->reset();
+            resetBlock(k);
             xfade_[k] = first_ && bp[0] > 0.5f ? 1.0f : 0.0f;
             quietSamples_ = 0;
         }
@@ -66,8 +75,10 @@ void InsertChain::setTempo(float bpm, double beat) {
     ctx_.beat = beat;
     if (bpm == ctx_.tempo) return;
     ctx_.tempo = bpm;
-    for (int k = 0; k < kNumInsertBlocks; ++k)
-        if (inChain_[k]) blocks_[k]->update(&params_[(size_t)insertOffset(k)], ctx_);
+    for (int i = 0; i < chainLen_; ++i) {
+        const int k = chain_[i];
+        blocks_[k]->update(&params_[(size_t)insertOffset(k)], ctx_);
+    }
 }
 
 void InsertChain::noteOn(int key, bool firstNote) {
@@ -95,17 +106,20 @@ void InsertChain::process(float* L, float* R, int n) {
         const float target = on_[k] > 0.5f ? 1.0f : 0.0f;
         if (xf == 0.0f && target == 0.0f) continue;
         if (xf == 1.0f && target == 1.0f) {
+            clean_[k] = false;
             blk->process(L, R, n, ctx_);
             continue;
         }
         // crossfade dry <-> processed over 10 ms
         std::memcpy(tmpL_.data(), L, sizeof(float) * (size_t)n);
         std::memcpy(tmpR_.data(), R, sizeof(float) * (size_t)n);
-        if (xf == 0.0f) blk->reset();
+        if (xf == 0.0f) resetBlock(k);
+        clean_[k] = false;
         blk->process(tmpL_.data(), tmpR_.data(), n, ctx_);
         const float x1 = target > xf ? std::min(1.0f, xf + xfStep) : std::max(0.0f, xf - xfStep);
+        const float invN = 1.0f / (float)n;
         for (int j = 0; j < n; ++j) {
-            const float g = xf + (x1 - xf) * ((float)(j + 1) / (float)n);
+            const float g = xf + (x1 - xf) * ((float)(j + 1) * invN);
             L[j] += (tmpL_[(size_t)j] - L[j]) * g;
             R[j] += (tmpR_[(size_t)j] - R[j]) * g;
         }

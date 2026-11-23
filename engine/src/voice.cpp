@@ -127,6 +127,16 @@ inline const float* PcmPlayer::frames0(int c, int64_t first, int count) const {
     return p;
 }
 
+inline bool PcmPlayer::stereoFrames(int64_t first, int count, const float*& l, const float*& r) const {
+    l = frames0(0, first, count);
+    if (!l) return false;
+    const Sample* s = region_->sample;
+    // One acquire of written publishes both channels of the same window.
+    r = first + count <= s->preloadFrames ? s->channel(1) + first
+                                         : stream_->ring[1].get() + (first % StreamSlot::kRing);
+    return true;
+}
+
 inline float PcmPlayer::streamAt(int c, int64_t idx) const {
     if (idx < 0 || idx >= region_->sample->frames) return 0.0f;
     if (const float* p = frames0(c, idx, 1)) return *p;
@@ -184,9 +194,12 @@ void PcmPlayer::sincAt2(double pos, float& l, float& r) const {
         r = sincAt(1, pos);
         return;
     }
-    const float* d0 = s->streamed ? frames0(0, first, resample::kTaps) : s->levelChannel(level_, 0) + first;
-    const float* d1 = s->streamed ? frames0(1, first, resample::kTaps) : s->levelChannel(level_, 1) + first;
-    if (!d0 || !d1) {
+    const float* d0;
+    const float* d1;
+    if (!s->streamed) {
+        d0 = s->levelChannel(level_, 0) + first;
+        d1 = s->levelChannel(level_, 1) + first;
+    } else if (!stereoFrames(first, resample::kTaps, d0, d1)) {
         l = sincAt(0, pos);
         r = sincAt(1, pos);
         return;
@@ -206,6 +219,15 @@ inline float PcmPlayer::at(int c, int64_t idx) const {
     return s->channel(c)[idx];
 }
 
+namespace {
+inline float hermite(float xm1, float x0, float x1, float x2, float f) {
+    const float c1 = 0.5f * (x1 - xm1);
+    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+    return ((c3 * f + c2) * f + c1) * f + x0;
+}
+}  // namespace
+
 inline float PcmPlayer::sampleAt(int c, int64_t idx, float f) const {
     float xm1, x0, x1, x2;
     const int64_t lim = looping_ ? region_->loopEnd : region_->sample->frames + Sample::kPadFrames;
@@ -217,10 +239,26 @@ inline float PcmPlayer::sampleAt(int c, int64_t idx, float f) const {
     } else {
         xm1 = at(c, idx - 1); x0 = at(c, idx); x1 = at(c, idx + 1); x2 = at(c, idx + 2);
     }
-    const float c1 = 0.5f * (x1 - xm1);
-    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
-    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
-    return ((c3 * f + c2) * f + c1) * f + x0;
+    return hermite(xm1, x0, x1, x2, f);
+}
+
+inline void PcmPlayer::sampleAt2(int64_t idx, float f, float& l, float& r) const {
+    const Sample* s = region_->sample;
+    const float* d0 = nullptr;
+    const float* d1 = nullptr;
+    if (s->streamed) {
+        stereoFrames(idx - 1, 4, d0, d1);
+    } else if (idx >= 1 && idx + 2 < (looping_ ? region_->loopEnd : s->frames + Sample::kPadFrames)) {
+        d0 = s->channel(0) + idx - 1;
+        d1 = s->channel(1) + idx - 1;
+    }
+    if (d0) {
+        l = hermite(d0[0], d0[1], d0[2], d0[3], f);
+        r = hermite(d1[0], d1[1], d1[2], d1[3], f);
+    } else {
+        l = sampleAt(0, idx, f);
+        r = sampleAt(1, idx, f);
+    }
 }
 
 void PcmPlayer::render(float* L, float* R, int n, float gain) {
@@ -353,7 +391,44 @@ void Voice::stopPlayers() {
     relActive_ = false;
 }
 
+namespace {
+float slotTolerance(uint32_t seed) {
+    seed ^= seed >> 16;
+    seed *= 0x7feb352du;
+    seed ^= seed >> 15;
+    seed *= 0x846ca68bu;
+    seed ^= seed >> 16;
+    return static_cast<float>(seed >> 8) * (2.0f / 16777216.0f) - 1.0f;
+}
+
+float thermalAt(uint64_t frame, float sr, float rate, uint32_t slot) {
+    const double position = static_cast<double>(frame) / sr * rate / (0.85 + 0.011 * (slot % 31));
+    const uint64_t tick = static_cast<uint64_t>(position);
+    const float x = static_cast<float>(position - static_cast<double>(tick));
+    const uint32_t seed = slot * 0x9e3779b9u + static_cast<uint32_t>(tick) * 0x85ebca6bu + 0x3d9534f1u;
+    const float a = slotTolerance(seed), b = slotTolerance(seed + 0x85ebca6bu);
+    return a + (b - a) * x * x * (3.0f - 2.0f * x);
+}
+}  // namespace
+
+void Voice::prepareSlot(PhysicalPool& pool, int slot) {
+    physicalPool_ = &pool;
+    voiceSlot_ = slot;
+    for (int l = 0; l < kNumLayers; ++l) physical_[l] = pool.layer(slot, l);
+    const uint32_t seed = static_cast<uint32_t>(slot + 1) * 0x9e3779b9u;
+    vintagePitch_ = slotTolerance(seed);
+    vintageCutoff_ = slotTolerance(seed ^ 0x72c29515u);
+    vintageEnv_ = slotTolerance(seed ^ 0x15bd34e1u);
+    vintagePan_ = slotTolerance(seed ^ 0x9f64e772u) * 0.6f;
+}
+
+void Voice::stopPhysical() {
+    if (physicalPool_)
+        for (auto* state : physical_) physicalPool_->stop(*state);
+}
+
 void Voice::deactivate() {
+    stopPhysical();
     active_ = false;
     stopPlayers();
 }
@@ -377,9 +452,13 @@ void Voice::prepare(float sampleRate) {
     active_ = false;
 }
 
-void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom) {
+void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom, float splitGain) {
     stopPlayers();  // a reused (stolen) voice: release the previous note's disk streams
+    stopPhysical();
     paramsOverride = nullptr;
+    liveGhost = -1;
+    splitGain_ = splitTarget_ = splitGain;
+    splitFrames_ = 0;
     const float* p = ctx.params;
     noteId_ = e.noteId;
     key_ = e.key;
@@ -398,8 +477,10 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
     rng_ = Rng((uint32_t)(random * 4294967000.0f) + 1u);
     rng3_ = Rng(((uint32_t)(random * 4294967000.0f) ^ 0x9E3779B9u) | 1u);
 
+    const float vintage = p[P::VoiceVintage];
+    const float envScale = vintage == 0.0f ? 1.0f : std::exp2(vintage * vintageEnv_ * 0.20f);
     ampEnv_.reset();
-    ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
+    ampEnv_.set(p[P::AmpAttack] * envScale, p[P::AmpDecay] * envScale, p[P::AmpSustain], p[P::AmpRelease] * envScale);
     ampEnv_.gate(true);
     env2_.reset();
     env2_.set(p[P::Env2Attack], p[P::Env2Decay], p[P::Env2Sustain], p[P::Env2Release]);
@@ -443,8 +524,8 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
                 ly.osc1.reset(unisonDetune != 0.0f ? rng_.unipolar() : 0.0f);  // unison: free-running phases
                 ly.osc2.reset(rng_.unipolar());
                 ly.sub.reset(0.0f);
-                for (auto& o : ly.ss1) o.reset(rng_.unipolar());
-                for (auto& o : ly.ss2) o.reset(rng_.unipolar());
+                for (float& phase : ly.ss1) phase = rng_.unipolar();
+                for (float& phase : ly.ss2) phase = rng_.unipolar();
                 break;
             case LayerType::FM:
                 ly.fm.noteOn(velocity_, key_);
@@ -457,6 +538,15 @@ void Voice::start(const Event& e, const VoiceContext& ctx, uint64_t age, float r
             case LayerType::WT:
                 ly.wt.reset(rng_, (int)p[P::layer(l, P::WtUnison)]);
                 break;
+            case LayerType::Physical: {
+                if (!physicalPool_) { ly.finished = true; break; }
+                const float pitch = key_ + glide_ + p[P::layer(l, P::LCoarse)] +
+                                    p[P::layer(l, P::LFine)] * 0.01f + unisonDetune;
+                const uint32_t seed = static_cast<uint32_t>(age) * 0x9e3779b9u +
+                                      static_cast<uint32_t>(voiceSlot_ * kNumLayers + l);
+                physicalPool_->start(*physical_[l], p, l, midiToHz(pitch), sampleRate_, velocity_, seed);
+                break;
+            }
             case LayerType::Granular: {
                 ly.grRegion = nullptr;
                 for (auto& g : ly.grains) g.on = false;
@@ -552,7 +642,12 @@ void Voice::startReleaseRegions() {
     if (used > 0) relActive_ = true;
 }
 
-void Voice::legatoTo(const Event& e, bool glide) {
+void Voice::legatoTo(const Event& e, bool glide, float splitGain) {
+    if (splitGain != splitTarget_) {
+        splitTarget_ = splitGain;
+        splitFrames_ = std::max(1, (int)(0.005f * sampleRate_));
+        splitStep_ = (splitTarget_ - splitGain_) / (float)splitFrames_;
+    }
     if (!active_) return;
     const float from = currentPitch();
     noteId_ = e.noteId;
@@ -717,6 +812,19 @@ float Voice::modSource(ModSource s, const VoiceContext& ctx) const {
 void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     if (!active_) return;
     const float* p = params(ctx);
+    const float vintage = p[P::VoiceVintage];
+    const float thermal = vintage == 0.0f ? 0.0f : thermalAt(ctx.renderFrame, sampleRate_, p[P::VoiceVintageRate], voiceSlot_);
+    const float envScale = vintage == 0.0f ? 1.0f : std::exp2(vintage * (0.20f * vintageEnv_ + 0.08f * thermal));
+    const float cutoffDrift = vintage == 0.0f ? 0.0f : vintage * (0.12f * vintageCutoff_ + 0.04f * thermal);
+    const float softRelease = p[P::PianoSoftRelease];
+    float split[kControlBlock];
+    for (int i = 0; i < n; ++i) {
+        if (splitFrames_ > 0) {
+            splitGain_ += splitStep_;
+            if (--splitFrames_ == 0) splitGain_ = splitTarget_;
+        }
+        split[i] = splitGain_;
+    }
     if (relActive_) {
         // release-trigger regions: own region envelope, layer level / pan / tuning, no amp env / filter
         bool any = false;
@@ -727,12 +835,12 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
             float tl[kControlBlock] = {}, tr[kControlBlock] = {};
             pl.setPitch(notePitch_ + ctx.pitchBendSemis + ctx.vibrato + p[P::layer(l, P::LCoarse)] + p[P::layer(l, P::LFine)] / 100.0f,
                         sampleRate_, ctx.quality);
-            pl.render(tl, tr, n, p[P::layer(l, P::LLevel)]);
+            pl.render(tl, tr, n, p[P::layer(l, P::LLevel)] * (1.0f - 0.65f * softRelease));
             const float lpan = p[P::layer(l, P::LPan)];
             const float lgl = std::min(1.0f, 1.0f - lpan), lgr = std::min(1.0f, 1.0f + lpan);
             for (int k = 0; k < n; ++k) {
-                L[k] += tl[k] * lgl;
-                R[k] += tr[k] * lgr;
+                L[k] += tl[k] * lgl * split[k];
+                R[k] += tr[k] * lgr * split[k];
             }
             any = any || pl.active();
         }
@@ -756,14 +864,25 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         noteX_ += a * (noteXT_ - noteX_);
     }
 
-    if (!stolen_) ampEnv_.set(p[P::AmpAttack], p[P::AmpDecay], p[P::AmpSustain], p[P::AmpRelease]);
-    env2_.set(p[P::Env2Attack] * env2Scale_, p[P::Env2Decay] * env2Scale_, p[P::Env2Sustain], p[P::Env2Release] * env2Scale_);
+    float releaseScale = envScale;
+    if (released_) {
+        releaseScale *= 1.0f + softRelease;
+        if (p[P::PianoHalfDamp] != 0.0f)
+            releaseScale *= 1.0f + 2.0f * p[P::PianoHalfDamp] * clampf(ctx.pedal, 0.0f, 1.0f);
+    }
+    if (!stolen_) ampEnv_.set(p[P::AmpAttack] * envScale, p[P::AmpDecay] * envScale, p[P::AmpSustain],
+                             p[P::AmpRelease] * releaseScale);
+    env2_.set(p[P::Env2Attack] * env2Scale_ * envScale, p[P::Env2Decay] * env2Scale_ * envScale,
+              p[P::Env2Sustain], p[P::Env2Release] * env2Scale_ * envScale);
     const float e2 = env2_.processBlock(n);
-    env3_.set(p[P::Env3Attack] * env3Scale_, p[P::Env3Decay] * env3Scale_, p[P::Env3Sustain], p[P::Env3Release] * env3Scale_);
+    env3_.set(p[P::Env3Attack] * env3Scale_ * envScale, p[P::Env3Decay] * env3Scale_ * envScale,
+              p[P::Env3Sustain], p[P::Env3Release] * env3Scale_ * envScale);
     env3_.processBlock(n);
     // half pedal: notes held only by a partly raised pedal fade out
     if (sustained && ctx.pedal < 0.85f) {
-        const float tau = 0.1f + 8.0f * ctx.pedal * ctx.pedal;
+        const float shape = p[P::PianoHalfDamp];
+        const float pedal = shape == 0.0f ? ctx.pedal : std::pow(ctx.pedal, 1.0f + shape * 2.0f);
+        const float tau = 0.1f + 8.0f * pedal * pedal;
         dampGain_ *= std::exp(-dtSec / tau);
     }
 
@@ -816,8 +935,9 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     // amp envelope time modulation (x8 per unit), only when modulated
     if (!stolen_ && (D(ModDest::AmpAttack) != 0.0f || D(ModDest::AmpDecay) != 0.0f || D(ModDest::AmpRelease) != 0.0f)) {
         auto sc = [&](ModDest x) { return fastExp2(clampf(D(x), -2.0f, 2.0f) * 3.0f); };
-        ampEnv_.set(p[P::AmpAttack] * sc(ModDest::AmpAttack), p[P::AmpDecay] * sc(ModDest::AmpDecay), p[P::AmpSustain],
-                    p[P::AmpRelease] * sc(ModDest::AmpRelease));
+        ampEnv_.set(p[P::AmpAttack] * sc(ModDest::AmpAttack) * envScale,
+                    p[P::AmpDecay] * sc(ModDest::AmpDecay) * envScale, p[P::AmpSustain],
+                    p[P::AmpRelease] * sc(ModDest::AmpRelease) * releaseScale);
     }
 
     // LFO1 (per voice) with delayed fade-in
@@ -840,6 +960,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         const float tune = ctx.masterTune + p[P::TuneC + key_ % 12] * 0.01f;  // master tune + scale tuning
         if (tune != 0.0f) basePitch += tune;
     }
+    if (vintage != 0.0f) basePitch += vintage * (0.06f * vintagePitch_ + 0.03f * thermal);
     if (glide_ != 0.0f || unisonDetune != 0.0f) {
         basePitch += glide_ + unisonDetune * clampf(1.0f + D(ModDest::UnisonDetune), 0.0f, 4.0f);
         // exponential glide: ~99 % of the interval within voice.glide seconds
@@ -852,6 +973,7 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     auto ftype = (FilterType)(int)p[P::FilterType];
     float cutoffOct = p[P::FilterKeytrack] * (float)(key_ - 60) / 12.0f + (p[P::FilterEnvAmt] + D(ModDest::FilterEnvAmt)) * e2 * 6.0f +
                       p[P::FilterVelAmt] * 3.0f * (velocity_ - 1.0f) + D(ModDest::Cutoff) * 5.0f + ctx.ccCutoffOct;
+    if (vintage != 0.0f) cutoffOct += cutoffDrift;
     float cutoff = p[P::FilterCutoff] * fastExp2(clampf(cutoffOct, -12.0f, 12.0f));
     float reso = clampf(p[P::FilterReso] + D(ModDest::Resonance) + ctx.ccReso, 0.0f, 1.0f);
     if (ftype == FilterType::Off && (ctx.ccCutoffOct < -0.01f || ctx.ccReso > 0.01f)) {
@@ -872,8 +994,9 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const bool f2parallel = p[P::FilterRouting] > 0.5f;
     const float f2bal = clampf(p[P::FilterBalance], 0.0f, 1.0f);
     if (f2on) {
-        const float oct2 = p[P::Filter2Keytrack] * (float)(key_ - 60) / 12.0f + p[P::Filter2EnvAmt] * e2 * 6.0f +
+        float oct2 = p[P::Filter2Keytrack] * (float)(key_ - 60) / 12.0f + p[P::Filter2EnvAmt] * e2 * 6.0f +
                            D(ModDest::Cutoff2) * 5.0f;
+        if (vintage != 0.0f) oct2 += cutoffDrift;
         const float cutoff2 = p[P::Filter2Cutoff] * fastExp2(clampf(oct2, -12.0f, 12.0f));
         filter2L_.set(ftype2, cutoff2, clampf(p[P::Filter2Reso], 0.0f, 1.0f), clampf(p[P::Filter2Drive], 0.0f, 1.0f), sr, fmorph, hq);
         if (stereo_) filter2R_.copyCoefsFrom(filter2L_);
@@ -888,7 +1011,9 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     // Amp / pan
     const float vs = p[P::AmpVelSens];
     const float ampTarget = (1.0f - vs + vs * velocity_ * velocity_) * clampf(1.0f + D(ModDest::Amp), 0.0f, 2.0f) * dampGain_;
-    const float pan = clampf(D(ModDest::Pan) + unisonPan, -1.0f, 1.0f);
+    float panPos = D(ModDest::Pan) + unisonPan;
+    if (p[P::VoicePanSpread] != 0.0f) panPos += vintagePan_ * p[P::VoicePanSpread];
+    const float pan = clampf(panPos, -1.0f, 1.0f);
     const float panL = std::min(1.0f, 1.0f - pan), panR = std::min(1.0f, 1.0f + pan);
     const float morph = clampf(p[P::Morph] + D(ModDest::Morph), -1.0f, 1.0f);
 
@@ -918,6 +1043,9 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         bool layerStereo = false;
 
         switch (ly.type) {
+            case LayerType::Physical:
+                physicalPool_->render(*physical_[l], p, l, midiToHz(lpitch), sr, released_ || stolen_, tmp, n);
+                break;
             case LayerType::VA: {
                 const float dt1T = midiToHz(lpitch) / sr;
                 const float dt2T = midiToHz(lpitch + p[P::layer(l, P::VaOsc2Semi)] + D(ModDest::VaOsc2Pitch) * 24.0f +
@@ -933,7 +1061,13 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                 const float xmod = p[P::layer(l, P::VaXmod)];
                 const float subLvl = p[P::layer(l, P::VaSub)];
                 const bool fancy = sync || xmod > 0.0f || subLvl > 0.0f || w1 == VaWave::SuperSaw || w2 == VaWave::SuperSaw;
-                if (!fancy) {
+                if (!fancy && w1 == VaWave::Saw && w2 == VaWave::Saw && noise == 0.0f) {
+                    for (int i = 0; i < n; ++i) {
+                        ly.dt1 += s1;
+                        ly.dt2 += s2;
+                        tmp[i] = ly.osc1.tickSaw(ly.dt1) * (1.0f - mix) + ly.osc2.tickSaw(ly.dt2) * mix;
+                    }
+                } else if (!fancy) {
                     for (int i = 0; i < n; ++i) {
                         ly.dt1 += s1;
                         ly.dt2 += s2;
@@ -948,10 +1082,18 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                     const float ssDet = det * det * 0.9f + det * 0.1f;
                     const float ssMix = p[P::layer(l, P::VaSsMix)];
                     const float cg = 1.0f - 0.55f * ssMix, sg = 0.42f * ssMix;
-                    auto osc = [&](VaOsc& o, VaOsc* side, VaWave w, float dt) {
-                        if (w != VaWave::SuperSaw) return o.tick(w, dt, pw);
-                        float v = o.tick(VaWave::Saw, dt, pw) * cg;
-                        for (int k = 0; k < 6; ++k) v += side[k].tick(VaWave::Saw, dt * (1.0f + kSs[k] * ssDet), pw) * sg;
+                    float ratios[6];
+                    for (int k = 0; k < 6; ++k) ratios[k] = 1.0f + kSs[k] * ssDet;
+                    auto osc = [&](VaOsc& o, float* side, VaWave w, float dt, bool syncMaster) {
+                        if (w != VaWave::SuperSaw) {
+                            if (w == VaWave::Saw && !syncMaster) return o.tickSaw(dt);
+                            return o.tick(w, dt, pw);
+                        }
+                        float v = (syncMaster ? o.tick(VaWave::Saw, dt, pw) : o.tickSaw(dt)) * cg;
+                        float sides[4];
+                        VaOsc::tickSaw4(side, ratios, dt, sg, sides);
+                        for (float x : sides) v += x;
+                        for (int k = 4; k < 6; ++k) v += VaOsc::tickSawPhase(side[k], dt * ratios[k]) * sg;
                         return v;
                     };
                     const int sw = (int)p[P::layer(l, P::VaSubWave)];
@@ -960,11 +1102,11 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
                     for (int i = 0; i < n; ++i) {
                         ly.dt1 += s1;
                         ly.dt2 += s2;
-                        const float o1 = osc(ly.osc1, ly.ss1, w1, ly.dt1);
+                        const float o1 = osc(ly.osc1, ly.ss1, w1, ly.dt1, sync);
                         float d2 = ly.dt2;
                         if (xmod > 0.0f) d2 = std::max(0.0f, d2 * (1.0f + 2.0f * xmod * o1));
                         if (sync && ly.osc1.wrapped()) ly.osc2.reset(ly.osc1.wrapFrac() * d2);
-                        const float o2 = osc(ly.osc2, ly.ss2, w2, d2);
+                        const float o2 = osc(ly.osc2, ly.ss2, w2, d2, false);
                         float v = o1 * (1.0f - mix) + o2 * mix;
                         if (subLvl > 0.0f) v += subLvl * ly.sub.tick(subWave, ly.dt1 * subRatio, 0.5f);
                         if (noise > 0.0f) v += noise * rng_.bipolar();
@@ -1096,8 +1238,14 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
         }
 
         float g = g0;
-        if (layerStereo) {
-            stereo = true;
+        if (layerStereo) stereo = true;
+        if (gStep == 0.0f) {
+            const float* right = layerStereo ? tmpR : tmp;
+            for (int i = 0; i < n; ++i) {
+                bufL[i] += tmp[i] * g0 * lgl;
+                bufR[i] += right[i] * g0 * lgr;
+            }
+        } else if (layerStereo) {
             for (int i = 0; i < n; ++i) {
                 g += gStep;
                 bufL[i] += tmp[i] * g * lgl;
@@ -1127,31 +1275,46 @@ void Voice::render(float* L, float* R, int n, const VoiceContext& ctx) {
     const float pl0 = firstBlock_ ? panL : panL_, pr0 = firstBlock_ ? panR : panR_;
     const float plStep = (panL - pl0) * invN, prStep = (panR - pr0) * invN;
     float gl = pl0, gr = pr0;
-    for (int i = 0; i < n; ++i) {
-        a += aStep;
-        gl += plStep;
-        gr += prStep;
-        const float env = ampEnv_.process() * a;
-        float l = filterL_.process(bufL[i]);
-        float r = stereo_ ? filterR_.process(bufR[i]) : l;
-        if (f2on) {
-            if (f2parallel) {
-                const float l2 = filter2L_.process(bufL[i]);
-                const float r2 = stereo_ ? filter2R_.process(bufR[i]) : l2;
-                l = l * (1.0f - f2bal) + l2 * f2bal;
-                r = r * (1.0f - f2bal) + r2 * f2bal;
-            } else {
-                l = filter2L_.process(l);
-                r = stereo_ ? filter2R_.process(r) : l;
+    const bool voiceFx = vfx_.active();
+    if (!f2on && !voiceFx) {
+        filterL_.processBlock(bufL, n);
+        if (stereo_) filterR_.processBlock(bufR, n);
+        const float* right = stereo_ ? bufR : bufL;
+        for (int i = 0; i < n; ++i) {
+            a += aStep;
+            gl += plStep;
+            gr += prStep;
+            const float env = ampEnv_.process() * a;
+            L[i] += bufL[i] * env * gl * split[i];
+            R[i] += right[i] * env * gr * split[i];
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            a += aStep;
+            gl += plStep;
+            gr += prStep;
+            const float env = ampEnv_.process() * a;
+            float l = filterL_.process(bufL[i]);
+            float r = stereo_ ? filterR_.process(bufR[i]) : l;
+            if (f2on) {
+                if (f2parallel) {
+                    const float l2 = filter2L_.process(bufL[i]);
+                    const float r2 = stereo_ ? filter2R_.process(bufR[i]) : l2;
+                    l = l * (1.0f - f2bal) + l2 * f2bal;
+                    r = r * (1.0f - f2bal) + r2 * f2bal;
+                } else {
+                    l = filter2L_.process(l);
+                    r = stereo_ ? filter2R_.process(r) : l;
+                }
             }
+            if (voiceFx) {
+                vfx_.advance();
+                l = vfx_.process(l, 0);
+                r = stereo_ ? vfx_.process(r, 1) : l;
+            }
+            L[i] += l * env * gl * split[i];
+            R[i] += r * env * gr * split[i];
         }
-        if (vfx_.active()) {
-            vfx_.advance();
-            l = vfx_.process(l, 0);
-            r = stereo_ ? vfx_.process(r, 1) : l;
-        }
-        L[i] += l * env * gl;
-        R[i] += r * env * gr;
     }
     ampGain_ = ampTarget;
     panL_ = panL;

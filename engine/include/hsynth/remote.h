@@ -142,7 +142,7 @@ private:
     Json mixJson(int part) const;
     Json statusJson();
     Json stateJson(bool compact);
-    bool setState(const Json& state, Json& reply);
+    bool setState(const Json& state, Json& reply, bool live);
     Json presetsJson(const Json& req);
     Json filesJson(const Json& req);
     std::string resolve(const std::string& path, const std::string& root) const;
@@ -153,6 +153,7 @@ private:
     Config config_;
     Hooks hooks_;
     Output output_;
+    std::mutex handleMutex_;  // serializes synchronous requests and subscription snapshots
     std::mutex outMutex_;
     std::deque<std::vector<uint8_t>> outQueue_;
 

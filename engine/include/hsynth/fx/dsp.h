@@ -32,8 +32,7 @@ inline float fastLog2(float x) {
 inline float fastLinToDb(float g) { return 6.0205999f * fastLog2(g); }
 
 // sin(2*pi*p) for p in cycles; odd polynomial after folding, |err| < 2e-4.
-inline float sinCycles(float p) {
-    p -= fastFloor(p);
+inline float sinWrappedCycles(float p) {
     float x = p < 0.5f ? p : p - 1.0f;  // -0.5..0.5
     if (x > 0.25f) x = 0.5f - x;
     else if (x < -0.25f) x = -0.5f - x;
@@ -41,6 +40,7 @@ inline float sinCycles(float p) {
     const float y2 = y * y;
     return y * (1.0f + y2 * (-0.16666667f + y2 * (0.0083333310f + y2 * -0.00019840874f)));
 }
+inline float sinCycles(float p) { return sinWrappedCycles(p - fastFloor(p)); }
 
 // Dry/wet gains: equal loudness at 50 %, dry stays at unity below it.
 inline void mixGains(float mix, float& dry, float& wet) {
@@ -57,17 +57,29 @@ public:
         buf_.assign((size_t)size, 0.0f);
         mask_ = size - 1;
         write_ = 0;
+        used_ = 0;
     }
-    void clear() { std::fill(buf_.begin(), buf_.end(), 0.0f); }
+    // Only the samples written since the last clear are zeroed: clearing an
+    // unused line (effect reset on the audio thread) costs nothing, a lightly
+    // used one little.
+    void clear() {
+        if (used_ == 0) return;
+        const int start = (write_ - used_) & mask_;
+        const int first = std::min(used_, (int)buf_.size() - start);
+        std::fill_n(buf_.data() + start, first, 0.0f);
+        std::fill_n(buf_.data(), used_ - first, 0.0f);
+        used_ = 0;
+    }
     int capacity() const { return mask_ - 4; }
     void push(float x) {
         buf_[(size_t)write_] = x;
         write_ = (write_ + 1) & mask_;
+        used_ += used_ <= mask_ ? 1 : 0;
     }
     // delay >= 1 sample (the sample pushed last is delay 1)
     float read(float delay) const {
         const float pos = (float)write_ - delay;
-        const int i = (int)fastFloor(pos);
+        const int i = floorIndex(pos);
         const float f = pos - (float)i;
         const float a = buf_[(size_t)(i & mask_)];
         const float b = buf_[(size_t)((i + 1) & mask_)];
@@ -76,7 +88,7 @@ public:
     // 4-point Hermite (for modulated pitch-sensitive lines)
     float readCubic(float delay) const {
         const float pos = (float)write_ - delay;
-        const int i = (int)fastFloor(pos);
+        const int i = floorIndex(pos);
         const float f = pos - (float)i;
         const float xm = buf_[(size_t)((i - 1) & mask_)], x0 = buf_[(size_t)(i & mask_)];
         const float x1 = buf_[(size_t)((i + 1) & mask_)], x2 = buf_[(size_t)((i + 2) & mask_)];
@@ -88,9 +100,17 @@ public:
     float readInt(int delay) const { return buf_[(size_t)((write_ - delay) & mask_)]; }
 
 private:
+    static int floorIndex(float pos) {
+#if defined(__aarch64__)
+        return (int)__builtin_floorf(pos);  // FCVTMS
+#else
+        return (int)fastFloor(pos);
+#endif
+    }
     std::vector<float> buf_;
     int mask_ = 0;
     int write_ = 0;
+    int used_ = 0;  // samples written since the last clear (saturates above the size)
 };
 
 // RBJ cookbook biquad, transposed direct form II.
@@ -109,7 +129,7 @@ struct Biquad {
     void copyCoefs(const Biquad& o) { b0 = o.b0; b1 = o.b1; b2 = o.b2; a1 = o.a1; a2 = o.a2; }
 
     enum Type { LP, HP, BP, Notch, Peak, LowShelf, HighShelf, AllPass };
-    void set(Type t, float freq, float q, float gainDb, float sr) {
+    void set(Type t, float freq, float q, float gainDb, float sr, bool shelfQ = false) {
         freq = clampf(freq, 5.0f, sr * 0.495f);
         q = std::max(q, 0.025f);
         const double w0 = 2.0 * 3.14159265358979 * freq / sr;
@@ -129,7 +149,7 @@ struct Biquad {
                 break;
             case LowShelf:
             case HighShelf: {
-                const double sA = 2 * std::sqrt(A) * (sw / 2 * std::sqrt(2.0));  // shelf slope S = 1
+                const double sA = 2 * std::sqrt(A) * (shelfQ ? alpha : sw / 2 * std::sqrt(2.0));
                 if (t == LowShelf) {
                     B0 = A * ((A + 1) - (A - 1) * cw + sA); B1 = 2 * A * ((A - 1) - (A + 1) * cw);
                     B2 = A * ((A + 1) - (A - 1) * cw - sA); A0 = (A + 1) + (A - 1) * cw + sA;
@@ -219,14 +239,17 @@ public:
     float phase() const { return phase_; }
     float inc() const { return inc_; }
     // advance one sample; offset (cycles) gives a phase-shifted copy
-    float tick(FxWave w, Rng& rng) {
-        const float v = value(w, 0.0f);
+    void advance(Rng& rng) {
         phase_ += inc_;
         if (phase_ >= 1.0f) {
             phase_ -= 1.0f;
             prevHeld_ = held_;
             held_ = rng.bipolar();
         }
+    }
+    float tick(FxWave w, Rng& rng) {
+        const float v = value(w, 0.0f);
+        advance(rng);
         return v;
     }
     float value(FxWave w, float offset) const {

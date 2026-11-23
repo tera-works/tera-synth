@@ -16,8 +16,43 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+if(NOT DEFINED HSYNTH_PERFORMANCE_SOURCES)
+    set(HSYNTH_PERFORMANCE_SOURCES
+        src/audio_tap.cpp
+        src/metronome.cpp
+        src/physical.cpp
+        src/piano.cpp
+        src/backing_player.cpp
+        src/pad_sampler.cpp
+        src/live_sampler.cpp
+        src/midi_zone.cpp
+        src/pcm_file.cpp
+        src/performance_sequence.cpp
+        src/morph.cpp
+        src/npu_morph.cpp
+        src/stft.cpp
+        src/performance.cpp
+        src/performance_input.cpp
+        src/tuner.cpp
+    )
+endif()
+
+if(NOT DEFINED HSYNTH_FORMAT_SOURCES)
+    set(HSYNTH_FORMAT_SOURCES
+        src/formats/sf2.cpp
+        src/formats/dls_gig.cpp
+        src/formats/dspreset.cpp
+        src/formats/dx7_sysex.cpp
+        src/formats/wavetable_ext.cpp
+    )
+endif()
+
 add_library(hsynth STATIC
     src/engine.cpp
+    ${HSYNTH_PERFORMANCE_SOURCES}
+    ${HSYNTH_FORMAT_SOURCES}
+    src/live_transition.cpp
+    src/master_stage.cpp
     src/voice.cpp
     src/oscillators.cpp
     src/fm.cpp
@@ -70,6 +105,9 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(hsynth PUBLIC Threads::Threads)
+if(ANDROID)
+    target_link_libraries(hsynth PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 # MinGW: link the C++ runtime statically so the tools do not pick up an
 # incompatible libstdc++ DLL from another toolchain on PATH.
@@ -84,6 +122,8 @@ if(HSYNTH_BUILD_TOOLS AND (NOT ANDROID OR HSYNTH_DEVICE_TESTS))
     target_link_libraries(hsynth_assets PRIVATE hsynth)
     add_executable(hsynth_bench tools/hsynth_bench.cpp)
     target_link_libraries(hsynth_bench PRIVATE hsynth)
+    add_executable(hsynth_polybench tools/hsynth_polybench.cpp)
+    target_link_libraries(hsynth_polybench PRIVATE hsynth)
     add_executable(hsynth_fuzz tools/hsynth_fuzz.cpp)
     target_link_libraries(hsynth_fuzz PRIVATE hsynth)
     add_executable(hsynth_switch tools/hsynth_switch.cpp)
@@ -94,7 +134,7 @@ endif()
 
 if(HSYNTH_BUILD_TESTS AND (NOT ANDROID OR HSYNTH_DEVICE_TESTS))
     enable_testing()
-    add_executable(hsynth_tests tests/test_main.cpp tests/test_dsp.cpp tests/test_engine.cpp tests/test_io.cpp tests/test_fx.cpp tests/test_multi.cpp tests/test_voice.cpp tests/test_sfz.cpp tests/test_flac.cpp tests/test_quality.cpp tests/test_realtime.cpp tests/test_parallel.cpp tests/test_streaming.cpp tests/test_browser.cpp tests/test_fm8.cpp tests/test_fx_extra.cpp tests/test_v07.cpp tests/test_song.cpp tests/test_remote.cpp tests/test_ble.cpp tests/test_controllers.cpp)
+    add_executable(hsynth_tests tests/test_main.cpp tests/test_dsp.cpp tests/test_engine.cpp tests/test_io.cpp tests/test_fx.cpp tests/test_multi.cpp tests/test_voice.cpp tests/test_sfz.cpp tests/test_flac.cpp tests/test_quality.cpp tests/test_realtime.cpp tests/test_parallel.cpp tests/test_streaming.cpp tests/test_browser.cpp tests/test_fm8.cpp tests/test_fx_extra.cpp tests/test_v07.cpp tests/test_v08_p1.cpp tests/test_v08_p2.cpp tests/test_v08_p3.cpp tests/test_v08_p4.cpp tests/test_v08_p5.cpp tests/test_song.cpp tests/test_remote.cpp tests/test_ble.cpp tests/test_controllers.cpp)
     target_link_libraries(hsynth_tests PRIVATE hsynth Threads::Threads)
     if(ANDROID)
         set(HSYNTH_TESTS_ROOT "${HSYNTH_DEVICE_ROOT}/tests")

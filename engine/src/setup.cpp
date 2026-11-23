@@ -30,6 +30,12 @@ std::string makeSetupJson(const Engine& engine, const std::string& name, const s
         Json m;
         if (Json::parse(learn->toJson(), m, err)) root.set("midiLearn", m);
     }
+    root.set("pedalConfig", performanceInputToJson(engine.performanceInputConfig()));
+    Json rhythm = engine.rhythmJson();
+    rhythm.set("fill", false);
+    if (rhythm.find("enabled")->boolean() || rhythm.find("pattern")->number() != 0 ||
+        rhythm.find("levelDb")->number() != -12 || rhythm.find("swing")->number() != 0)
+        root.set("rhythm", std::move(rhythm));
     if (host.isObject() && !host.members().empty()) root.set("host", host);
     return root.dump(2);
 }
@@ -81,6 +87,10 @@ bool applySetupJson(Engine& engine, const std::string& text, const std::string& 
         }
         else out.warnings.push_back("MIDI learn: " + e);
     }
+    if (const Json* pedal = root.find("pedalConfig"); pedal && !engine.setPedalConfigJson(*pedal))
+        out.warnings.push_back("invalid pedal configuration");
+    if (const Json* rhythm = root.find("rhythm"); rhythm && !engine.setRhythmJson(*rhythm))
+        out.warnings.push_back("invalid rhythm configuration");
     if (const Json* h = root.find("host"); h && h->isObject()) out.host = *h;
     return true;
 }

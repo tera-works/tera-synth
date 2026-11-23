@@ -32,10 +32,19 @@
 #include <mutex>
 #include <string>
 
+#include "hsynth/dsp/master_stage.h"
+#include "hsynth/dsp/piano.h"
+#include "hsynth/morph.h"
+#include "hsynth/performance_sequence.h"
 #include "hsynth/common.h"
 #include "hsynth/dsp/effects.h"
 #include "hsynth/dsp/lfo.h"
 #include "hsynth/event.h"
+#include "hsynth/backing_player.h"
+#include "hsynth/npu_morph.h"
+#include "hsynth/live_sampler.h"
+#include "hsynth/midi_zone.h"
+#include "hsynth/pad_sampler.h"
 #include "hsynth/fx/block.h"
 #include "hsynth/fx/convolver.h"
 #include "hsynth/fx/insert.h"
@@ -44,6 +53,10 @@
 #include "hsynth/sample_set.h"
 #include "hsynth/smf.h"
 #include "hsynth/spsc_queue.h"
+#include "hsynth/audio_tap.h"
+#include "hsynth/dsp/metronome.h"
+#include "hsynth/performance_input.h"
+#include "hsynth/tuner.h"
 #include "hsynth/voice.h"
 #include "hsynth/worker_pool.h"
 
@@ -77,7 +90,19 @@ public:
 
     // Not real-time safe. Call before audio starts or with audio stopped.
     void prepare(float sampleRate, int maxBlockSize = kMaxBlockSize);
-    float sampleRate() const { return sampleRate_; }
+    void setMasterStage(const MasterStageConfig& config) { masterStage_.setConfig(config); }
+    bool updateMasterStage(const std::function<bool(MasterStageConfig&)>& edit) { return masterStage_.updateConfig(edit); }
+    MasterStageConfig getMasterStage() const { return masterStage_.getConfig(); }
+    float masterCompGrDb() const { return masterStage_.gainReductionDb(); }
+    float sampleRate() const { return sampleRateHost_.load(std::memory_order_relaxed); }
+
+    BackingPlayer& backingPlayer() { return backing_; }
+    NpuMorph& npuMorph() { return npuMorph_; }
+    PadSampler& padSampler() { return pads_; }
+    LiveSampler& liveSampler() { return liveSampler_; }
+    ZoneNoteLedger& externalMidi() { return extMidiOut_; }
+    void setBackingRoute(bool direct);
+    void requestZonePrograms() { zoneProgramVersion_.fetch_add(1, std::memory_order_release); }
 
     // Audio thread. Renders n frames into non-interleaved buffers (overwrites).
     void process(float* left, float* right, int n);
@@ -88,6 +113,26 @@ public:
     float getParam(int id) const;
     void setAllParams(const float* values);  // kNumParams values
     void getAllParams(float* out) const;
+
+    struct PartSoundOptions {
+        MorphProgram morph;
+        ArpPattern arpPattern;
+    };
+    PartSoundOptions partSoundOptions(int part) const;
+    void setPartSoundOptions(int part, const PartSoundOptions& options);
+    void morphSetA(int part);
+    int morphCaptureB(int part);
+    bool morphAssign(int part, int id, float a, float b);
+    void morphClear(int part, int id);
+    void morphClearAll(int part);
+    float morphNow(int part, int id) const;
+    bool setArpPatternJson(int part, const Json& json);
+    ArpPattern arpPattern(int part) const;
+    int arpStep(int part) const;
+    bool setRhythmJson(const Json& json);
+    Json rhythmJson() const;
+    void setRhythmFill(bool on) { rhythmFill_.store(on, std::memory_order_relaxed); }
+    int physModes(int part, int layer, float* out, int capacity) const;
 
     // Takes ownership. Pass an empty SampleSet (or nullptr) to unload.
     void setSampleSet(int layer, std::unique_ptr<SampleSet> set) { setPartSampleSet(0, layer, std::move(set)); }
@@ -112,6 +157,7 @@ public:
     // kNumParams-sized arrays. set: only the part parameters are used. get:
     // the part parameters of `part`, everything else from the global array.
     void setPartParams(int part, const float* values);
+    void setPartTuning(int part, const float* cents);
     void getPartParams(int part, float* out) const;
     // Only the non-part parameters (rack, master volume, limiter).
     void setGlobalParams(const float* values);
@@ -165,13 +211,41 @@ public:
         e.controller = (uint16_t)c;
         sendEvent(e);
     }
-    fx::LooperStatus looperStatus() const { return rack_.looperStatus(); }
+    fx::LooperStatus looperStatus() const { return looper_.status(); }
     // Blocks in processing order; returns count (<= fx::kFxSlots).
-    int fxChain(int* blocks) const { return rack_.chainSnapshot(blocks); }
+    int fxChain(int* blocks) const;
 
     // Audio thread, before process(): external input for the vocoder for the
     // next process() call (n frames, or nullptr). The pointers are not kept.
-    void setInputBuffer(const float* left, const float* right) { inL_ = left; inR_ = right; }
+    // validFrames excludes any zero padding in the borrowed buffers. Legacy
+    // callers without a length are resolved at the beginning of process().
+    void setInputBuffer(const float* left, const float* right, int validFrames = -1);
+
+    void setPerfOffsets(int transposeSemi, float trimDb);
+    int perfTranspose() const { return perfOffsets_.load(std::memory_order_relaxed).transpose; }
+    float perfTrimDb() const { return perfOffsets_.load(std::memory_order_relaxed).trimDb; }
+
+    MetronomeConfig metronomeConfig() const;
+    void setMetronomeConfig(const MetronomeConfig& config);
+    bool setMetronomeJson(const Json& config);
+    void setMetronomeEnabled(bool on) { metroEnabled_.store(on, std::memory_order_relaxed); }
+    int clickBeat() const {
+        return metroEnabled_.load(std::memory_order_relaxed) || phraseCountInPending_.load(std::memory_order_relaxed)
+            ? metronome_.currentBeat() : -1;
+    }
+
+    Tuner& tuner() { return tuner_; }
+    const Tuner& tuner() const { return tuner_; }
+    AudioTap& audioTap() { return audioTap_; }
+
+    PerformanceInputConfig performanceInputConfig() const { return performanceInput_.get().config; }
+    void setPerformanceInputConfig(const PerformanceInputConfig& config);
+    bool setPedalConfigJson(const Json& config);
+    void setFootswitch(int slot, int cc, int action, bool invert);
+    bool footswitchConsumesCc(int cc) const;
+    int takeHostAction();
+    uint32_t lastCc() const { return lastCc_.load(std::memory_order_relaxed); }
+    int pedalState() const { return pedalState_.load(std::memory_order_relaxed); }
 
     // MIDI clock state (from EventType::Clock): measured tempo, 0 if no clock
     // was received in the last 0.5 s. Any thread.
@@ -217,6 +291,7 @@ public:
         uint16_t pass = 0;
     };
     static constexpr int kMaxPhraseEvents = 8192;
+    bool phraseCommand(int command);  // false for an unknown command or a full queue
     void phraseRecord();   // Empty: record the first pass; Playing: overdub on; Overdub: off; Stopped: overdub from the top
     void phrasePlay();     // Recording: close the first pass and loop; Stopped: play from the top
     void phraseStop();
@@ -229,8 +304,8 @@ public:
     double phrasePosition() const { return phrasePosA_.load(std::memory_order_relaxed); }  // beats
     int phraseEventCount() const { return phraseCountA_.load(std::memory_order_relaxed); }
     // Copy of the phrase (quantize, export): request, then take it after the next audio block.
-    void requestPhraseSnapshot() { snapReq_.store(true, std::memory_order_release); }
-    bool takePhraseSnapshot(std::vector<PhraseEvent>& out, double& lengthBeats);
+    uint32_t requestPhraseSnapshot() { return snapRequest_.fetch_add(1, std::memory_order_release) + 1; }
+    bool takePhraseSnapshot(std::vector<PhraseEvent>& out, double& lengthBeats, uint32_t* token = nullptr);
     // Replaces the phrase (e.g. quantized); it keeps playing from the same position.
     void replacePhrase(const std::vector<PhraseEvent>& events, double lengthBeats);
 
@@ -243,18 +318,54 @@ public:
     // sample layers that change. One staged program per part; a newer one
     // replaces it.
     struct StagedProgram {
+        PartSoundOptions sound;
         int program = -1;
         bool keepSound = false;               // same preset: only the program number changes
         float params[P::kNumParams] = {};     // the part parameters (isPartParam) are used
         SampleSet* sets[kNumLayers] = {};     // owned until applied (nullptr = empty layer)
         std::string setNames[kNumLayers], setPaths[kNumLayers];
-        int appliedPart = -1;                 // set by the engine
+        int appliedPart = -1;
+        uint32_t revision = 0;                 // set by the engine
         StagedProgram() = default;
         StagedProgram(const StagedProgram&) = delete;
         StagedProgram& operator=(const StagedProgram&) = delete;
         ~StagedProgram() { for (SampleSet* s : sets) delete s; }
     };
     void stagePartProgram(int part, std::unique_ptr<StagedProgram> staged);
+
+    // Prepare off the audio thread, commit atomically at a render boundary.
+    // Explicit live commits are independent of the host's automatic-load policy.
+    struct LiveFx;
+    struct LiveChange {
+        LiveChange();
+        ~LiveChange();
+        std::unique_ptr<StagedProgram> parts[kNumParts];
+        bool hasGlobals = false, multi = false, single = false;
+        float globals[P::kNumParams] = {};
+        std::unique_ptr<fx::ConvIr> ir[2];
+        float irSampleRate = 0.0f;
+        float mix[kNumParts][Mix::Count] = {};
+        int selectedPart = 0;
+
+    private:
+        friend class Engine;
+        std::unique_ptr<LiveFx> fx;
+        std::unique_ptr<fx::InsertChain> inserts[kNumParts];
+        uint32_t sampleEpoch = 0;
+        uint32_t serial = 0;
+        int tailFrames = 0;
+    };
+    bool stageLiveChange(std::unique_ptr<LiveChange> change, uint32_t* serial = nullptr);
+    // Only when the host has stopped and joined its audio callback.
+    void commitLiveChangeWhileStopped();
+    bool liveChangeApplied(uint32_t serial) const {
+        return (int32_t)(liveApplied_.load(std::memory_order_acquire) - serial) >= 0;
+    }
+    void setSstEnabled(bool on) { sstEnabled_.store(on, std::memory_order_relaxed); }
+    bool sstEnabled() const { return sstEnabled_.load(std::memory_order_relaxed); }
+    void setSstTimeMs(float ms);
+    float sstTimeMs() const { return sstTimeMs_.load(std::memory_order_relaxed); }
+    float sstProgress() const { return sstProgress_.load(std::memory_order_relaxed); }
     // the program the part plays (-1 unknown), as set by setPartProgram() or a staged program
     int partProgram(int part) const { return validPart(part) ? appliedProg_[part].load(std::memory_order_relaxed) : -1; }
     // the latest program change the song passed on the part's channel (-1 none)
@@ -285,15 +396,23 @@ public:
 
     EngineStats stats() const;
     void resetPeakStats();
+    // audio thread / tests: true when engine is in zero-cost silent-idle fast path
+    bool isSilentIdle() const { return silentIdle_; }
     // Where the slowest block since resetPeakStats() spent its time (us):
     // params, swaps+events+song, voices, part inserts, rack+sends+master, stats.
     static constexpr int kProfPhases = 8;  // + active voices, rendered in parallel (0/1)
     void peakProfile(float out[kProfPhases]) const;
+    // Phase 4 duration for the latest block, read on the render thread.
+    float lastFxMicros() const {
+        return std::chrono::duration<float, std::micro>(profMark_[5] - profMark_[4]).count();
+    }
 
 private:
     // Audio-thread state of one part.
     struct PartState {
-        const float* p = nullptr;  // parameter array (part 0: p_)
+        const float* p = nullptr;  // base or effective parameter row
+        PianoBusState piano;
+        StrumState strum;
         VoiceContext ctx;
         float pitchBend = 0.0f;
         // scale lock / chord mode: the notes each held key started (released with it)
@@ -314,6 +433,7 @@ private:
         float knobBend = -1.0f;
         uint8_t rpnMsb = 127, rpnLsb = 127;  // selected RPN (127/127 = none)
         bool sustain = false;
+        float logicalPedal = 0.0f;
         Lfo lfo2;
         Rng rng;                   // lfo2 S&H of parts 1..15 (part 0 uses the engine rng)
         float ccVolume = 1.0f;     // CC7 (multi mode)
@@ -354,6 +474,7 @@ private:
             struct Pending { uint32_t id; uint8_t key; double offBeat; };
             Pending pend[kMax];
             int pendCount = 0;
+            bool pattern = false;
             uint32_t nextId = 1;
             Rng rng{0xA5A5u};
         } arp;
@@ -373,13 +494,27 @@ private:
     };
 
     void handleEvent(const Event& e);
+    void syncPerformanceInput();
+    void liveEvent(Event e);
+    bool externalCc(Event& e);
+    void setHardwareSustain(int channel, bool down, float value = -1.0f);
+    void updatePartPedal(int part);
+    void updatePedalState();
+    void ghostPedal(const Event& e, bool hardware = false);
+    void footswitchAction(int action);
+    void tapTempo();
+    void processMetronome(int frames);
     void partEvent(int part, const Event& e);
+    void routeZoneControl(const Event& e);
+    void syncZoneConfig();
+    void commitZonePrograms(uint32_t version);
+    void mixBacking(float* left, float* right, int frames, const fx::FxGlobals& globals, bool active);
     void noteOn(int part, const Event& e);
-    void startNote(int part, const Event& e, float glideFrom);  // allocate + start (unison) voices
+    void startNote(int part, const Event& e, float glideFrom, float splitGain = 1.0f);  // allocate + start (unison) voices
     bool monoNoteOff(int part, const Event& e);                  // true if handled by the mono logic
     // arpeggiator: true if the event was taken by the part's arpeggiator
     bool arpInput(int part, const Event& e);
-    void runArps(int frameOffset, int frames);                   // once per control block
+    void runArps(int frameOffset, int frames, bool patternOnly = false);                   // once per control block
     void arpStop(int part);
     // step sequencer (runs per control block like the arpeggiator)
     bool seqInput(int part, const Event& e);
@@ -394,7 +529,65 @@ private:
         if (curOffset_ > 0) v.releaseAt = curOffset_;
         else v.release();
     }
-    void scheduleControl(int n);  // runs arps / sequencers / the song for every control block of the block
+    void scheduleControl(int n, bool interleaved);
+    void scheduleSlice(int off, int frames);
+    void finishSchedule(int n);
+    bool sliceArp_ = false, slicePattern_ = false, sliceSeq_ = false, sliceSong_ = false, slicePhrase_ = false;
+    double blockArpBeat_ = 0.0;
+    int sequenceRenderSlice(int off, int n, bool interleaved);
+    bool needsSequenceSlices() const;
+    bool strumInput(int part, const Event& e);
+    void stopStrum(int part);
+    void arpRelease(int part, uint32_t id, int key);
+    uint64_t blockFrame_ = 0;
+    bool startingStrum_ = false;
+
+    struct SoundBank {
+        PartSoundOptions options;
+        uint32_t serial = 0;
+        bool resetMorph = false;
+    };
+    struct PartSoundState {
+        PerformanceMailbox<SoundBank> hostToAudio;
+        // A second triple buffer publishes audio-committed programs (SST/MIDI
+        // program changes) to serialized host readers without callback locks.
+        std::array<SoundBank, 3> outgoing{};
+        mutable std::atomic<unsigned> middle{1};
+        unsigned writer = 0;
+        mutable unsigned reader = 2;
+        std::atomic<uint32_t> serial{0};
+        mutable std::mutex hostMutex;
+        SoundBank current;
+        std::array<float, P::kPartParams> baseA{}, effective{};
+        std::array<std::atomic<float>, P::kPartParams> display;
+        float position = 0.0f, target = 0.0f, increment = 0.0f;
+        int remaining = 0;
+        bool haveA = false, copied = false, evaluate = false, initialize = false, insertDirty = false;
+        uint32_t baselineStage = 0;
+
+        PartSoundState();
+        SoundBank hostValue() const;
+        void publish(const PartSoundOptions& options, bool resetMorph);
+        void publishStage();
+    };
+    std::unique_ptr<PartSoundState[]> sound_;
+    std::atomic<uint32_t> soundPending_{0};
+    uint32_t morphParts_ = 0;
+    void publishSound(int part, const PartSoundOptions& options, bool resetMorph = false);
+    const float* basePartParams(int part) const;
+    bool syncSoundOptions();
+    void applySoundOptions(int part, const SoundBank& bank);
+    void applyStagedSound(int part, const PartSoundOptions& options);
+    void invalidateEffective(int part);
+    void evaluateMorph(int part, int frames);
+    void updateMorphedInsert(int part);
+    PerformanceMailbox<RhythmConfig> rhythmConfig_;
+    RhythmPlayer rhythm_;
+    double rhythmBeat_ = 0.0;
+    bool rhythmWasEnabled_ = false;
+    std::atomic<bool> rhythmFill_{false};
+    std::atomic<int> statArpStep_[kNumParts];
+    PhysicalPool physicalPool_;
     // song playback (audio thread state)
     std::atomic<Song*> pendingSong_{nullptr};
     std::atomic<bool> songUnload_{false};
@@ -406,6 +599,7 @@ private:
     StagedProgram* stage_[kNumParts] = {};   // audio thread
     SpscQueue<StagedProgram*> retiredStages_{64};
     std::atomic<int> appliedProg_[kNumParts], songProg_[kNumParts], stagedProg_[kNumParts];
+    std::atomic<uint32_t> programRevision_[kNumParts] = {};
     // phrase recorder (audio thread unless noted)
     enum PhraseCmd : int { CmdRecord = 1, CmdPlay, CmdStop, CmdClear, CmdUndo };
     SpscQueue<int> phraseCmds_{64};
@@ -415,7 +609,7 @@ private:
     double phraseLen_ = 0.0, phrasePos_ = 0.0;
     size_t phraseIdx_ = 0;                   // next event to play
     uint16_t phrasePass_ = 0;
-    struct HeldNote { uint32_t id; uint8_t key, channel; };
+    struct HeldNote { uint32_t id; uint8_t key, channel; int8_t transpose = 0; };
     static constexpr int kPhraseHeld = 64;
     HeldNote recHeld_[kPhraseHeld];          // recorded note-ons of this pass without a note-off yet
     int recHeldCount_ = 0;
@@ -423,7 +617,10 @@ private:
     int playHeldCount_ = 0;
     std::atomic<int> phraseStateA_{0}, phraseCountA_{0};
     std::atomic<double> phraseLenA_{0.0}, phrasePosA_{0.0};
-    std::atomic<bool> snapReq_{false}, snapReady_{false};
+    std::mutex phraseProducerMutex_;
+    std::atomic<uint32_t> snapRequest_{0};
+    std::atomic<bool> snapReady_{false};
+    uint32_t snapToken_ = 0;
     std::vector<PhraseEvent> snapBuf_;       // capacity kMaxPhraseEvents
     double snapLen_ = 0.0;
     struct PhraseSwap {
@@ -433,6 +630,10 @@ private:
     std::atomic<PhraseSwap*> pendingPhrase_{nullptr};
     SpscQueue<PhraseSwap*> retiredPhrases_{8};
     void phraseBlockStart();                 // commands, snapshot, swap
+    void applyPhraseCommand(int cmd, bool allowCountIn = true);
+    std::atomic<bool> phraseCountInPending_{false};
+    int phraseCountInEnd_ = -1;
+    bool metroRendered_ = false;
     void phraseCapture(const Event& e);      // a live event while recording
     void phraseInsert(const PhraseEvent& pe, bool atPlayhead);
     void phraseClosePass(double offBeat);    // note-offs for notes held when a pass ends
@@ -445,10 +646,41 @@ private:
     void applyStage(int part);
     // notes sounding at a program change keep their sound: a copy of the old part
     // parameters (ghost) and the old sample sets (held) until they end
-    static constexpr int kGhosts = 16;
+    static constexpr int kGhosts = 32;
+    struct LiveGhost {
+        LiveChange* owner = nullptr;
+        LiveFx* fx = nullptr;  // null feeds the current global rack
+        int part = 0, channel = kOmniChannel;
+        float logicalPedal = 0.0f;
+        PianoBusState piano;
+        uint16_t hardwarePedals = 0, halfPedalChannels = 0;
+        VoiceContext ctx;
+        Lfo lfo;
+        Rng rng{1};
+        float gains[4] = {}, sendA = 0.0f, sendB = 0.0f;
+    };
+    LiveGhost liveGhosts_[kGhosts];
+    static constexpr int kLiveGraphs = 4;
+    LiveChange* liveRetained_[kGhosts] = {};
+    std::atomic<LiveChange*> liveIncoming_{nullptr};
+    LiveChange* liveWaiting_ = nullptr;
+    SpscQueue<LiveChange*> liveRetired_{64};
+    std::atomic<bool> sstEnabled_{false};
+    std::atomic<float> sstTimeMs_{300.0f}, sstProgress_{-1.0f};
+    uint32_t liveSerial_ = 0;
+    std::atomic<uint32_t> liveApplied_{0}, sampleEpoch_{0};
+    int sstFrames_ = 0, sstLength_ = 1, sstFxFrames_ = 0, sstFxLength_ = 1;
+    bool hasLiveTails_ = false;
+    bool applyLiveChange();
+    void renderLiveGhosts(float* left, float* right, int frames);
+    void processLiveTails(float* left, float* right, int frames);
+    void liveNoteOff(const Event& event);
+    void clearLiveChanges();
+    void changeLiveSampleRate(float sampleRate);
+    std::mutex garbageMutex_;
     std::unique_ptr<float[]> ghostParams_;   // kGhosts x kPartParams
     bool ghostUsed_[kGhosts] = {};
-    static constexpr int kHeld = kNumParts * kNumLayers;
+    static constexpr int kHeld = kGhosts * kNumLayers;
     SampleSet* held_[kHeld] = {};
     void releaseHeld();                      // block end: frees ghosts / sets no voice uses any more
     std::atomic<bool> songPlay_{false};
@@ -472,13 +704,13 @@ private:
     std::atomic<int> statSeqStep_[kNumParts];
     // send / return buses (A = reverb, B = delay)
     void updateSends();
-    void processSends(float* L, float* R, int n);
+    void processEffects(float* L, float* R, int n, const fx::FxGlobals& globals);
     std::unique_ptr<fx::FxBlock> sendRev_, sendDly_;
     std::vector<float> sendRevP_, sendDlyP_;
     float sendA_[2][kMaxBlockSize] = {}, sendB_[2][kMaxBlockSize] = {};
-    bool sendUsed_ = false;
+    int sendAQuiet_ = -1;  // negative when the bus is idle
     float sendTempo_ = 0.0f;
-    int sendTail_ = 0;
+    int sendBQuiet_ = -1;
     double jobBeat_ = 0.0;
     float jobBpf_ = 0.0f;  // beats per frame
     double arpBeat_ = 0.0;                                       // free-running arp beat (no clock)
@@ -490,7 +722,7 @@ private:
     void updateEffects();
     float lfo2Rate(const float* p) const {
         const float b = fx::syncBeats((int)p[P::Lfo2Sync]);
-        return b > 0.0f ? rack_.tempo() / 60.0f / b : p[P::Lfo2Rate];
+        return b > 0.0f ? rack_->tempo() / 60.0f / b : p[P::Lfo2Rate];
     }
     void updateInserts(int part);
     void updatePartTargets();
@@ -507,6 +739,7 @@ private:
     static void insertJob(void* self, int worker, int item);  // inserts of part jobInsParts_[item]
 
     float sampleRate_ = 48000.0f;
+    std::atomic<float> sampleRateHost_{48000.0f};
     bool prepared_ = false;
 
     // parameters
@@ -537,7 +770,7 @@ private:
     int keyswitch_[kNumParts][kNumLayers];            // active SFZ keyswitch (-1 = set default)
     std::unique_ptr<float[]> partBus_;  // kNumParts x 2 x kMaxBlockSize (multi mode)
     float* bus(int part, int ch) { return partBus_.get() + ((size_t)part * 2 + (size_t)ch) * kMaxBlockSize; }
-    std::unique_ptr<fx::InsertChain[]> inserts_;  // per part
+    std::unique_ptr<fx::InsertChain> inserts_[kNumParts];  // per part
     float dryL_[kMaxBlockSize] = {}, dryR_[kMaxBlockSize] = {};
     float gainStep_ = 0.0f;  // per sample
 
@@ -586,7 +819,10 @@ private:
     uint32_t workUsed_[kMaxRenderThreads] = {};  // parts written by each worker in the current job
     static constexpr int kMaxSubBlocks = kMaxBlockSize / kControlBlock;
     float jobLfo2_[kNumParts][kMaxSubBlocks] = {};
-    int jobVoices_[kMaxVoices + kVoicePoolExtra] = {};
+    // Preserve the original 1088-byte job queue footprint in Engine.
+    static constexpr int kJobVoiceCapacity = 544;
+    static_assert(VoicePool::kSize <= kJobVoiceCapacity);
+    alignas(int) uint16_t jobVoices_[kJobVoiceCapacity] = {};
     int jobInsParts_[kNumParts] = {};
     int jobN_ = 0;
     bool jobMulti_ = false;
@@ -595,17 +831,78 @@ private:
     Rng rng_{0xC0FFEEu};
 
     // effects
-    fx::FxRack rack_;
+    std::unique_ptr<fx::FxRack> rack_;
+    std::atomic<int> rackChain_[fx::kFxSlots] = {};
+    std::atomic<int> rackChainLength_{0};
+    fx::Looper looper_;
+    BackingPlayer backing_;
+    NpuMorph npuMorph_;
+    PadSampler pads_;
+    LiveSampler liveSampler_;
+    ZoneNoteLedger extMidiOut_;
+    std::atomic<uint32_t> zoneProgramVersion_{0};
+    uint32_t zoneProgramSeen_ = 0, zoneProgramsPending_ = 0;
+    bool zonesEnabled_ = false;
+    std::mutex backingFxMutex_;
+    std::unique_ptr<fx::FxRack> backingFxOwner_;
+    std::atomic<fx::FxRack*> backingFx_{nullptr};
+    float backingFxRate_ = 48000;
+    bool backingFxDirty_ = true, backingFxTail_ = false;
+    float backingFxBus_[2][kMaxBlockSize];
     Limiter limiter_;
     int effectsQuality_ = -1;
     const float* inL_ = nullptr;
     const float* inR_ = nullptr;
+    bool inputFramesPending_ = false;
+
+    struct PerfOffsets {
+        int transpose = 0;
+        float trimDb = 0.0f;
+    };
+    static_assert(std::atomic<PerfOffsets>::is_always_lock_free);
+    std::atomic<PerfOffsets> perfOffsets_{PerfOffsets{}};
+    PerfOffsets activePerfOffsets_;
+    struct OutputRamp {
+        float current = 1.0f, target = 1.0f, step = 0.0f;
+        int remaining = 0;
+        void set(float next, int frames);
+        float advance();
+    } perfTrim_, tunerGain_;
+    int performanceRampFrames_ = 1;
+
+    PerformanceMailbox<MetronomeConfig> metroConfig_;
+    std::atomic<unsigned> metroEnabled_{0};
+    Metronome metronome_;
+    bool metroWasRendering_ = false, metroClockSynced_ = false;
+    float metroClick_[kMaxBlockSize];
+    AudioTap audioTap_;
+    Tuner tuner_;
+
+    PerformanceMailbox<PreparedPerformanceInput> performanceInput_;
+    PerformanceInputConfig appliedPedalConfig_;
+    uint16_t hardwareSustainDown_ = 0;
+    uint16_t hardwareSustainParts_[16]{};
+    uint16_t hardwareHalfParts_[16]{};
+    float hardwarePedalValue_[16]{};
+    bool suppressPianoPedal_ = false;
+    uint16_t hardwarePedalChannels_[kNumParts]{};
+    uint16_t footswitchChannels_[4]{};
+    uint16_t ccSequence_ = 0;
+    std::atomic<uint32_t> lastCc_{0};
+    std::atomic<int> pedalState_{0};
+    SpscQueue<int> hostActions_{32};
+    std::mutex hostActionConsumer_;
+    uint64_t lastTapFrame_ = 0;
+    bool haveTap_ = false;
+    uint64_t tapIntervals_[4]{};
+    int tapCount_ = 0, tapNext_ = 0;
     // pending user IR: nullptr = nothing pending, &unloadIr_ = unload request
     std::atomic<fx::ConvIr*> pendingIr_[2];
     fx::ConvIr unloadIr_;
     fx::ConvIr* currentIr_[2] = {};
     SpscQueue<fx::ConvIr*> retiredIr_{16};
     std::string irNames_[2], irPaths_[2];
+    MasterStage masterStage_;
     Smoother masterGain_;
 
     // stats (written by audio thread)
@@ -630,6 +927,12 @@ private:
     uint64_t ticksSinceStart_ = 0;
     float clockBpm_ = 0.0f;
     bool clockRunning_ = true;
+
+    // silent-idle fast path (audio thread): skips voice/FX/meter scans after
+    // 0.5 s of complete silence with 0 active voices and idle FX tails; wakes
+    // on the very same block as any incoming MIDI/parameter/song/audio event.
+    bool silentIdle_ = false;
+    int silentFrames_ = 0;
 };
 
 }  // namespace hsynth

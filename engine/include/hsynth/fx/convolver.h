@@ -92,6 +92,7 @@ private:
     Stage a_, b_;
     std::vector<float> histL_, histR_;  // mirrored head FIR history
     int histPos_ = 0;
+    bool used_ = true;  // processed since the last reset (a clean convolver resets for free)
 };
 
 }  // namespace fx

@@ -26,8 +26,23 @@ struct ChannelSink {
         e.channel = (uint8_t)channel;
         sink.onEvent(e);
     }
+    void onCc(Event e, int cc, float raw) {
+        e.rawCc = static_cast<uint8_t>(cc);
+        if (cc == 64) e.rawSustainValue = raw;
+        onEvent(e);
+    }
     void onProgramChange(int ch, int program) { sink.onProgramChange(ch, program); }
 };
+
+void controlChange(ChannelSink& sink, int cc, float value) {
+    switch (cc) {
+        case 1: sink.onCc(Event::control(EventType::ModWheel, value), cc, value); break;
+        case 64: sink.onCc(Event::control(EventType::Sustain, value >= 0.5f ? 1.0f : 0.0f), cc, value); break;
+        case 120: sink.onCc(Event::control(EventType::AllSoundOff, 0), cc, value); break;
+        case 123: sink.onCc(Event::control(EventType::AllNotesOff, 0), cc, value); break;
+        default: sink.onCc(Event::control(EventType::Controller, value, cc), cc, value); break;
+    }
+}
 }  // namespace
 
 void MidiTranslator::processMidi1(const uint8_t* data, size_t len, EventSink& sink) {
@@ -78,14 +93,10 @@ void MidiTranslator::midi1Message(int group, uint8_t status, uint8_t d1, uint8_t
         case 0xB0:
             if (isMpeMember(ch) && d1 == 74 && channelNote_[group][ch] >= 0) {
                 const int n = channelNote_[group][ch];
-                sink.onEvent(Event::perNote(EventType::NoteTimbre, noteId(group, ch, n), n, d2 / 127.0f));
+                sink.onCc(Event::perNote(EventType::NoteTimbre, noteId(group, ch, n), n, d2 / 127.0f), d1, d2 / 127.0f);
                 break;
             }
-            if (d1 == 1) sink.onEvent(Event::control(EventType::ModWheel, d2 / 127.0f));
-            else if (d1 == 64) sink.onEvent(Event::control(EventType::Sustain, d2 >= 64 ? 1.0f : 0.0f));
-            else if (d1 == 120) sink.onEvent(Event::control(EventType::AllSoundOff, 0));
-            else if (d1 == 123) sink.onEvent(Event::control(EventType::AllNotesOff, 0));
-            else sink.onEvent(Event::control(EventType::Controller, d2 / 127.0f, d1));
+            controlChange(sink, d1, d2 / 127.0f);
             break;
         case 0xC0:
             sink.onProgramChange(ch, d1);
@@ -222,12 +233,7 @@ void MidiTranslator::midi2Message(uint32_t w0, uint32_t w1, EventSink& out) {
             if (w0 & 0x1) sink.onEvent(Event::perNote(EventType::NotePitch, id, idx, 0.0f));
             break;
         case 0xB: {
-            const float v = u32Norm(w1);
-            if (idx == 1) sink.onEvent(Event::control(EventType::ModWheel, v));
-            else if (idx == 64) sink.onEvent(Event::control(EventType::Sustain, v >= 0.5f ? 1.0f : 0.0f));
-            else if (idx == 120) sink.onEvent(Event::control(EventType::AllSoundOff, 0));
-            else if (idx == 123) sink.onEvent(Event::control(EventType::AllNotesOff, 0));
-            else sink.onEvent(Event::control(EventType::Controller, v, idx));
+            controlChange(sink, idx, u32Norm(w1));
             break;
         }
         case 0xC:

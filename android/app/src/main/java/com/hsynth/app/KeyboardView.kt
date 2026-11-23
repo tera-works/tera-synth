@@ -10,15 +10,8 @@ import android.view.MotionEvent
 import android.view.View
 
 /**
- * Multi-touch piano keyboard.
- *
- *  - Velocity: from the touch position along the key (further down = louder),
- *    or fixed.
- *  - Per-note expression for every finger independently:
- *      vertical movement  -> NoteTimbre (0..1)
- *      touch size/pressure -> NotePressure
- *      horizontal slide    -> "gliss" (retrigger on the new key) or
- *                             "bend" (continuous per-note pitch, MPE style)
+ * Multi-touch piano keyboard with OLED Night Keys mode (Proposal B)
+ * and Obsidian Cyan active-key glow.
  */
 class KeyboardView(context: Context) : View(context) {
     enum class SlideMode { GLISS, BEND }
@@ -28,6 +21,9 @@ class KeyboardView(context: Context) : View(context) {
     var whiteKeyCount = 15
         set(v) { field = v.coerceIn(5, 36); allNotesOff(); invalidate() }
     var slideMode = SlideMode.GLISS
+    /** Dark OLED-saving keybed for dark stages (Proposal B NIGHT KEYS). */
+    var nightKeys = false
+        set(v) { if (field != v) { field = v; applyPalette(); invalidate() } }
     /** Semitones added to the notes this keyboard plays (the keys shown stay where they are). */
     var transpose = 0
         set(v) { field = v.coerceIn(-24, 24); allNotesOff() }
@@ -39,18 +35,38 @@ class KeyboardView(context: Context) : View(context) {
 
     private data class Touch(var noteId: Int, var key: Int, val downX: Float, val downY: Float, var lastTimbre: Float = -1f)
 
+    private val d = resources.displayMetrics.density
     private val touches = HashMap<Int, Touch>()
     private var nextNoteId = 0x100000
     private val held = IntArray(128)
 
-    private val white = Paint().apply { color = Color.rgb(236, 238, 242) }
-    private val whitePressed = Paint().apply { color = Color.rgb(255, 196, 140) }
-    private val black = Paint().apply { color = Color.rgb(24, 26, 32) }
-    private val blackPressed = Paint().apply { color = Color.rgb(230, 120, 30) }
-    private val border = Paint().apply { color = Color.rgb(60, 64, 72); style = Paint.Style.STROKE; strokeWidth = 2f }
-    private val label = Paint().apply { color = Color.rgb(90, 96, 110); textSize = 28f; isAntiAlias = true; textAlign = Paint.Align.CENTER }
-    private val touchPaint = Paint().apply { color = Color.argb(110, 255, 160, 60); isAntiAlias = true }
+    private val white = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val whitePressed = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Hw.MOD_OSC }
+    private val black = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val blackPressed = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Hw.MOD_FILTER }
+    private val blackStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f * d }
+    private val border = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 1.2f * d }
+    private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 10.5f * d; textAlign = Paint.Align.CENTER; typeface = Hw.MONO }
+    private val touchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Hw.withAlpha(Hw.MOD_OSC, 90) }
     private val rect = RectF()
+
+    init { applyPalette() }
+
+    private fun applyPalette() {
+        if (nightKeys) {
+            white.color = Color.rgb(20, 26, 36)       // deep slate OLED-friendly natural keys
+            black.color = Color.rgb(6, 8, 12)         // pure dark accidental keys
+            border.color = Color.rgb(40, 50, 68)
+            blackStroke.color = Color.rgb(54, 67, 90)
+            label.color = Hw.ENGRAVE
+        } else {
+            white.color = Color.rgb(232, 237, 245)
+            black.color = Color.rgb(14, 17, 24)
+            border.color = Color.rgb(42, 48, 60)
+            blackStroke.color = Color.rgb(48, 56, 72)
+            label.color = Color.rgb(86, 97, 119)
+        }
+    }
 
     private fun isBlack(note: Int) = when (note % 12) { 1, 3, 6, 8, 10 -> true; else -> false }
 
@@ -63,16 +79,13 @@ class KeyboardView(context: Context) : View(context) {
 
     private fun whiteWidth() = width.toFloat() / whiteKeyCount
 
-    /** Note under (x, y), black keys take precedence in the upper 62 %. */
     private fun noteAt(x: Float, y: Float): Int {
         val ww = whiteWidth()
         val wi = (x / ww).toInt().coerceIn(0, whiteKeyCount - 1)
         val wn = whiteIndexToNote(wi)
         if (y < height * 0.62f) {
             val local = x - wi * ww
-            // black key to the right of this white key
             if (local > ww * 0.68f && isBlack(wn + 1) && wi < whiteKeyCount - 1) return wn + 1
-            // black key to the left
             if (local < ww * 0.32f && wn - 1 >= firstNote && isBlack(wn - 1)) return wn - 1
         }
         return wn
@@ -87,23 +100,26 @@ class KeyboardView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         val ww = whiteWidth()
         val h = height.toFloat()
+        canvas.drawColor(Hw.WELL)
+        val rad = 4f * d
         for (i in 0 until whiteKeyCount) {
             val n = whiteIndexToNote(i)
-            rect.set(i * ww, 0f, (i + 1) * ww, h)
-            canvas.drawRect(rect, if (held[n] > 0) whitePressed else white)
-            canvas.drawRect(rect, border)
-            if (n % 12 == 0) canvas.drawText("C${n / 12 - 1}", i * ww + ww / 2, h - 18f, label)
+            rect.set(i * ww + 0.5f * d, 0f, (i + 1) * ww - 0.5f * d, h - 1f * d)
+            canvas.drawRoundRect(rect, rad, rad, if (held[n] > 0) whitePressed else white)
+            canvas.drawRoundRect(rect, rad, rad, border)
+            if (n % 12 == 0) canvas.drawText("C${n / 12 - 1}", i * ww + ww / 2f, h - 8f * d, label)
         }
         for (i in 0 until whiteKeyCount - 1) {
             val n = whiteIndexToNote(i)
             if (isBlack(n + 1)) {
                 val cx = (i + 1) * ww
-                rect.set(cx - ww * 0.32f, 0f, cx + ww * 0.32f, h * 0.62f)
-                canvas.drawRoundRect(rect, 6f, 6f, if (held[n + 1] > 0) blackPressed else black)
+                rect.set(cx - ww * 0.31f, 0f, cx + ww * 0.31f, h * 0.61f)
+                canvas.drawRoundRect(rect, 3.5f * d, 3.5f * d, if (held[n + 1] > 0) blackPressed else black)
+                canvas.drawRoundRect(rect, 3.5f * d, 3.5f * d, blackStroke)
             }
         }
         for (t in touches.values) {
-            canvas.drawCircle(t.downX, t.downY, 30f, touchPaint)
+            canvas.drawCircle(t.downX, t.downY, 14f * d, touchPaint)
         }
     }
 
@@ -133,7 +149,6 @@ class KeyboardView(context: Context) : View(context) {
             NativeEngine.perNote(NativeEngine.PerNote.TIMBRE, t.noteId, snd(t.key), timbre)
             t.lastTimbre = timbre
         }
-        // touch-size based pseudo pressure (capacitive screens have no force sensor)
         NativeEngine.perNote(NativeEngine.PerNote.PRESSURE, t.noteId, snd(t.key), ((size - 0.05f) * 4f).coerceIn(0f, 1f))
         if (slideMode == SlideMode.BEND) {
             val semis = (x - t.downX) / whiteWidth() * 1.7f
@@ -179,7 +194,6 @@ class KeyboardView(context: Context) : View(context) {
         invalidate()
     }
 
-    /** Highlight keys played from MIDI. */
     fun setExternalHeld(key: Int, on: Boolean) {
         if (key !in 0..127) return
         held[key] = if (on) held[key] + 1 else (held[key] - 1).coerceAtLeast(0)
@@ -188,59 +202,80 @@ class KeyboardView(context: Context) : View(context) {
 }
 
 /**
- * Vertical controller strip. Spring mode returns to the centre when released
- * (pitch bend); otherwise it holds its value (mod wheel).
+ * Obsidian vertical controller ribbon (Pitch Bend / Mod Wheel).
+ * Zero per-frame allocations in onDraw().
  */
-class ControlStrip(context: Context, private val title: String, private val spring: Boolean, private val bipolar: Boolean,
-                   private val onChange: (Float) -> Unit) : View(context) {
-    private var value = if (bipolar) 0f else 0f
+class ControlStrip(
+    context: Context,
+    private val title: String,
+    private val spring: Boolean,
+    private val bipolar: Boolean,
+    private val accent: Int = if (bipolar) Hw.MOD_FILTER else Hw.MOD_OSC,
+    private val onChange: (Float) -> Unit
+) : View(context) {
+    private var value = 0f
     private val d = resources.displayMetrics.density
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Hw.ENGRAVE; textSize = 12.5f * d; textAlign = Paint.Align.CENTER; typeface = Hw.BOLD }
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Hw.ENGRAVE
+        textSize = 10f * d
+        textAlign = Paint.Align.CENTER
+        typeface = Hw.BOLD
+        letterSpacing = 0.08f
+    }
+    private val r = RectF()
 
-    // drawn as a pitch / mod wheel in a recessed slot, the ridges move with the value
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(Hw.PANEL)
-        canvas.drawText(L10n.t(title).uppercase(), w / 2, 16 * d, text)
-        val top = 24 * d
-        val bot = h - 8 * d
-        val l = 10 * d
-        val r = w - 10 * d
-        p.shader = null
-        p.color = Color.rgb(8, 9, 11)
-        canvas.drawRoundRect(l - 3 * d, top - 3 * d, r + 3 * d, bot + 3 * d, 6 * d, 6 * d, p)
-        p.shader = android.graphics.LinearGradient(0f, top, 0f, bot,
-            intArrayOf(Color.rgb(20, 21, 25), Color.rgb(70, 74, 84), Color.rgb(20, 21, 25)), null, android.graphics.Shader.TileMode.CLAMP)
-        canvas.drawRoundRect(l, top, r, bot, 4 * d, 4 * d, p)
-        p.shader = null
-        // ridges
-        val t = if (bipolar) (value + 1f) / 2f else value
-        val span = bot - top
-        val step = 9 * d
-        p.color = Color.argb(120, 0, 0, 0)
-        p.strokeWidth = 1.5f * d
-        var y = top + ((1f - t) * span * 0.6f) % step
-        while (y < bot) {
-            val fade = 1f - kotlin.math.abs((y - (top + bot) / 2) / (span / 2))
-            p.alpha = (40 + 110 * fade).toInt()
-            canvas.drawLine(l + 2 * d, y, r - 2 * d, y, p)
-            y += step
-        }
-        // position marker
-        val my = bot - 6 * d - t * (span - 12 * d)
-        p.color = Hw.LED
-        canvas.drawRoundRect(l + 1 * d, my - 3 * d, r - 1 * d, my + 3 * d, 2 * d, 2 * d, p)
+        canvas.drawColor(Hw.CHASSIS)
+        canvas.drawText(L10n.t(title).uppercase(), w / 2f, 14f * d, text)
+        val top = 20f * d
+        val bot = h - 6f * d
+        val l = 8f * d
+        val rr = w - 8f * d
+        val span = (bot - top).coerceAtLeast(10f)
+
+        // Pure black OLED well
+        r.set(l, top, rr, bot)
+        p.style = Paint.Style.FILL
+        p.color = Hw.WELL
+        canvas.drawRoundRect(r, 5f * d, 5f * d, p)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 1f * d
+        p.color = Hw.PANEL_EDGE
+        canvas.drawRoundRect(r, 5f * d, 5f * d, p)
+
+        // Center tick (bipolar)
+        val midY = (top + bot) / 2f
         if (bipolar) {
-            p.color = Color.argb(140, 255, 255, 255)
-            canvas.drawRect(l - 3 * d, (top + bot) / 2 - 0.5f * d, l, (top + bot) / 2 + 0.5f * d, p)
+            p.color = Hw.PANEL_HI
+            canvas.drawLine(l + 3 * d, midY, rr - 3 * d, midY, p)
         }
+
+        // Active fill bar
+        val t = if (bipolar) (value + 1f) / 2f else value
+        val my = bot - 5f * d - t * (span - 10f * d)
+        p.style = Paint.Style.FILL
+        p.color = Hw.withAlpha(accent, 90)
+        if (bipolar) {
+            val y0 = minOf(midY, my)
+            val y1 = maxOf(midY, my)
+            r.set(l + 3 * d, y0, rr - 3 * d, y1)
+        } else {
+            r.set(l + 3 * d, my, rr - 3 * d, bot - 2 * d)
+        }
+        canvas.drawRoundRect(r, 2.5f * d, 2.5f * d, p)
+
+        // Glowing thumb bar
+        p.color = accent
+        r.set(l + 2 * d, my - 3f * d, rr - 2 * d, my + 3f * d)
+        canvas.drawRoundRect(r, 2.5f * d, 2.5f * d, p)
     }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        val h = height.toFloat()
+        val h = height.toFloat().coerceAtLeast(1f)
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
                 val t = 1f - (e.y / h).coerceIn(0f, 1f)

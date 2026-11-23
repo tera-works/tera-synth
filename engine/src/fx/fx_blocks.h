@@ -78,9 +78,12 @@ public:
     HS_FX_BLOCK_API
 private:
     float sr_ = 48000, inGain_ = 1, ceil_ = 1, att_ = 0, rel_ = 0, gain_ = 1;
-    int la_ = 1, winPos_ = 0;
+    int la_ = 1, minHead_ = 0, minCount_ = 0;
+    uint32_t clock_ = 0;
     DelayLine dl_, dr_;
-    std::vector<float> win_;
+    struct GainPoint { float gain; uint32_t frame; };
+    std::vector<GainPoint> minima_;
+    int minMask_ = 0;
 };
 
 // ======================================================== drive / tone
@@ -358,6 +361,7 @@ public:
 private:
     float sr_ = 48000, timeL_ = 0.35f, timeR_ = 0.35f, fb_ = 0.35f, mix_ = 0.3f, duck_ = 0, width_ = 1;
     float modDepth_ = 0, tail_ = 0;
+    float highCutHz_ = -1, lowCutHz_ = -1;
     int type_ = 0, mode_ = 1;
     bool on_ = true, timeInit_ = false;
     DelayLine dl_, dr_;
@@ -392,6 +396,7 @@ private:
     DelayLine pre_, inAp_[4], erL_, erR_;
     int inApLen_[4] = {};
     float preDelay_ = 0;
+    float size_ = -1, decay_ = -1, lowCutHz_ = -1;
     float erTapL_[8] = {}, erTapR_[8] = {}, erGain_[8] = {};
     StereoBiquad lowCut_;
     Smoother feed_, dryS_, wetS_;

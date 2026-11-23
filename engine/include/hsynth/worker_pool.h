@@ -12,8 +12,7 @@
 // waits for helpers that are actually running an item.
 //
 // run() never allocates or locks; waking a sleeping helper is a semaphore post
-// (a system call, but non-blocking). Helpers spin briefly after a job, then
-// sleep on their semaphore.
+// (a system call, but non-blocking). Idle helpers park on their semaphores.
 #pragma once
 
 #include <atomic>
@@ -41,6 +40,8 @@ public:
     // Audio thread. Runs fn(ctx, worker, item) for item in [0, count) on the
     // calling thread (worker 0) and up to `helpers` pool threads (1..helpers).
     void run(Fn fn, void* ctx, int count, int helpers);
+    // As above, with independent work reserved for the calling thread.
+    void runWithCaller(Fn fn, void* ctx, int count, int helpers, void (*caller)(void*));
 
 private:
     enum : int { kIdle = 0, kOffered = 1, kRunning = 2, kDone = 3 };
@@ -62,6 +63,7 @@ private:
     Fn fn_ = nullptr;
     void* ctx_ = nullptr;
     int count_ = 0;
+    int chunk_ = 1;
     alignas(64) std::atomic<int> next_{0};
 };
 

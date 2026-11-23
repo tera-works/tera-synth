@@ -2,6 +2,8 @@
 // Protocol: docs/SYSEX.md.
 #include "hsynth/remote.h"
 
+#include "performance_json.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -133,7 +135,10 @@ namespace {
 const char* kOps[] = {"hello", "param_info", "mix_info", "get", "set", "mix_get", "mix_set", "get_state", "set_state",
                       "mode", "select_part", "presets", "load_preset", "save_preset", "samples", "impulse", "files",
                       "note", "event", "panic", "transport", "looper", "phrase", "songs", "song_load", "song",
-                      "status", "meters", "settings", "learn", "subscribe", "unsubscribe", "setup_get", "setup_set"};
+                      "status", "meters", "settings", "learn", "subscribe", "unsubscribe", "setup_get", "setup_set",
+                      "master_stage_get", "master_stage_set", "sst", "tuning",
+                      "metronome", "tuner", "pedal_config", "perf_offsets",
+                      "morph", "arp_pattern", "rhythm"};
 
 const char* kKinds[] = {"float", "int", "enum", "bool"};
 
@@ -301,6 +306,7 @@ void RemoteControl::snapshot() {
 }
 
 std::vector<Json> RemoteControl::collectChanges() {
+    std::lock_guard<std::mutex> lock(handleMutex_);
     std::vector<Json> out;
     const auto now = std::chrono::steady_clock::now();
     if (subParams_) {
@@ -372,7 +378,8 @@ std::vector<Json> RemoteControl::collectChanges() {
         if (subStatus_) {
             Json n = Json::object();
             n.set("event", "status");
-            for (const auto& m : statusJson().members())
+            const Json status = statusJson();
+            for (const auto& m : status.members())
                 if (m.first != "ok") n.set(m.first, m.second);
             out.push_back(std::move(n));
         }
@@ -381,7 +388,8 @@ std::vector<Json> RemoteControl::collectChanges() {
             q.set("op", "meters");
             Json n = Json::object();
             n.set("event", "meters");
-            for (const auto& m : handle(q).members())
+            const Json meters = handle(q);
+            for (const auto& m : meters.members())
                 if (m.first != "ok") n.set(m.first, m.second);
             out.push_back(std::move(n));
         }
@@ -533,28 +541,33 @@ Json RemoteControl::stateJson(bool compact) {
     return r;
 }
 
-bool RemoteControl::setState(const Json& state, Json& reply) {
+bool RemoteControl::setState(const Json& state, Json& reply, bool live) {
     const std::string format = strField(state, "format");
+    uint32_t serial = 0;
     std::vector<std::string> warnings;
     std::string err;
     if (format == "hsynth-multi") {
         MultiPreset m;
         if (!multiFromJson(state.dump(0), m, err)) { reply = errorReply(err); return false; }
         warnings = m.warnings;
+        const bool ok = live ? applyMultiSst(engine_, m, config_.libraryRoot, warnings, &serial)
+                             : applyMulti(engine_, m, config_.libraryRoot, warnings);
+        if (!ok) { reply = errorReply("could not apply the multi"); return false; }
         if (hooks_.setMultiTimbral) hooks_.setMultiTimbral(true);
-        if (!applyMulti(engine_, m, config_.libraryRoot, warnings)) { reply = errorReply("could not apply the multi"); return false; }
-        engine_.setMultiTimbral(true);
         if (hooks_.presetLoaded) hooks_.presetLoaded(-1, m.name);
     } else {
         Preset p;
         if (!presetFromJson(state.dump(0), p, err)) { reply = errorReply(err); return false; }
         warnings = p.warnings;
+        if (!live) engine_.setMultiTimbral(false);
+        const bool ok = live ? applyPresetSst(engine_, p, config_.libraryRoot, warnings, &serial, true)
+                             : applyPreset(engine_, p, config_.libraryRoot, warnings);
+        if (!ok) { reply = errorReply("could not apply the preset"); return false; }
         if (hooks_.setMultiTimbral) hooks_.setMultiTimbral(false);
-        engine_.setMultiTimbral(false);
-        if (!applyPreset(engine_, p, config_.libraryRoot, warnings)) { reply = errorReply("could not apply the preset"); return false; }
         if (hooks_.presetLoaded) hooks_.presetLoaded(0, p.name);
     }
     reply = okReply();
+    if (live) reply.set("pending", !engine_.liveChangeApplied(serial));
     if (!warnings.empty()) reply.set("warnings", stringArray(warnings));
     changed();
     return true;
@@ -750,8 +763,357 @@ Json RemoteControl::statusJson() {
 // ---------------------------------------------------------------- requests
 
 Json RemoteControl::handle(const Json& req) {
+    std::lock_guard<std::mutex> lock(handleMutex_);
     const std::string op = strField(req, "op");
     const auto& table = paramTable();
+
+
+    if (op == "npu_status" || op == "npu_morph") {
+        auto& morph = engine_.npuMorph();
+        const auto cmd = strField(req, "cmd");
+        if (op == "npu_status" || cmd == "status") {
+            auto result = morph.status();
+            result.set("ok", true);
+            return result;
+        }
+        if (cmd == "compile") {
+            auto result = morph.compile();
+            result.set("ok", result.find("compiled")->boolean());
+            return result;
+        }
+        if (cmd == "anchors") {
+            auto result = okReply();
+            result.set("anchors", morph.anchorsJson());
+            return result;
+        }
+        if (cmd == "clear") {
+            morph.clearAnchors();
+            return okReply();
+        }
+
+        const int slot = intField(req, "slot", -1);
+        if (cmd == "remove") {
+            if (slot < 0 || slot >= NpuMorph::kAnchors) return errorReply("Anchor slot must be 0 through 15");
+            morph.removeAnchor(slot);
+            return okReply();
+        }
+
+        if (cmd.empty() || cmd == "eval" || cmd == "capture" || cmd == "load") {
+            const auto* x = req.find("x");
+            const auto* y = req.find("y");
+            if (!x || !x->isNumber() || !y || !y->isNumber())
+                return errorReply("Numeric x and y coordinates are required");
+            const float px = float(x->number()), py = float(y->number());
+            if (cmd == "capture")
+                return morph.captureAnchor(engine_, partOf(req), slot, px, py, strField(req, "name")) ?
+                    okReply() : errorReply("Invalid anchor slot or coordinates");
+            if (cmd == "load") {
+                const auto path = strField(req, "path");
+                if (path.empty()) return errorReply("Preset path is required");
+                return morph.loadPresetAnchor(slot, px, py, path, config_.libraryRoot);
+            }
+            const float ms = morph.evaluate(engine_, partOf(req), px, py);
+            if (ms < 0) return errorReply("Compile the morph first and supply finite coordinates");
+            auto result = okReply();
+            result.set("ms", ms);
+            return result;
+        }
+        return errorReply("Unknown NPU morph command");
+    }
+
+    if (op == "backing" || op == "pads" || op == "live_sample") {
+        const std::string requested = strField(req, "cmd");
+        const std::string cmd = requested.empty() ? "state" : requested;
+        const int bins = intField(req, "bins", 256);
+        const bool on = boolField(req, "on", true);
+        auto path = [&] { return resolve(strField(req, "path"), config_.libraryRoot); };
+        auto array = [](const auto& values) {
+            Json out = Json::array();
+            for (auto v : values) out.push(v);
+            return out;
+        };
+        Json reply = okReply();
+        if (op == "backing") {
+            auto& backing = engine_.backingPlayer();
+            if (cmd == "state" || cmd == "get") { reply.set("state", array(backing.state())); return reply; }
+            if (cmd == "peaks") { reply.set("peaks", array(backing.peaks(bins))); return reply; }
+            if (cmd == "load") reply = backing.load(path());
+            else if (cmd == "play") backing.play(on);
+            else if (cmd == "seek") backing.seek(numField(req, "sec", 0));
+            else if (cmd == "loop" || cmd == "set_loop")
+                backing.setLoop(numField(req, "a", 0), numField(req, "b", 0), on);
+            else if (cmd == "volume" || cmd == "set_volume") backing.setVolume(float(numField(req, "v", 1)));
+            else if (cmd == "speed" || cmd == "set_speed") backing.setSpeed(float(numField(req, "r", 1)));
+            else if (cmd == "pitch" || cmd == "set_pitch") backing.setPitch(float(numField(req, "semis", 0)));
+            else if (cmd == "route" || cmd == "set_route") engine_.setBackingRoute(boolField(req, "direct", true));
+            else return errorReply("Unknown backing command");
+        } else if (op == "pads") {
+            auto& pads = engine_.padSampler();
+            if (cmd == "state" || cmd == "get" || cmd == "levels") {
+                reply.set("levels", array(pads.levels()));
+                return reply;
+            }
+            if (cmd == "stop_all" || cmd == "stop") pads.stopAll();
+            else {
+                const int pad = intField(req, "pad", -1);
+                if (pad < 0 || pad >= PadSampler::kPads) return errorReply("Pad must be 0 through 15");
+                if (cmd == "load") reply = pads.load(pad, path());
+                else if (cmd == "clear") pads.clear(pad);
+                else if (cmd == "setup") pads.setup(pad, float(numField(req, "level", 1)),
+                                                     float(numField(req, "pitchSemis", 0)),
+                                                     intField(req, "mode", 0), intField(req, "choke", 0),
+                                                     intField(req, "velSens", 1), float(numField(req, "startFrac", 0)),
+                                                     float(numField(req, "endFrac", 1)));
+                else if (cmd == "trigger") pads.trigger(pad, float(numField(req, "vel", 1)));
+                else if (cmd == "release") pads.release(pad);
+                else if (cmd == "peaks") { reply.set("peaks", array(pads.peaks(pad, bins))); return reply; }
+                else return errorReply("Unknown pads command");
+            }
+        } else {
+            auto& live = engine_.liveSampler();
+            if (cmd == "state" || cmd == "get") { reply.set("state", array(live.state())); return reply; }
+            if (cmd == "peaks") { reply.set("peaks", array(live.peaks(bins))); return reply; }
+            if (cmd == "analyze") { reply.set("analysis", array(live.analyze())); return reply; }
+            const int start = intField(req, "startFrame", 0), end = intField(req, "endFrame", -1);
+            if (cmd == "start") {
+                if (!live.start(intField(req, "src", 0), float(numField(req, "maxSec", 30)), float(numField(req, "armDb", -120))))
+                    return errorReply("Could not start capture");
+            } else if (cmd == "stop") reply.set("sec", live.stop());
+            else if (cmd == "audition") live.audition(on, boolField(req, "loop", false), start, end);
+            else if (cmd == "export") {
+                const auto error = live.exportWav(path(), start, end, float(numField(req, "gainDb", 0)),
+                    intField(req, "loopStart", -1), intField(req, "loopEnd", -1),
+                    float(numField(req, "xfadeMs", 0)), intField(req, "rootMidi", 60));
+                if (!error.empty()) return errorReply(error);
+            } else if (cmd == "discard") live.discard();
+            else return errorReply("Unknown live_sample command");
+        }
+        if (reply.find("ok")->boolean()) changed();
+        return reply;
+    }
+
+    if (op == "morph") {
+        const int part = partOf(req);
+        std::string cmd = strField(req, "cmd");
+        if (cmd.empty()) cmd = "get";
+        const auto* param = req.find("param");
+        int id = -1;
+        if (param && param->isString()) id = findParam(param->string());
+        if (param && param->isNumber() && param->number() >= 0 && param->number() < P::kNumParams &&
+            param->number() == std::floor(param->number())) id = static_cast<int>(param->number());
+        if (param && id < 0) return errorReply("unknown morph parameter");
+
+        int controlIds[] = {P::PerfMorph, P::MorphSource, P::MorphCurve};
+        const char* fields[] = {"amount", "source", "curve"};
+        float controls[3];
+        for (int i = 0; i < 3; ++i) {
+            controls[i] = engine_.getPartParam(part, controlIds[i]);
+            if (const auto* value = req.find(fields[i])) {
+                std::string error;
+                if (!valueFrom(controlIds[i], *value, controls[i], error)) return errorReply(error);
+            }
+        }
+        if (cmd == "set_a") engine_.morphSetA(part);
+        else if (cmd == "capture_b") engine_.morphCaptureB(part);
+        else if (cmd == "clear_b" || cmd == "clear_all") engine_.morphClearAll(part);
+        else if (cmd == "assign") {
+            const auto* a = req.find("a");
+            const auto* b = req.find("b");
+            if (!a) a = req.find("min");
+            if (!b) b = req.find("max");
+            if (!a || !b || !a->isNumber() || !b->isNumber() ||
+                !engine_.morphAssign(part, id, static_cast<float>(a->number()), static_cast<float>(b->number())))
+                return errorReply("invalid morph assignment");
+        } else if (cmd == "unassign" || cmd == "clear") {
+            if (id < 0) return errorReply("missing morph parameter");
+            engine_.morphClear(part, id);
+        } else if (cmd != "get" && cmd != "set_amount") {
+            return errorReply("unknown morph command");
+        }
+        for (int i = 0; i < 3; ++i)
+            if (req.find(fields[i])) engine_.setPartParam(part, controlIds[i], controls[i]);
+        const auto program = engine_.partSoundOptions(part).morph;
+        Json r = okReply();
+        r.set("part", part);
+        r.set("count", program.count);
+        r.set("morphB", morphToJson(program));
+        for (int i = 0; i < 3; ++i) r.set(fields[i], valueJson(controlIds[i], engine_.getPartParam(part, controlIds[i])));
+        if (id >= 0) r.set("now", engine_.morphNow(part, id));
+        return r;
+    }
+    if (op == "arp_pattern" || op == "rhythm") {
+        const Json* nested = req.find("config");
+        if (nested && !nested->isObject()) return errorReply("'config' must be an object");
+        const Json& config = nested ? *nested : req;
+        Json r = okReply();
+        if (op == "arp_pattern") {
+            const int part = partOf(req);
+            if ((config.find("length") || config.find("steps")) && !engine_.setArpPatternJson(part, config))
+                return errorReply("invalid arp pattern");
+            r.set("part", part);
+            r.set("config", arpPatternToJson(engine_.arpPattern(part)));
+            r.set("step", engine_.arpStep(part));
+        } else {
+            if ((config.find("enabled") || config.find("on") || config.find("pattern") || config.find("levelDb") ||
+                 config.find("volume") || config.find("swing") || config.find("fill")) && !engine_.setRhythmJson(config))
+                return errorReply("invalid rhythm configuration");
+            r.set("config", engine_.rhythmJson());
+            r.set("patterns", rhythmPatternsJson());
+        }
+        return r;
+    }
+
+    if (op == "metronome" || op == "tuner" || op == "pedal_config" || op == "perf_offsets") {
+        const Json* nested = req.find("config");
+        if (nested && !nested->isObject()) return errorReply("'config' must be an object");
+        const Json& c = nested ? *nested : req;
+        const auto hasField = [&](std::initializer_list<const char*> keys) {
+            return std::any_of(keys.begin(), keys.end(), [&](const char* key) { return c.find(key) != nullptr; });
+        };
+        using performance_json::field;
+        Json r = okReply();
+        if (op == "metronome") {
+            if (hasField({"enabled", "numerator", "denominator", "subdivision", "countInBars", "route", "levelDb", "accentDb"}))
+                if (!engine_.setMetronomeJson(c)) return errorReply("invalid metronome configuration");
+            r.set("config", metronomeToJson(engine_.metronomeConfig()));
+            r.set("beat", engine_.clickBeat());
+        } else if (op == "pedal_config") {
+            if (hasField({"sustainInverted", "velocityCurve", "velocityFixed", "aftertouchCurve", "expMin", "expMax", "footswitches"}))
+                if (!engine_.setPedalConfigJson(c)) return errorReply("invalid pedal configuration");
+            r.set("config", performanceInputToJson(engine_.performanceInputConfig()));
+            r.set("lastCc", static_cast<double>(engine_.lastCc()));
+            r.set("pedalState", engine_.pedalState());
+        } else if (op == "perf_offsets") {
+            int transpose = engine_.perfTranspose();
+            float trim = engine_.perfTrimDb();
+            if (!field(c, "transpose", transpose, -12, 12) || !field(c, "trimDb", trim, -12.0f, 6.0f))
+                return errorReply("invalid performance offsets");
+            if (c.find("transpose") || c.find("trimDb")) engine_.setPerfOffsets(transpose, trim);
+            Json config = Json::object();
+            config.set("transpose", engine_.perfTranspose());
+            config.set("trimDb", engine_.perfTrimDb());
+            r.set("config", std::move(config));
+        } else {
+            Tuner& tuner = engine_.tuner();
+            bool enabled = tuner.enabled(), mute = tuner.muteOut();
+            float a4 = tuner.a4Hz();
+            if (!field(c, "enabled", enabled) || !field(c, "muteOut", mute) || !field(c, "a4Hz", a4, 415.0f, 466.0f))
+                return errorReply("invalid tuner configuration");
+            if (c.find("a4Hz") || c.find("muteOut")) tuner.configure(a4, mute);
+            if (c.find("enabled")) tuner.setEnabled(enabled);
+            Json config = Json::object();
+            config.set("enabled", tuner.enabled());
+            config.set("a4Hz", tuner.a4Hz());
+            config.set("muteOut", tuner.muteOut());
+            r.set("config", std::move(config));
+            TunerReading reading;
+            const bool valid = tuner.analyze(reading);
+            r.set("valid", valid);
+            r.set("freqHz", reading.freqHz);
+            r.set("centsOff", reading.centsOff);
+            r.set("midiNoteFloat", reading.midiNoteFloat);
+            r.set("confidence", reading.confidence);
+        }
+        return r;
+    }
+
+    if (op == "master_stage_get" || op == "master_stage_set") {
+        if (op == "master_stage_set") {
+            const Json* c = req.find("config");
+            Json legacy = Json::object();
+            if (!c) {
+                for (const char* key : {"bypass", "eqEnabled", "compEnabled", "bands"})
+                    if (const auto* field = req.find(key)) legacy.set(key, *field);
+                if (const auto* eq = req.find("eq")) {
+                    if (!eq->isArray()) return errorReply("'eq' must be an array");
+                    Json bands = Json::array();
+                    for (size_t i = 0; i < eq->size(); ++i) {
+                        const auto& band = eq->at(i);
+                        if (!band.isObject()) return errorReply("invalid EQ band");
+                        Json mapped = band;
+                        if (const auto* gain = band.find("gain")) mapped.set("gainDb", *gain);
+                        if (const auto* on = band.find("on")) mapped.set("enabled", *on);
+                        bands.push(std::move(mapped));
+                    }
+                    legacy.set("bands", std::move(bands));
+                    if (!req.find("eqEnabled")) legacy.set("eqEnabled", true);
+                }
+                if (const auto* comp = req.find("comp")) {
+                    if (!comp->isObject()) return errorReply("'comp' must be an object");
+                    Json mapped = *comp;
+                    if (const auto* on = comp->find("on")) legacy.set("compEnabled", *on);
+                    const char* from[] = {"thresh", "attack", "release", "knee", "makeup"};
+                    const char* to[] = {"thresholdDb", "attackMs", "releaseMs", "kneeDb", "makeupDb"};
+                    for (int i = 0; i < 5; ++i)
+                        if (const auto* field = comp->find(from[i])) mapped.set(to[i], *field);
+                    legacy.set("comp", std::move(mapped));
+                }
+                c = &legacy;
+            }
+            if (!engine_.updateMasterStage([c](MasterStageConfig& next) { return masterStageFromJson(*c, next); }))
+                return errorReply("invalid master stage configuration");
+            changed();
+        }
+        const auto c = engine_.getMasterStage();
+        Json r = okReply(), eq = Json::array(), comp = Json::object();
+        r.set("config", masterStageToJson(c));
+        r.set("bypass", c.bypass);
+        r.set("eqEnabled", c.eqEnabled);
+        for (const auto& b : c.bands) {
+            Json band = Json::object();
+            band.set("freq", b.freq);
+            band.set("gain", b.gainDb);
+            band.set("q", b.q);
+            band.set("on", b.enabled);
+            eq.push(std::move(band));
+        }
+        r.set("eq", std::move(eq));
+        comp.set("on", c.compEnabled);
+        comp.set("thresh", c.comp.thresholdDb);
+        comp.set("ratio", c.comp.ratio);
+        comp.set("attack", c.comp.attackMs);
+        comp.set("release", c.comp.releaseMs);
+        comp.set("knee", c.comp.kneeDb);
+        comp.set("makeup", c.comp.makeupDb);
+        r.set("comp", std::move(comp));
+        r.set("grDb", engine_.masterCompGrDb());
+        return r;
+    }
+
+    if (op == "sst") {
+        const auto* enabled = req.find("enabled");
+        const auto* time = req.find("time_ms");
+        if (enabled && !enabled->isBool()) return errorReply("'enabled' must be a boolean");
+        if (time && (!time->isNumber() || !std::isfinite(time->number())))
+            return errorReply("'time_ms' must be a finite number");
+        if (enabled) engine_.setSstEnabled(enabled->boolean());
+        if (time) engine_.setSstTimeMs((float)std::max(50.0, std::min(2000.0, time->number())));
+        if (enabled || time) changed();
+        Json r = okReply();
+        r.set("enabled", engine_.sstEnabled());
+        r.set("time_ms", engine_.sstTimeMs());
+        r.set("progress", engine_.sstProgress());
+        return r;
+    }
+
+    if (op == "tuning") {
+        const auto cmd = strField(req, "cmd");
+        const auto file = strField(req, "file");
+        const int part = partOf(req);
+        if (cmd == "reset") {
+            const float equal[12] = {};
+            engine_.setPartTuning(part, equal);
+            changed();
+            return okReply();
+        }
+        if (file.empty()) return errorReply("give a Scala 'file'");
+        const auto path = resolve(file, config_.libraryRoot);
+        if (cmd == "info") return scalaInfoJson(path);
+        if (cmd != "scala") return errorReply("unknown tuning command");
+        auto r = scalaApplyJson(engine_, part, path, intField(req, "root", 0));
+        if (r.find("ok")->boolean()) changed();
+        return r;
+    }
 
     if (op == "hello") {
         Json r = okReply();
@@ -892,7 +1254,7 @@ Json RemoteControl::handle(const Json& req) {
         const Json* state = req.find("state");
         if (!state || !state->isObject()) return errorReply("'state' must be a preset or multi object");
         Json r;
-        setState(*state, r);
+        setState(*state, r, boolField(req, "sst", false));
         return r;
     }
 
@@ -968,15 +1330,22 @@ Json RemoteControl::handle(const Json& req) {
         std::vector<std::string> warnings = p.warnings;
         const bool multi = engine_.multiTimbral();
         const int part = partOf(req);
+        const bool live = boolField(req, "sst", engine_.sstEnabled());
+        uint32_t serial = 0;
         bool ok;
-        if (multi) ok = applyPartPreset(engine_, part, p, config_.libraryRoot, warnings);
-        else ok = applyPreset(engine_, p, config_.libraryRoot, warnings);
+        if (live)
+            ok = multi ? applyPartPresetSst(engine_, part, p, config_.libraryRoot, warnings, &serial)
+                       : applyPresetSst(engine_, p, config_.libraryRoot, warnings, &serial);
+        else
+            ok = multi ? applyPartPreset(engine_, part, p, config_.libraryRoot, warnings)
+                       : applyPreset(engine_, p, config_.libraryRoot, warnings);
         if (!ok) return errorReply("could not load " + file);
         if (hooks_.presetLoaded) hooks_.presetLoaded(multi ? part : 0, p.name);
         changed();
         Json r = okReply();
         r.set("name", p.name);
         r.set("part", multi ? part : 0);
+        if (live) r.set("pending", !engine_.liveChangeApplied(serial));
         if (!warnings.empty()) r.set("warnings", stringArray(warnings));
         return r;
     }
@@ -1126,25 +1495,15 @@ Json RemoteControl::handle(const Json& req) {
     if (op == "phrase") {
         const std::string cmd = strField(req, "cmd");
         if (const Json* b = req.find("bars"); b && b->isNumber()) engine_.setPhraseBars((int)b->number());
-        if (cmd == "record") engine_.phraseRecord();
-        else if (cmd == "play") engine_.phrasePlay();
-        else if (cmd == "stop") engine_.phraseStop();
-        else if (cmd == "clear") engine_.phraseClear();
-        else if (cmd == "undo") engine_.phraseUndo();
-        else if (cmd == "quantize" || cmd == "export") {
-            engine_.requestPhraseSnapshot();
-            std::vector<Engine::PhraseEvent> ev;
-            double len = 0.0;
-            bool got = false;
-            for (int i = 0; i < 200 && !got; ++i) {
-                got = engine_.takePhraseSnapshot(ev, len);
-                if (!got) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-            if (!got) return errorReply("the audio is not running");
+        const char* commands[] = {"record", "play", "stop", "clear", "undo"};
+        const auto* command = std::find(std::begin(commands), std::end(commands), cmd);
+        if (command != std::end(commands)) {
+            if (!engine_.phraseCommand(1 + (int)(command - commands))) return errorReply("phrase command queue is full");
+        } else if (cmd == "quantize" || cmd == "export") {
             if (cmd == "quantize") {
-                if (len <= 0.0) return errorReply("no phrase");
-                quantizePhrase(ev, len, numField(req, "grid", 0.25), numField(req, "strength", 1.0));
-                engine_.replacePhrase(ev, len);
+                std::string err;
+                if (!quantizeRecordedPhrase(engine_, numField(req, "grid", 0.25), numField(req, "strength", 1.0), err))
+                    return errorReply(err);
             } else {
                 std::string name = strField(req, "file");
                 if (name.empty()) name = "phrase.mid";
@@ -1152,9 +1511,8 @@ Json RemoteControl::handle(const Json& req) {
                     return errorReply("'file' is a plain file name (saved in the MIDI folder)");
                 if (config_.midiDir.empty()) return errorReply("no MIDI folder");
                 std::string err;
-                const double bpm = engine_.getParam(P::fxChain(P::FxTempo));
                 const std::string path = utf8String(utf8Path(config_.midiDir) / utf8Path(name));
-                if (!writePhraseSmf(path, ev, len, bpm, std::max(1, intField(req, "repeats", 1)), err)) return errorReply(err);
+                if (!exportRecordedPhrase(engine_, path, intField(req, "repeats", 1), err)) return errorReply(err);
                 Json r = okReply();
                 r.set("file", path);
                 return r;

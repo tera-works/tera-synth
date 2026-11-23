@@ -72,7 +72,7 @@ void MidiLearn::onUmp(const uint32_t* words, size_t count, Engine& engine) {
 bool MidiLearn::onMidi(const uint8_t* data, size_t len, Engine& engine) {
     if (len < 3 || (data[0] & 0xF0) != 0xB0) return false;
     const int ch = data[0] & 0x0F, cc = data[1] & 0x7F, value = data[2] & 0x7F;
-    if (cc >= 120) return false;  // channel mode messages are never mapped
+    if (cc >= 120 || engine.footswitchConsumesCc(cc)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (armed_ >= 0) {
         // replace any mapping of this CC (on this channel) and of this parameter

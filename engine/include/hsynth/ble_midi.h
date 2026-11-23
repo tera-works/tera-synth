@@ -1,6 +1,6 @@
 // MIDI over Bluetooth Low Energy (BLE-MIDI 1.0) packet format.
 //
-// Hosts whose OS does not handle BLE MIDI itself (the Android GATT peripheral)
+// Hosts that handle BLE MIDI directly (such as the Android GATT client and server)
 // use this to turn BLE packets into plain MIDI bytes and back:
 //
 //   packet  = header, then messages; header = 10hhhhhh (timestamp bits 12..7)
@@ -33,7 +33,6 @@ public:
 private:
     std::vector<uint8_t> sysex_;
     bool inSysex_ = false;
-    uint8_t running_ = 0;
 };
 
 // Encodes one complete MIDI message (or SysEx) into packets of at most maxPacket

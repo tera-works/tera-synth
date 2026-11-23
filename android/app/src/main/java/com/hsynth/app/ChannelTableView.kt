@@ -85,7 +85,7 @@ class ChannelTableView(ctx: Context) : View(ctx) {
             val active = used[k] || state[o + 8] > 0
             val alpha = if (active) 255 else 90
             if (k % 2 == 0) {
-                p.color = Color.rgb(19, 22, 28)
+                p.color = Hw.PANEL
                 c.drawRect(0f, top, width.toFloat(), top + rowH, p)
             }
             val muted = state[o + 10] > 0.5f

@@ -77,9 +77,9 @@ public:
 
     // Advance n samples, return final level (used for control-rate envelopes).
     float processBlock(int n) {
-        float v = level_;
-        for (int i = 0; i < n; ++i) v = process();
-        return v;
+        if (stage_ == Stage::Sustain || stage_ == Stage::Idle) return level_;
+        for (int i = 0; i < n; ++i) process();
+        return level_;
     }
 
     float level() const { return level_; }

@@ -56,14 +56,15 @@ class FxRack {
 public:
     FxRack();
     ~FxRack();
-    void prepare(float sampleRate);
+    void prepare(float sampleRate, bool ownLooper = true);
     void reset();
 
     // Audio thread. p = full parameter array (P::kNumParams).
     void paramsChanged(const float* p, int oversample, bool highQuality);
     void noteOn(int key, float velocity, bool firstNote);
-    void process(float* L, float* R, int n, const FxGlobals& g, const float* inL, const float* inR);
-    void looperCommand(LooperCmd c) { looper_.command(c); }
+    void process(float* L, float* R, int n, const FxGlobals& g, const float* inL, const float* inR,
+                 Looper* externalLooper = nullptr, int fadeLeft = 0, int fadeLength = 1);
+    void looperCommand(LooperCmd c) { if (looper_) looper_->command(c); }
     // target 0 = cabinet, 1 = IR reverb
     void setUserIr(int target, const ConvIr* ir);
 
@@ -76,15 +77,38 @@ public:
     double beat() const { return beat_; }
 
     // any thread
-    LooperStatus looperStatus() const { return looper_.status(); }
+    LooperStatus looperStatus() const { return looper_ ? looper_->status() : LooperStatus{}; }
     // Blocks in processing order (duplicates and "none" removed); any thread.
     int chainSnapshot(int* out) const;
+    // audio thread: true when every block in the rack has decayed to digital silence
+    // and all dirty blocks have been lazily reset so waking up costs nothing.
+    bool isIdle() const {
+        if (!idle_) return false;
+        for (int i = 0; i < chainLen_; ++i)
+            if (!clean_[chain_[i]]) return false;
+        return true;
+    }
+    bool hasChain() const { return chainLen_ != 0; }
+    void setBeat(double beat) { beat_ = beat; }
+    void advanceIdleBeat(int n) {
+        beat_ += (double)tempo_ / 60.0 * (double)n / (double)sr_;
+    }
 
 private:
     struct ModSlot { int src = 0, local = -1, block = 0; float amt = 0; };
     float sourceValue(int src, const FxGlobals& g) const;
     void applyModulation(const FxGlobals& g);
     void runChain(float* L, float* R, int n);
+    // Block resets clear delay lines of up to several MB. A block that has not
+    // processed audio since its last reset is still clean and is not reset
+    // again; while the rack is idle the dirty blocks are reset one per call,
+    // so waking up costs nothing.
+    void resetBlock(int b) {
+        if (clean_[b]) return;
+        blocks_[b]->reset();
+        clean_[b] = true;
+    }
+    bool clean_[BlockCount] = {};
 
     float sr_ = 48000;
     std::unique_ptr<FxBlock> blocks_[BlockCount];
@@ -110,7 +134,8 @@ private:
     bool idle_ = false;
     float velocity_ = 0, lastKey_ = 60, env_ = 0, held_ = 0;
     std::vector<float> tmpL_, tmpR_;
-    Looper looper_;
+    float fadeDry_[2][kMaxBlockSize];
+    std::unique_ptr<Looper> looper_;
     std::atomic<int> snap_[kFxSlots];
     std::atomic<int> snapLen_{0};
     bool first_ = true;

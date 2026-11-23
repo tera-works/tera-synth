@@ -128,6 +128,7 @@ public:
     // dtStart/dtEnd: base frequency / sampleRate ramp, index: modulation depth
     // in cycles, feedback 0..1.
     void render(float* out, int n, float dtStart, float dtEnd, float index, float feedback) {
+        if (n <= 0) return;
         float buf[P::kFmOps][kControlBlock];
         float mod[kControlBlock];
         const float invN = 1.0f / (float)n;
@@ -148,20 +149,39 @@ public:
                 continue;
             }
             const uint8_t mask = algo_->modulators[i];
-            for (int s = 0; s < n; ++s) mod[s] = 0.0f;
-            for (int m = i + 1; m < numOps; ++m)
-                if (mask & (1 << m))
-                    for (int s = 0; s < n; ++s) mod[s] += buf[m][s];
+            const float* modulation = mod;
+            if (mask != 0 && (mask & (mask - 1)) == 0) {
+                int m = i + 1;
+                while (!(mask & (1 << m))) ++m;
+                modulation = buf[m];
+            } else {
+                for (int s = 0; s < n; ++s) mod[s] = 0.0f;
+                for (int m = i + 1; m < numOps; ++m)
+                    if (mask & (1 << m))
+                        for (int s = 0; s < n; ++s) mod[s] += buf[m][s];
+            }
             const float eStep = (e1 - e0) * invN;
             float e = e0;
             uint32_t ph = phase_[i];
             float inc = inc0;
             const int w = wave_[i];
-            if (i == algo_->feedbackOp) {
+            const bool feedbackOp = i == algo_->feedbackOp;
+            if (mask == 0 && w == 0 && incStep == 0.0f && (!feedbackOp || fbAmt == 0.0f)) {
+                const uint32_t step = (uint32_t)(inc0 * kTwo32);
+                for (int s = 0; s < n; ++s) {
+                    e += eStep;
+                    o[s] = sineLookupU32(ph) * e * lvl;
+                    ph += step;
+                }
+                if (feedbackOp) {
+                    fb2_ = n > 1 ? o[n - 2] : fb1_;
+                    fb1_ = o[n - 1];
+                }
+            } else if (feedbackOp) {
                 float f1 = fb1_, f2 = fb2_;
                 for (int s = 0; s < n; ++s) {
                     e += eStep;
-                    const uint32_t q = ph + cyclesToPhase(mod[s] * index + fbAmt * (f1 + f2));
+                    const uint32_t q = ph + cyclesToPhase(modulation[s] * index + fbAmt * (f1 + f2));
                     const float v = (w ? fmWave(q, w) : sineLookupU32(q)) * e * lvl;
                     f2 = f1;
                     f1 = v;
@@ -174,14 +194,14 @@ public:
             } else if (w == 0) {
                 for (int s = 0; s < n; ++s) {
                     e += eStep;
-                    o[s] = sineLookupU32(ph + cyclesToPhase(mod[s] * index)) * e * lvl;
+                    o[s] = sineLookupU32(ph + cyclesToPhase(modulation[s] * index)) * e * lvl;
                     inc += incStep;
                     ph += (uint32_t)(inc * kTwo32);
                 }
             } else {
                 for (int s = 0; s < n; ++s) {
                     e += eStep;
-                    o[s] = fmWave(ph + cyclesToPhase(mod[s] * index), w) * e * lvl;
+                    o[s] = fmWave(ph + cyclesToPhase(modulation[s] * index), w) * e * lvl;
                     inc += incStep;
                     ph += (uint32_t)(inc * kTwo32);
                 }

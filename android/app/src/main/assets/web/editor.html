@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>HSynth Web Editor</title>
+<style>
+:root{--bg:#05070A;--p1:#0F131B;--p2:#161B26;--edge:#232B3A;--hi:#334155;--ink:#E6EDF7;--ink2:#8B97AB;--ink3:#566177;
+--cy:#22D3EE;--am:#F59E0B;--vi:#A855F7;--em:#10B981;--red:#EF4444;--good:#34D399;--acc:var(--cy);
+--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;--sans:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Yu Gothic UI",Roboto,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px/1.4 var(--sans);-webkit-tap-highlight-color:transparent}
+button,input,select,textarea{font:inherit;color:inherit}
+button{background:var(--p2);border:1px solid var(--edge);border-radius:6px;padding:6px 12px;cursor:pointer;min-height:32px}
+button:hover{border-color:var(--hi);background:#1c2230}
+button:active{background:#232b3a}
+button.on{border-color:var(--acc);color:var(--acc)}
+button.red{border-color:#7f1d1d;color:#fecaca;background:#2a0f12}
+button.red:hover{background:#3b1216;border-color:var(--red)}
+button.pri{border-color:var(--acc);color:var(--acc)}
+input[type=text],input[type=search],input[type=number],input[type=password],select,textarea{background:#000;border:1px solid var(--edge);border-radius:6px;padding:6px 8px;min-height:32px;outline:none;max-width:100%}
+input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+select{padding-right:4px}
+textarea{width:100%;resize:vertical;font-family:var(--mono);font-size:14px;line-height:1.5}
+input[type=range]{-webkit-appearance:none;appearance:none;height:22px;background:transparent;width:100%;margin:0;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:4px;background:var(--edge);border-radius:2px}
+input[type=range]::-moz-range-track{height:4px;background:var(--edge);border-radius:2px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:var(--ink);border:2px solid var(--acc)}
+input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;background:var(--ink);border:2px solid var(--acc)}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--acc);cursor:pointer}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--edge);border-radius:5px}::-webkit-scrollbar-track{background:transparent}
+.hide{display:none!important}
+.mono{font-family:var(--mono)}
+.dim{color:var(--ink2)}.dim2{color:var(--ink3)}
+.cy{--acc:var(--cy)}.am{--acc:var(--am)}.vi{--acc:var(--vi)}.em{--acc:var(--em)}.rd{--acc:var(--red)}
+
+/* login */
+#login{min-height:100%;display:flex;align-items:center;justify-content:center;padding:16px}
+.card{background:var(--p1);border:1px solid var(--edge);border-radius:12px;padding:24px;width:100%;max-width:360px;text-align:center}
+.card h1{margin:0 0 4px;font-size:18px;letter-spacing:.2em;color:var(--cy)}
+#pin{font:600 32px var(--mono);letter-spacing:.35em;text-align:center;width:100%;margin:16px 0 12px;padding:10px}
+#lmsg{min-height:20px;margin-top:10px;color:var(--am);font-size:13px}
+.warn{margin-top:14px;font-size:11px;color:var(--ink3)}
+
+/* shell */
+#app{display:flex;flex-direction:column;height:100%}
+header{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--p1);border-bottom:1px solid var(--edge);flex:none}
+.logo{font-weight:700;letter-spacing:.18em;color:var(--cy);font-size:13px;white-space:nowrap}
+nav{display:flex;gap:4px;overflow-x:auto;flex:1;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav button{border:0;background:transparent;border-bottom:2px solid transparent;border-radius:0;padding:6px 12px;color:var(--ink2);letter-spacing:.08em;font-weight:600;font-size:12px;white-space:nowrap}
+nav button:hover{background:transparent;color:var(--ink)}
+nav button.on{color:var(--acc);border-bottom-color:var(--acc)}
+.stat{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);white-space:nowrap}
+#dot{width:9px;height:9px;border-radius:50%;background:var(--ink3)}
+#dot.ok{background:var(--good);box-shadow:0 0 6px var(--good)}
+main{flex:1;overflow:auto;padding:12px;position:relative}
+.pane{max-width:1280px;margin:0 auto}
+h2{margin:0 0 10px;font-size:13px;letter-spacing:.14em;color:var(--ink2);font-weight:600}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.grow{flex:1;min-width:120px}
+.badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;border:1px solid var(--edge);color:var(--ink2)}
+#toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--p2);border:1px solid var(--edge);border-radius:8px;padding:8px 14px;z-index:9;max-width:90%;opacity:0;pointer-events:none;transition:opacity .15s}
+#toast.show{opacity:1}#toast.err{border-color:var(--red);color:#fecaca}
+
+/* sound */
+.split{display:grid;grid-template-columns:230px 1fr;gap:12px;align-items:start}
+.side{background:var(--p1);border:1px solid var(--edge);border-radius:8px;padding:8px;position:sticky;top:0;max-height:calc(100vh - 120px);overflow:auto}
+.side input{width:100%;margin-bottom:6px}
+.g{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:13px;border:1px solid transparent}
+.g:hover{background:var(--p2)}.g.on{background:var(--p2);border-color:var(--acc)}
+.g i{width:8px;height:8px;border-radius:50%;background:var(--acc);flex:none}
+.g span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.g small{color:var(--ink3);font-size:11px}
+.plist{background:var(--p1);border:1px solid var(--edge);border-radius:8px;padding:6px 12px}
+.row{display:grid;grid-template-columns:minmax(120px,200px) 1fr 100px;gap:12px;align-items:center;padding:5px 0 5px 10px;border-left:3px solid var(--acc);margin:3px 0}
+.row label{color:var(--ink2);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default}
+.row output{font:12px var(--mono);color:var(--ink);text-align:right;white-space:nowrap}
+.row select{width:100%}
+.row .tg{justify-self:start}
+.sub{font-size:11px;color:var(--ink3);margin-left:6px}
+
+/* presets */
+.plr{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--edge);cursor:pointer}
+.plr:hover{background:var(--p2)}
+.plr .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plr.cur{background:#0c2a30}
+.tags{color:var(--ink3);font-size:11px;margin-left:6px}
+
+/* multi */
+.tw{overflow:auto;border:1px solid var(--edge);border-radius:8px;background:var(--p1)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:4px 8px;border-bottom:1px solid var(--edge);text-align:left;white-space:nowrap}
+th{font-size:11px;letter-spacing:.08em;color:var(--ink2);font-weight:600;position:sticky;top:0;background:var(--p1);z-index:1}
+tr.sel td{background:#0c2a30}
+td input[type=number]{width:64px;padding:3px 5px;min-height:28px}
+td input[type=range]{width:96px}
+td .pn{cursor:pointer;font-weight:700;color:var(--acc)}
+.note{font:11px var(--mono);color:var(--ink3);margin-left:4px}
+
+/* setlist */
+.sl{display:grid;grid-template-columns:300px 1fr;gap:12px;align-items:start}
+.banks{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+.banks button{min-width:34px;padding:4px 8px;font-weight:700}
+.slot{display:grid;grid-template-columns:34px 1fr auto;gap:8px;align-items:center;padding:7px 8px;border:1px solid var(--edge);border-radius:6px;margin-bottom:4px;cursor:pointer;background:var(--p1)}
+.slot:hover{border-color:var(--hi)}.slot.on{border-color:var(--acc);background:var(--p2)}
+.slot b{font:700 13px var(--mono);color:var(--acc)}
+.slot .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slot.empty .t{color:var(--ink3)}
+.form{background:var(--p1);border:1px solid var(--edge);border-radius:8px;padding:12px}
+.fr{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;align-items:flex-end}
+.fr label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--ink2);letter-spacing:.06em}
+.fr input[type=number]{width:90px}
+#memo{min-height:46vh}
+.sv{font-size:12px;color:var(--ink2)}.sv.ok{color:var(--good)}.sv.dirty{color:var(--am)}
+
+/* perform */
+.pf{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.box{background:var(--p1);border:1px solid var(--edge);border-radius:8px;padding:12px;margin-bottom:12px}
+.box h2{margin-bottom:8px}
+.keys{position:relative;height:150px;display:flex;user-select:none;-webkit-user-select:none;touch-action:none;margin-top:8px}
+.wk{flex:1;background:#e6edf7;border:1px solid #05070a;border-radius:0 0 4px 4px;position:relative;cursor:pointer}
+.wk.dn,.bk.dn{background:var(--cy)}
+.wk span{position:absolute;bottom:3px;left:0;right:0;text-align:center;font:10px var(--mono);color:#556}
+.bk{position:absolute;top:0;height:62%;background:#10141c;border:1px solid #000;border-radius:0 0 3px 3px;z-index:2;cursor:pointer}
+.eqs{display:flex;gap:6px;align-items:flex-end;justify-content:space-around;min-height:170px}
+.eqb{display:flex;flex-direction:column;align-items:center;gap:4px;font:11px var(--mono);color:var(--ink2)}
+.eqb input[type=range]{writing-mode:vertical-lr;direction:rtl;width:22px;height:120px}
+.panic{background:#3b1216;border-color:var(--red);color:#fff;font-weight:700;letter-spacing:.1em}
+.abtn{display:inline-block;padding:10px 18px;border:1px solid var(--acc);border-radius:6px;color:var(--acc);text-decoration:none;background:var(--p2)}
+.abtn:hover{background:#1c2230}
+.help{font-size:12px;color:var(--ink3);line-height:1.7}
+kbd{font:11px var(--mono);border:1px solid var(--edge);border-radius:4px;padding:0 4px;background:var(--p2)}
+
+@media (max-width:820px){
+ .split,.sl,.pf{grid-template-columns:1fr}
+ .side{position:static;max-height:240px}
+ .row{grid-template-columns:1fr 86px;gap:4px 10px}.row label{grid-column:1/3}
+ .stat span.x{display:none}
+}
+</style>
+</head>
+<body>
+
+<div id="login" class="hide">
+ <div class="card">
+  <h1>HSYNTH</h1>
+  <div class="dim" data-t>Enter the PIN shown on the phone</div>
+  <input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="••••••">
+  <button id="go" class="pri" style="width:100%" data-t>Connect</button>
+  <div id="lmsg"></div>
+  <div class="warn" data-t>HTTP, not encrypted. Use this only on a network you trust.</div>
+ </div>
+</div>
+
+<div id="app" class="hide">
+ <header>
+  <span class="logo">HSYNTH</span>
+  <nav id="tabs"></nav>
+  <div class="stat"><span id="who" class="x"></span><span id="dot" title="live link"></span>
+   <button class="red" id="hpanic" data-t>PANIC</button></div>
+ </header>
+ <main id="main"></main>
+</div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+/* ====================================================================== helpers */
+const $ = (s, r = document) => r.querySelector(s);
+const JA = /^ja/i.test(navigator.language || '');
+const L = {
+ 'SOUND':'サウンド','PRESETS':'プリセット','MULTI':'マルチ','SET LIST':'セットリスト','PERFORM':'演奏','BACKUP':'バックアップ',
+ 'PANIC':'パニック','Connect':'接続','Enter the PIN shown on the phone':'本体に表示されているPINを入力',
+ 'HTTP, not encrypted. Use this only on a network you trust.':'HTTP通信（暗号化なし）。信頼できるネットワークでのみ使用してください。',
+ 'Search parameters…':'パラメーター検索…','Search presets…':'プリセット検索…','All':'すべて','User only':'ユーザーのみ','Load':'読み込み',
+ 'Save as new preset':'新規プリセットとして保存','Name':'名前','Category':'カテゴリー','Save':'保存','Part':'パート','Title':'タイトル',
+ 'Memo / lyrics / chart':'メモ・歌詞・コード譜','Show memo on stage':'ステージでメモを表示','Transpose':'トランスポーズ','Trim (dB)':'トリム (dB)',
+ 'Download backup (.zip)':'バックアップをダウンロード (.zip)','Multi mode':'マルチモード','Velocity':'ベロシティ','Octave':'オクターブ',
+ 'Master EQ':'マスターEQ','Transport':'トランスポート','Tempo':'テンポ','More':'さらに表示','Wrong PIN':'PINが違います','Saved':'保存しました',
+ 'Reload':'再読み込み','Saving…':'保存中…','Unsaved changes':'未保存の変更','Saved ✓':'保存済み ✓','Presets & settings only. Restore is done on the phone.':'プリセットと設定のみ。復元は本体側で行います。',
+ 'Session expired':'セッションが切れました','Download current sound (.json)':'現在の音色をダウンロード (.json)','Select':'選択','BPM (0 = keep)':'BPM（0 = 変更しない）'
+};
+const t = s => (JA && L[s]) || s;
+for (const e of document.querySelectorAll('[data-t]')) e.textContent = t(e.textContent);
+$('#pin').placeholder = '••••••';
+
+function h(tag, attrs, ...kids) {
+ const e = document.createElement(tag);
+ for (const k in attrs || {}) {
+  const v = attrs[k];
+  if (v == null || v === false) continue;
+  if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+  else if (k === 'class') e.className = v;
+  else if (k === 'style') e.style.cssText = v;
+  else if (k in e) e[k] = v;
+  else e.setAttribute(k, v === true ? '' : v);
+ }
+ for (const c of kids.flat(9)) { if (c == null || c === false) continue; e.append(c.nodeType ? c : document.createTextNode(String(c))); }
+ return e;
+}
+let toastT = 0;
+function toast(msg, err) {
+ const e = $('#toast'); e.textContent = msg; e.className = 'show' + (err ? ' err' : '');
+ clearTimeout(toastT); toastT = setTimeout(() => e.className = '', err ? 4000 : 1800);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const NN = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const noteName = n => NN[n % 12] + (Math.floor(n / 12) - 1);
+function debounce(fn, ms) { let tm = 0; return (...a) => { clearTimeout(tm); tm = setTimeout(() => fn(...a), ms); }; }
+
+/* ====================================================================== api */
+const S = { params: [], by: {}, groups: [], vals: {}, multi: false, part: 0, parts: 16, tab: '', own: 0, changes: -1, es: null, mixInfo: null };
+const RO = new Set(['hello', 'param_info', 'mix_info', 'get', 'mix_get', 'presets', 'status', 'meters', 'get_state', 'master_stage_get', 'app.setlist_get', 'songs', 'files', 'setup_get']);
+class AuthError extends Error {}
+async function api(o) {
+ const write = !RO.has(o.op);
+ if (write) S.own = Date.now();
+ let r;
+ try { r = await fetch('/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }); }
+ catch (e) { dot(false); throw e; }
+ if (r.status === 401) { showLogin(t('Session expired')); throw new AuthError('auth'); }
+ let j; try { j = await r.json(); } catch (e) { throw new Error('HTTP ' + r.status); }
+ if (write) S.own = Date.now();
+ if (j && j.ok === false) { const err = new Error(j.error || 'error'); err.reply = j; throw err; }
+ return j;
+}
+const tryApi = async (o, quiet) => { try { return await api(o); } catch (e) { if (!(e instanceof AuthError) && !quiet) toast(e.message, true); return null; } };
+const partArg = () => S.multi ? { part: S.part } : {};
+
+/* ====================================================================== login */
+function showLogin(msg) {
+ if (S.es) { S.es.close(); S.es = null; }
+ $('#app').classList.add('hide'); $('#login').classList.remove('hide');
+ $('#lmsg').textContent = msg || ''; $('#pin').value = ''; $('#pin').focus();
+}
+async function doLogin() {
+ const pin = $('#pin').value.trim(); if (!pin) return;
+ $('#go').disabled = true;
+ try {
+  const r = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }) });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { $('#lmsg').textContent = ''; await boot(); }
+  else if (r.status === 429) $('#lmsg').textContent = 'Locked – retry in ' + (j.retry || 60) + ' s';
+  else if (r.status === 403) $('#lmsg').textContent = j.error || 'Server stopped';
+  else $('#lmsg').textContent = t('Wrong PIN') + (j.left != null ? ' (' + j.left + ')' : '');
+ } catch (e) { $('#lmsg').textContent = 'Connection failed'; }
+ $('#go').disabled = false; $('#pin').value = '';
+}
+$('#go').onclick = doLogin;
+$('#pin').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+/* ====================================================================== live link (SSE) */
+function dot(ok) { $('#dot').className = ok ? 'ok' : ''; }
+function startSSE() {
+ if (S.es) S.es.close();
+ const es = new EventSource('/events'); S.es = es;
+ es.onopen = () => dot(true);
+ es.onmessage = ev => { try { onChanges(JSON.parse(ev.data).changes); } catch (e) {} };
+ es.onerror = async () => {
+  dot(false); es.close(); if (S.es !== es) return; S.es = null;
+  await sleep(3000);
+  try { const r = await fetch('/api/ping'); if (r.status === 401) return showLogin(t('Session expired')); } catch (e) {}
+  if (!S.es && !$('#app').classList.contains('hide')) startSSE();
+ };
+}
+function onChanges(n) {
+ if (n === S.changes) return;
+ const first = S.changes < 0; S.changes = n;
+ if (first || Date.now() - S.own < 700) return;     // our own edit: the UI already shows it
+ refreshSoon();
+}
+const refreshSoon = debounce(() => { const tb = TABS.find(x => x.id === S.tab); if (tb && tb.refresh) tb.refresh(); }, 200);
+
+/* ====================================================================== boot */
+async function boot() {
+ $('#login').classList.add('hide'); $('#app').classList.remove('hide');
+ const hi = await tryApi({ op: 'hello' });
+ if (!hi) return;
+ S.multi = !!hi.multi; S.part = hi.selected || 0; S.parts = hi.parts || 16;
+ $('#who').textContent = (hi.name || 'HSynth') + ' ' + (hi.version || '');
+ if (!S.params.length) {
+  let off = 0, total = 1e9;
+  while (off < total) {
+   const r = await tryApi({ op: 'param_info', offset: off, count: 500 });
+   if (!r || !r.params.length) break;
+   total = r.total; off += r.params.length;
+   for (const p of r.params) { S.params.push(p); S.by[p.name] = p; }
+  }
+  buildGroups();
+ }
+ await loadValues();
+ buildTabs();
+ startSSE();
+}
+function colorOf(g) {
+ g = g.toLowerCase();
+ if (/filter/.test(g)) return 'am';
+ if (/env|lfo|mod|motion|mseg|seq|arp|morph|perf|macro|rhythm/.test(g)) return 'vi';
+ if (/fx|reverb|delay|chorus|eq|comp|cab|send|effect/.test(g)) return 'em';
+ return 'cy';
+}
+function buildGroups() {
+ const m = new Map();
+ for (const p of S.params) { if (!m.has(p.group)) m.set(p.group, []); m.get(p.group).push(p); }
+ S.groups = [...m].map(([name, params]) => ({ name, params, c: colorOf(name) }));
+}
+async function loadValues(names) {
+ const r = await tryApi({ op: 'get', ...partArg(), ...(names ? { names } : {}) }, true);
+ if (r && r.values) Object.assign(S.vals, r.values);
+ return r;
+}
+const toNum = (p, v) => p.kind === 'enum' ? (typeof v === 'number' ? v : Math.max(0, (p.options || []).indexOf(v))) : p.kind === 'bool' ? (v ? 1 : 0) : +v;
+
+/* ====================================================================== SOUND */
+function fmt(p, v) {
+ if (p.kind === 'enum') return (p.options || [])[toNum(p, v)] ?? v;
+ if (p.kind === 'bool') return v ? 'on' : 'off';
+ const u = p.unit || '';
+ if (p.kind === 'int') return Math.round(v) + (u ? ' ' + u : '');
+ let s;
+ if (u === 'Hz' && v >= 1000) return (v / 1000).toFixed(2) + ' kHz';
+ if (u === 's' && v < 1) return (v * 1000).toFixed(0) + ' ms';
+ s = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(3);
+ return s + (u ? ' ' + u : '');
+}
+const sendQ = {};
+let sendT = 0;
+function queueSet(name, v) {                    // throttled (not debounced): values keep flowing while a slider is dragged
+ sendQ[name] = v;
+ if (sendT) return;
+ sendT = setTimeout(async () => {
+  sendT = 0; const values = { ...sendQ }; for (const k in sendQ) delete sendQ[k];
+  await tryApi({ op: 'set', ...partArg(), values });
+ }, 45);
+}
+function throttle(fn, ms) { let tm = 0; return () => { if (tm) return; tm = setTimeout(() => { tm = 0; fn(); }, ms); }; }
+
+const Sound = {
+ g: null, q: '', rows: {},
+ mount(pane) {
+  this.side = h('div', { class: 'side' });
+  this.list = h('div', { class: 'plist' });
+  this.search = h('input', { type: 'search', placeholder: t('Search parameters…'), oninput: debounce(e => { this.q = e.target.value.trim().toLowerCase(); this.render(); }, 200) });
+  pane.append(h('div', { class: 'bar' }, this.partSel = h('select', { class: 'hide', onchange: e => selectPart(+e.target.value) })),
+   h('div', { class: 'split' }, this.side, this.list));
+  this.side.append(this.search);
+  this.renderSide(); this.renderPartSel(); if (!this.g && S.groups.length) this.g = S.groups[0];
+  this.render();
+ },
+ renderPartSel() {
+  const s = this.partSel; s.textContent = '';
+  for (let i = 0; i < S.parts; i++) s.append(h('option', { value: i, selected: i === S.part }, t('Part') + ' ' + (i + 1)));
+  s.classList.toggle('hide', !S.multi);
+ },
+ renderSide() {
+  this.gs = h('div');
+  for (const g of S.groups) g.el = h('div', { class: 'g ' + g.c, onclick: () => { this.g = g; this.q = ''; this.search.value = ''; this.render(); } }, h('i'), h('span', {}, g.name), h('small', {}, g.params.length));
+  this.gs.append(...S.groups.map(g => g.el));
+  this.side.append(this.gs);
+ },
+ render() {
+  this.list.textContent = ''; this.rows = {};
+  let ps;
+  if (this.q) ps = S.params.filter(p => (p.label + ' ' + p.name + ' ' + p.group).toLowerCase().includes(this.q)).slice(0, 150);
+  else ps = this.g ? this.g.params : [];
+  for (const g of S.groups) g.el && g.el.classList.toggle('on', !this.q && g === this.g);
+  const frag = document.createDocumentFragment();
+  for (const p of ps) frag.append(this.row(p, this.q ? S.groups.find(g => g.name === p.group) : this.g));
+  this.list.append(frag);
+ },
+ row(p, g) {
+  const v = S.vals[p.name] ?? p.def, c = g ? g.c : 'cy';
+  const out = h('output');
+  let ctl;
+  if (p.kind === 'enum') {
+   ctl = h('select', { onchange: e => { queueSet(p.name, +e.target.value); S.vals[p.name] = p.options[+e.target.value]; } },
+    (p.options || []).map((o, i) => h('option', { value: i }, o)));
+   ctl.value = toNum(p, v);
+  } else if (p.kind === 'bool') {
+   ctl = h('input', { type: 'checkbox', class: 'tg', checked: !!v, onchange: e => { out.textContent = e.target.checked ? 'on' : 'off'; queueSet(p.name, e.target.checked); S.vals[p.name] = e.target.checked; } });
+  } else if (p.kind === 'int') {
+   ctl = h('input', { type: 'range', min: p.min, max: p.max, step: 1, value: v, oninput: e => { const n = +e.target.value; out.textContent = fmt(p, n); queueSet(p.name, n); S.vals[p.name] = n; } });
+  } else {
+   const exp = p.curve === 'exp' && p.min > 0;
+   const toT = x => exp ? Math.log(clamp(x, p.min, p.max) / p.min) / Math.log(p.max / p.min) * 1000 : (clamp(x, p.min, p.max) - p.min) / ((p.max - p.min) || 1) * 1000;
+   const fromT = k => exp ? p.min * Math.pow(p.max / p.min, k / 1000) : p.min + k / 1000 * (p.max - p.min);
+   ctl = h('input', { type: 'range', min: 0, max: 1000, step: 1, value: toT(+v), oninput: e => { const n = fromT(+e.target.value); out.textContent = fmt(p, n); queueSet(p.name, n); S.vals[p.name] = n; } });
+   ctl._toT = toT;
+  }
+  out.textContent = p.kind === 'enum' ? '' : fmt(p, v);
+  const lab = h('label', { title: p.name + '  (double-click: default)', ondblclick: () => {
+   S.vals[p.name] = p.def; queueSet(p.name, p.kind === 'bool' ? !!p.def : toNum(p, p.def)); this.put(p.name, p.def);
+  } }, p.label, this.q ? h('span', { class: 'sub' }, p.group) : null);
+  const row = h('div', { class: 'row ' + c }, lab, ctl, out);
+  if (p.kind === 'bool') { row.style.gridTemplateColumns = 'minmax(120px,200px) auto 1fr'; }
+  this.rows[p.name] = { ctl, out, p };
+  return row;
+ },
+ put(name, v) {
+  const r = this.rows[name]; if (!r || document.activeElement === r.ctl) return;
+  const p = r.p;
+  if (p.kind === 'enum') r.ctl.value = toNum(p, v);
+  else if (p.kind === 'bool') r.ctl.checked = !!v;
+  else if (p.kind === 'int') r.ctl.value = +v;
+  else r.ctl.value = r.ctl._toT(+v);
+  r.out.textContent = p.kind === 'enum' ? '' : fmt(p, v);
+ },
+ async refresh() {
+  const names = Object.keys(this.rows); if (!names.length) return;
+  const r = await loadValues(names); if (!r) return;
+  for (const n of names) if (r.values && n in r.values) this.put(n, r.values[n]);
+ },
+ show() { this.renderPartSel(); this.refresh(); }
+};
+async function selectPart(i) {
+ S.part = i;
+ const r = await tryApi({ op: 'select_part', part: i });
+ if (r && r.selected != null) S.part = r.selected;
+ await loadValues(); Sound.renderPartSel(); Sound.render();
+}
+
+/* ====================================================================== PRESETS */
+const Presets = {
+ off: 0, q: '', cat: '', user: false, total: 0, cur: '',
+ mount(pane) {
+  this.cats = h('select', { onchange: e => { this.cat = e.target.value; this.load(true); } }, h('option', { value: '' }, t('All')));
+  this.list = h('div', { class: 'tw' });
+  this.more = h('button', { class: 'hide', onclick: () => this.load(false) }, t('More'));
+  this.cnt = h('span', { class: 'dim' });
+  this.sn = h('input', { type: 'text', placeholder: t('Name'), maxLength: 64, style: 'width:200px' });
+  this.sc = h('input', { type: 'text', placeholder: t('Category'), maxLength: 32, style: 'width:140px' });
+  pane.append(
+   h('div', { class: 'bar' },
+    h('input', { type: 'search', class: 'grow', placeholder: t('Search presets…'), oninput: debounce(e => { this.q = e.target.value.trim(); this.load(true); }, 250) }),
+    this.cats, h('label', { class: 'dim' }, h('input', { type: 'checkbox', onchange: e => { this.user = e.target.checked; this.load(true); } }), ' ' + t('User only')),
+    S.multi ? h('span', { class: 'badge' }, t('Part') + ' ' + (S.part + 1)) : null, this.cnt),
+   this.list, h('div', { class: 'bar', style: 'margin-top:10px' }, this.more),
+   h('div', { class: 'box', style: 'margin-top:14px' }, h('h2', {}, t('Save as new preset')),
+    h('div', { class: 'bar' }, this.sn, this.sc, h('button', { class: 'pri', onclick: () => this.save() }, t('Save')))));
+  this.load(true, true);
+ },
+ async load(reset, cats) {
+  if (reset) { this.off = 0; this.list.textContent = ''; }
+  const r = await tryApi({ op: 'presets', query: this.q, category: this.cat, user: this.user, offset: this.off, count: 200, ...(cats ? { categories: true } : {}) });
+  if (!r) return;
+  if (r.categories) for (const c of r.categories) this.cats.append(h('option', { value: c[0] }, c[0] + (c[1] != null ? ' (' + c[1] + ')' : '')));
+  this.total = r.total; this.off += r.presets.length;
+  for (const p of r.presets) {
+   this.list.append(h('div', { class: 'plr' + (p.file === this.cur ? ' cur' : ''), onclick: ev => this.pick(p, ev.currentTarget) },
+    h('div', { class: 'n' }, p.favorite ? '★ ' : '', p.name, p.tags && p.tags.length ? h('span', { class: 'tags' }, p.tags.map(x => '#' + x).join(' ')) : null),
+    h('span', { class: 'badge' }, p.category || '–'), h('span', { class: 'badge', style: p.user ? 'color:var(--em);border-color:var(--em)' : '' }, p.user ? 'USER' : 'FACTORY')));
+  }
+  this.cnt.textContent = this.total + ' presets';
+  this.more.classList.toggle('hide', this.off >= this.total);
+ },
+ async pick(p, row) {
+  const r = await tryApi({ op: 'load_preset', file: p.file, ...partArg() });
+  if (!r) return;
+  this.cur = p.file;
+  for (const x of this.list.children) x.classList.remove('cur'); row.classList.add('cur');
+  toast(t('Load') + ': ' + (r.name || p.name) + (r.warnings && r.warnings.length ? ' ⚠ ' + r.warnings.length : ''));
+  await loadValues();
+ },
+ async save() {
+  const name = this.sn.value.trim(); if (!name) return this.sn.focus();
+  const r = await tryApi({ op: 'save_preset', name, category: this.sc.value.trim(), ...partArg() });
+  if (r) { toast(t('Saved') + ': ' + name); this.sn.value = ''; this.load(true); }
+ },
+ show() {}
+};
+
+/* ====================================================================== MULTI */
+const MIX_ORDER = ['volume','pan','mute','channel','key.low','key.high','key.fade.low','key.fade.high','transpose','fx.send'];
+const Multi = {
+ cells: [],
+ async mount(pane) {
+  this.body = h('div', { class: 'tw' });
+  this.mt = h('input', { type: 'checkbox', onchange: async e => { const r = await tryApi({ op: 'mode', multi: e.target.checked }); if (r) { S.multi = !!r.multi; S.part = r.selected || 0; await loadValues(); Sound.renderPartSel(); this.refresh(); } } });
+  pane.append(h('div', { class: 'bar' }, h('label', {}, this.mt, ' ' + t('Multi mode')), h('span', { class: 'dim' }, '16 parts')), this.body);
+  if (!S.mixInfo) { const r = await tryApi({ op: 'mix_info' }); S.mixInfo = r ? r.mix : []; }
+  const info = S.mixInfo.slice().sort((a, b) => { const i = MIX_ORDER.indexOf(a.name), j = MIX_ORDER.indexOf(b.name); return (i < 0 ? 99 : i) - (j < 0 ? 99 : j); });
+  this.info = info;
+  const tb = h('table'), tr = h('tr', {}, h('th', {}, '#'));
+  for (const m of info) tr.append(h('th', {}, m.label || m.name));
+  tb.append(h('thead', {}, tr)); const bd = h('tbody'); tb.append(bd);
+  this.cells = []; this.rows = [];
+  for (let p = 0; p < S.parts; p++) {
+   const row = h('tr', {}, h('td', {}, h('span', { class: 'pn', title: t('Select'), onclick: async () => { await selectPart(p); this.mark(); } }, p + 1)));
+   const cs = {};
+   for (const m of info) {
+    let c;
+    let pend, tm = 0;
+    const send = v => { pend = v; if (tm) return; tm = setTimeout(() => { tm = 0; tryApi({ op: 'mix_set', part: p, values: { [m.name]: pend } }); }, 50); };
+    if (m.kind === 'bool') c = h('input', { type: 'checkbox', onchange: e => send(e.target.checked) });
+    else if (m.kind === 'float') { const o = h('span', { class: 'note' }); c = h('input', { type: 'range', min: m.min, max: m.max, step: 0.01, oninput: e => { o.textContent = (+e.target.value).toFixed(2); send(+e.target.value); } }); c._o = o; }
+    else { const o = h('span', { class: 'note' }); c = h('input', { type: 'number', min: m.min, max: m.max, step: 1, onchange: e => { const v = clamp(Math.round(+e.target.value), m.min, m.max); e.target.value = v; if (/^key\.(low|high)$/.test(m.name)) o.textContent = noteName(v); send(v); } }); c._o = o; }
+    cs[m.name] = c; row.append(h('td', {}, c, c._o || null));
+   }
+   this.cells.push(cs); this.rows.push(row); bd.append(row);
+  }
+  this.body.append(tb);
+  this.refresh();
+ },
+ mark() { this.rows.forEach((r, i) => r.classList.toggle('sel', S.multi && i === S.part)); },
+ async refresh() {
+  const r = await tryApi({ op: 'mix_get' }); if (!r || !r.parts) return;
+  this.mt.checked = S.multi;
+  r.parts.forEach((mx, p) => {
+   const cs = this.cells[p]; if (!cs) return;
+   for (const m of this.info) {
+    const c = cs[m.name], v = mx[m.name]; if (!c || v == null || document.activeElement === c) continue;
+    if (m.kind === 'bool') c.checked = !!v; else c.value = +v;
+    if (c._o) c._o.textContent = m.kind === 'float' ? (+v).toFixed(2) : /^key\.(low|high)$/.test(m.name) ? noteName(+v) : '';
+   }
+  });
+  this.mark();
+ },
+ show() { this.refresh(); }
+};
+
+/* ====================================================================== SET LIST */
+const SL = { bank: 0, sel: 0, data: null, dirty: new Set(), status: '' };
+const FIELDS = ['title', 'bpm', 'trn', 'trim', 'memo', 'memoShow', 'color'];
+const slotTitle = s => s.title || (s.ref ? (s.kind === 'scene' ? 'Scene ' + ((+s.ref || 0) + 1) : s.ref.split(/[\\/]/).pop().replace(/\.[^.]+$/, '')) : '');
+const SetList = {
+ async mount(pane) {
+  this.banks = h('div', { class: 'banks' }); this.slots = h('div'); this.form = h('div', { class: 'form' });
+  this.sv = h('span', { class: 'sv' });
+  pane.append(h('div', { class: 'bar' }, h('button', { onclick: () => this.reload(true) }, t('Reload')), h('button', { class: 'pri', onclick: () => this.save() }, t('Save') + ' (Ctrl+S)'), this.sv),
+   h('div', { class: 'sl' }, h('div', {}, this.banks, this.slots), this.form));
+  for (let b = 0; b < 8; b++) this.banks.append(h('button', { onclick: () => { SL.bank = b; SL.sel = b * 8; this.draw(); } }, String.fromCharCode(65 + b)));
+  await this.reload(true);
+ },
+ async reload(force) {
+  if (!force && SL.dirty.size) return;
+  const r = await tryApi({ op: 'app.setlist_get' }); if (!r) return;
+  SL.data = r.setlist; SL.dirty.clear(); this.setSv('');
+  this.draw();
+ },
+ setSv(k) { this.sv.textContent = k === 'dirty' ? t('Unsaved changes') : k === 'ok' ? t('Saved ✓') : k === 'busy' ? t('Saving…') : ''; this.sv.className = 'sv ' + k; },
+ slot(i) {
+  let s = SL.data.slots.find(x => x.i === i);
+  if (!s) { s = { i, kind: '', ref: '', title: '', bpm: 0, trn: 0, trim: 0, memo: '', memoShow: false, color: -1 }; SL.data.slots.push(s); }
+  return s;
+ },
+ draw() {
+  if (!SL.data) return;
+  [...this.banks.children].forEach((b, i) => b.classList.toggle('on', i === SL.bank));
+  this.slots.textContent = '';
+  for (let n = 0; n < 8; n++) {
+   const i = SL.bank * 8 + n, s = this.slot(i), tt = slotTitle(s);
+   this.slots.append(h('div', { class: 'slot' + (i === SL.sel ? ' on' : '') + (s.ref ? '' : ' empty') + (SL.data.active === i ? ' act' : ''), onclick: () => { SL.sel = i; this.draw(); } },
+    h('b', {}, String.fromCharCode(65 + SL.bank) + (n + 1)), h('span', { class: 't' }, tt || '—'),
+    h('span', { class: 'dim2 mono' }, (s.bpm ? s.bpm + ' ' : '') + (s.trn ? (s.trn > 0 ? '+' : '') + s.trn : ''))));
+  }
+  this.drawForm();
+ },
+ touch(i, k, v) {
+  const s = this.slot(i); s[k] = v; SL.dirty.add(i); this.setSv('dirty'); this.autosave();
+ },
+ drawForm() {
+  const i = SL.sel, s = this.slot(i), f = this.form; f.textContent = '';
+  const num = (k, lab, min, max, step) => h('label', {}, lab, h('input', { type: 'number', min, max, step, value: s[k] ?? 0, onchange: e => { const v = clamp(+e.target.value || 0, min, max); e.target.value = v; this.touch(i, k, v); this.refreshRow(); } }));
+  f.append(
+   h('div', { class: 'fr' },
+    h('b', { class: 'mono', style: 'font-size:20px;color:var(--cy)' }, String.fromCharCode(65 + (i >> 3)) + ((i & 7) + 1)),
+    h('label', { style: 'flex:1;min-width:200px' }, t('Title'), h('input', { type: 'text', maxLength: 80, value: s.title || '', placeholder: slotTitle({ ...s, title: '' }), oninput: e => { this.touch(i, 'title', e.target.value); this.refreshRow(); } })),
+    num('bpm', t('BPM (0 = keep)'), 0, 240, 1), num('trn', t('Transpose'), -12, 12, 1), num('trim', t('Trim (dB)'), -12, 6, 0.5),
+    h('label', { style: 'flex-direction:row;align-items:center;gap:6px' }, h('input', { type: 'checkbox', checked: !!s.memoShow, onchange: e => this.touch(i, 'memoShow', e.target.checked) }), t('Show memo on stage'))),
+   h('div', { class: 'dim', style: 'font-size:11px;margin-bottom:4px' }, (s.kind ? s.kind.toUpperCase() + ' · ' : '') + (s.ref || '(empty slot – assign a sound on the phone)')),
+   h('label', { class: 'dim', style: 'font-size:11px' }, t('Memo / lyrics / chart')),
+   h('textarea', { id: 'memo', spellcheck: false, value: s.memo || '', oninput: e => this.touch(i, 'memo', e.target.value) }));
+ },
+ refreshRow() { const keep = SL.sel; const els = this.slots.children; const n = keep - SL.bank * 8; const s = this.slot(keep); if (els[n]) { els[n].children[1].textContent = slotTitle(s) || '—'; els[n].children[2].textContent = (s.bpm ? s.bpm + ' ' : '') + (s.trn ? (s.trn > 0 ? '+' : '') + s.trn : ''); } },
+ autosave: debounce(() => SetList.save(), 1500),
+ async save() {
+  if (!SL.dirty.size) return;
+  this.setSv('busy');
+  const fresh = await tryApi({ op: 'app.setlist_get' }); if (!fresh) return this.setSv('dirty');
+  const out = fresh.setlist;                                         // merge only the slots edited here into the phone's current list
+  for (const i of SL.dirty) {
+   const mine = this.slot(i); let dst = out.slots.find(s => s.i === i);
+   if (!dst) { dst = { i }; out.slots.push(dst); }
+   for (const k of FIELDS) if (k in mine) dst[k] = mine[k];
+  }
+  const r = await tryApi({ op: 'app.setlist_set', setlist: out });
+  if (r) { SL.data = out; SL.dirty.clear(); this.setSv('ok'); } else this.setSv('dirty');
+ },
+ refresh() { this.reload(false); },
+ show() { this.reload(false); }
+};
+window.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && S.tab === 'setlist') { e.preventDefault(); SetList.save(); } });
+
+/* ====================================================================== PERFORM */
+const KEYS_LO = 'zsxdcvgbhnjm,l.;/', KEYS_HI = 'q2w3er5t6y7ui9o0p';
+const Perf = {
+ oct: 3, vel: 0.8, ch: 0, held: new Map(), eq: null,
+ base() { return 12 * (this.oct + 1); },
+ async note(k, on) {
+  if (on) { if (this.held.has(k)) return; this.held.set(k, 1); } else { if (!this.held.has(k)) return; this.held.delete(k); }
+  this.light(k, on);
+  tryApi({ op: 'note', key: k, vel: on ? this.vel : 0, on, ...(this.ch ? { channel: this.ch } : {}) }, true);
+ },
+ light(k, on) { const e = this.kb && this.kb.querySelector('[data-k="' + k + '"]'); if (e) e.classList.toggle('dn', on); },
+ drawKeys() {
+  const kb = this.kb; kb.textContent = '';
+  const lo = this.base() - 12, n = 49, whites = [];
+  for (let i = 0; i < n; i++) if (![1, 3, 6, 8, 10].includes((lo + i) % 12)) whites.push(lo + i);
+  const w = 100 / whites.length;
+  for (const k of whites) kb.append(h('div', { class: 'wk', 'data-k': k }, k % 12 === 0 ? h('span', {}, noteName(k)) : null));
+  whites.forEach((k, wi) => { if ([0, 2, 5, 7, 9].includes(k % 12) && k + 1 < lo + n) kb.append(h('div', { class: 'bk', 'data-k': k + 1, style: 'left:' + ((wi + 1) * w - w * 0.3) + '%;width:' + (w * 0.6) + '%' })); });
+  this.octL.textContent = t('Octave') + ' ' + this.oct;
+ },
+ mount(pane) {
+  this.kb = h('div', { class: 'keys' });
+  this.octL = h('span', { class: 'mono' });
+  this.velL = h('span', { class: 'mono' }, this.vel.toFixed(2));
+  const chSel = h('select', { onchange: e => this.ch = +e.target.value }, h('option', { value: 0 }, 'ch: auto'), ...Array.from({ length: 16 }, (_, i) => h('option', { value: i + 1 }, 'ch ' + (i + 1))));
+  this.tempo = h('input', { type: 'number', min: 20, max: 300, step: 1, style: 'width:80px', onchange: e => tryApi({ op: 'transport', tempo: clamp(+e.target.value || 120, 20, 300) }) });
+  this.eqBox = h('div', { class: 'eqs' });
+  this.mv = h('input', { type: 'range', min: 0, max: 1000, oninput: e => queueSet('master.volume', e.target.value / 1000) });
+  pane.append(h('div', { class: 'box' },
+   h('div', { class: 'bar' },
+    h('button', { onclick: () => { this.oct = clamp(this.oct - 1, 0, 6); this.drawKeys(); } }, '◀'), this.octL, h('button', { onclick: () => { this.oct = clamp(this.oct + 1, 0, 6); this.drawKeys(); } }, '▶'),
+    h('span', { class: 'dim', style: 'margin-left:12px' }, t('Velocity')),
+    h('input', { type: 'range', min: 5, max: 100, value: this.vel * 100, style: 'width:140px', oninput: e => { this.vel = e.target.value / 100; this.velL.textContent = this.vel.toFixed(2); } }), this.velL,
+    chSel, h('span', { class: 'grow' }), h('button', { class: 'panic', onclick: () => this.panic() }, t('PANIC'))),
+   this.kb,
+   h('div', { class: 'help', style: 'margin-top:8px' }, 'Keys: ', h('kbd', {}, 'Z S X D C V G B H N J M'), ' / ', h('kbd', {}, 'Q 2 W 3 E R 5 T 6 Y 7 U'), '  ·  ', h('kbd', {}, '←'), h('kbd', {}, '→'), ' octave  ·  ', h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' velocity  ·  ', h('kbd', {}, 'Space'), ' sustain')),
+   h('div', { class: 'pf' },
+    h('div', { class: 'box' }, h('h2', {}, t('Transport')), h('div', { class: 'bar' },
+      h('button', { class: 'pri', onclick: () => tryApi({ op: 'transport', play: true }) }, '▶ Play'), h('button', { onclick: () => tryApi({ op: 'transport', play: false }) }, '■ Stop'),
+      h('span', { class: 'dim' }, t('Tempo')), this.tempo),
+     h('h2', { style: 'margin-top:14px' }, 'MASTER VOLUME'), this.mv),
+    h('div', { class: 'box' }, h('h2', {}, t('Master EQ')), h('div', { class: 'bar' },
+      h('label', {}, this.eqOn = h('input', { type: 'checkbox', onchange: () => this.pushEq() }), ' EQ'),
+      h('label', {}, this.byp = h('input', { type: 'checkbox', onchange: () => this.pushEq() }), ' Bypass')), this.eqBox)));
+  const down = e => { const k = e.target.closest('[data-k]'); if (!k) return; e.preventDefault(); const n = +k.dataset.k; k.setPointerCapture && k.setPointerCapture(e.pointerId); this.note(n, true); };
+  const up = e => { const k = e.target.closest('[data-k]'); if (!k) return; this.note(+k.dataset.k, false); };
+  this.kb.addEventListener('pointerdown', down); this.kb.addEventListener('pointerup', up); this.kb.addEventListener('pointercancel', up); this.kb.addEventListener('lostpointercapture', up);
+  this.drawKeys(); this.loadAll();
+ },
+ async panic() { for (const k of [...this.held.keys()]) this.light(k, false); this.held.clear(); await tryApi({ op: 'panic' }); },
+ async loadAll() {
+  const r = await tryApi({ op: 'master_stage_get' }, true);
+  if (r) { this.eq = r; this.eqOn.checked = !!r.eqEnabled; this.byp.checked = !!r.bypass; this.drawEq(); }
+  const v = await loadValues(['master.volume']); if (v && v.values) this.mv.value = (v.values['master.volume'] || 0) * 1000;
+  const tr = await tryApi({ op: 'transport' }, true);
+  if (tr && tr.tempo) this.tempo.value = Math.round(tr.tempo);
+ },
+ drawEq() {
+  this.eqBox.textContent = '';
+  (this.eq.eq || []).forEach((b, i) => {
+   const lab = h('span', {}, (b.gain || 0).toFixed(1));
+   this.eqBox.append(h('div', { class: 'eqb em' }, lab,
+    h('input', { type: 'range', min: -12, max: 12, step: 0.5, value: b.gain || 0, orient: 'vertical', oninput: e => { b.gain = +e.target.value; lab.textContent = b.gain.toFixed(1); this.pushEq(); } }),
+    h('span', {}, b.freq >= 1000 ? (b.freq / 1000).toFixed(b.freq % 1000 ? 1 : 0) + 'k' : Math.round(b.freq)),
+    h('input', { type: 'checkbox', checked: b.on !== false, title: 'on', onchange: e => { b.on = e.target.checked; this.pushEq(); } })));
+  });
+ },
+ pushEq: throttle(() => { const e = Perf.eq; if (!e) return; tryApi({ op: 'master_stage_set', eq: e.eq, eqEnabled: Perf.eqOn.checked, bypass: Perf.byp.checked }); }, 80),
+ refresh() { this.loadAll(); },
+ show() { this.loadAll(); }
+};
+const KMAP = {};
+[...KEYS_LO].forEach((c, i) => KMAP[c] = i); [...KEYS_HI].forEach((c, i) => KMAP[c] = 12 + i);
+function typing(e) { const n = e.target.tagName; return n === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox' || n === 'TEXTAREA' || n === 'SELECT'; }
+window.addEventListener('keydown', e => {
+ if (S.tab !== 'perform' || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+ if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); Perf.oct = clamp(Perf.oct + (e.key === 'ArrowRight' ? 1 : -1), 0, 6); Perf.drawKeys(); return; }
+ if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); Perf.vel = clamp(Math.round((Perf.vel + (e.key === 'ArrowUp' ? 0.05 : -0.05)) * 100) / 100, 0.05, 1); Perf.velL.textContent = Perf.vel.toFixed(2); return; }
+ if (e.key === ' ') { e.preventDefault(); if (!e.repeat) tryApi({ op: 'event', type: 'sustain', value: 1 }, true); return; }
+ if (e.repeat) return;
+ const k = KMAP[e.key.toLowerCase()]; if (k == null) return;
+ e.preventDefault(); Perf.note(Perf.base() + k, true);
+});
+window.addEventListener('keyup', e => {
+ if (S.tab !== 'perform') return;
+ if (e.key === ' ') { tryApi({ op: 'event', type: 'sustain', value: 0 }, true); return; }
+ const k = KMAP[e.key.toLowerCase()]; if (k == null) return;
+ // release whatever this key started, even when the octave changed meanwhile
+ const n = Perf.base() + k; if (Perf.held.has(n)) Perf.note(n, false);
+});
+window.addEventListener('blur', () => { for (const k of [...Perf.held.keys()]) Perf.note(k, false); });
+
+/* ====================================================================== BACKUP */
+const Backup = {
+ mount(pane) {
+  pane.append(h('div', { class: 'box', style: 'max-width:560px' }, h('h2', {}, 'BACKUP'),
+   h('p', { class: 'dim' }, t('Presets & settings only. Restore is done on the phone.')),
+   h('p', {}, h('a', { href: '/backup.zip', download: '', class: 'abtn' }, '⬇ ' + t('Download backup (.zip)'))),
+   h('p', {}, h('button', { onclick: () => this.state() }, '⬇ ' + t('Download current sound (.json)')))));
+ },
+ async state() {
+  const r = await tryApi({ op: 'get_state', compact: true }); if (!r) return;
+  const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(r.state, null, 1)], { type: 'application/json' })), download: 'hsynth_sound.json' });
+  document.body.append(a); a.click(); a.remove();
+ },
+ show() {}
+};
+
+/* ====================================================================== tabs */
+const TABS = [
+ { id: 'sound', label: 'SOUND', c: 'cy', m: Sound }, { id: 'presets', label: 'PRESETS', c: 'cy', m: Presets },
+ { id: 'multi', label: 'MULTI', c: 'vi', m: Multi }, { id: 'setlist', label: 'SET LIST', c: 'am', m: SetList },
+ { id: 'perform', label: 'PERFORM', c: 'em', m: Perf }, { id: 'backup', label: 'BACKUP', c: 'rd', m: Backup }
+];
+function buildTabs() {
+ const nav = $('#tabs'), main = $('#main'); nav.textContent = ''; main.textContent = '';
+ for (const tb of TABS) {
+  tb.btn = h('button', { onclick: () => openTab(tb.id) }, t(tb.label));
+  tb.pane = h('div', { class: 'pane hide ' + tb.c }); tb.mounted = false; tb.refresh = () => tb.m.refresh && tb.m.refresh();
+  nav.append(tb.btn); main.append(tb.pane);
+ }
+ let last = 'sound'; try { last = localStorage.getItem('hs.tab') || 'sound'; } catch (e) {}
+ S.tab = ''; openTab(TABS.some(x => x.id === last) ? last : 'sound');
+}
+function openTab(id) {
+ if (S.tab === id) return;
+ for (const k of [...Perf.held.keys()]) Perf.note(k, false);
+ S.tab = id; try { localStorage.setItem('hs.tab', id); } catch (e) {}
+ for (const tb of TABS) {
+  const on = tb.id === id;
+  tb.pane.classList.toggle('hide', !on); tb.btn.classList.toggle('on', on); tb.btn.style.setProperty('--acc', 'var(--' + tb.c.replace('rd', 'red') + ')');
+  if (on) { if (!tb.mounted) { tb.mounted = true; tb.m.mount(tb.pane); } else if (tb.m.show) tb.m.show(); }
+ }
+}
+$('#hpanic').onclick = () => Perf.panic();
+
+/* ====================================================================== start */
+(async () => {
+ try {
+  const r = await fetch('/api/ping');
+  if (r.ok) await boot(); else showLogin();
+ } catch (e) { showLogin('Connection failed'); }
+})();
+</script>
+</body>
+</html>

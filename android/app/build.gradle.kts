@@ -59,4 +59,6 @@ android {
 dependencies {
     // Oboe (Apache-2.0): low-latency audio output via AAudio / OpenSL ES
     implementation("com.google.oboe:oboe:1.10.0")
+    // ONNX Runtime (MIT): Spleeter 4-stem separation on the Edge TPU via NNAPI (CPU fallback)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 }

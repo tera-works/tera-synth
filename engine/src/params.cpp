@@ -12,7 +12,7 @@ namespace hsynth {
 
 namespace {
 
-const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt", "organ", "granular"};
+const std::vector<std::string> kLayerTypeNames = {"off", "va", "fm", "pcm", "wt", "organ", "granular", "physical"};
 const std::vector<std::string> kVaWaveNames = {"saw", "square", "pulse", "triangle", "sine", "supersaw"};
 const std::vector<std::string> kFilterNames = {"off", "lp12", "lp24", "bp", "hp", "notch", "ladder", "comb+", "comb-", "formant"};
 const std::vector<std::string> kVfxNames = {"off", "saturate", "fold", "crush", "ring"};
@@ -79,7 +79,7 @@ std::vector<ParamInfo> build() {
     Builder b;
     b.fl(MasterVolume, "master.volume", "Master", "Volume", 0, 1, 0.7f);
     b.in(BendRange, "master.bendrange", "Master", "Bend Range", 0, 24, 2, "st");
-    b.fl(Morph, "mix.morph", "Master", "Morph A<>B", -1, 1, 0);
+    b.fl(Morph, "mix.morph", "Master", "Layer A\xE2\x86\x94" "B", -1, 1, 0);
 
     b.en(P::FilterType, "filter.type", "Filter", "Type", kFilterNames, (int)hsynth::FilterType::LP24);
     b.ex(FilterCutoff, "filter.cutoff", "Filter", "Cutoff", 20, 20000, 8000, "Hz");
@@ -131,7 +131,7 @@ std::vector<ParamInfo> build() {
     b.fl(P::Env3Sustain, "env3.sustain", "Env 3", "Sustain", 0, 1, 0.0f);
     b.ex(P::Env3Release, "env3.release", "Env 3", "Release", 0.001f, 20, 0.3f, "s");
     b.bo(P::ArpOn, "arp.on", "Arpeggiator", "Arp On", false);
-    b.en(P::ArpMode, "arp.mode", "Arpeggiator", "Mode", {"up", "down", "updown", "random", "order", "chord"}, 0);
+    b.en(P::ArpMode, "arp.mode", "Arpeggiator", "Mode", {"up", "down", "updown", "random", "order", "chord", "pattern"}, 0);
     b.en(P::ArpRate, "arp.rate", "Arpeggiator", "Rate", std::vector<std::string>(kSyncNames.begin() + 1, kSyncNames.end()),
          10);  // 1/16 (option k = fx::SyncDiv k + 1)
     b.in(P::ArpOctaves, "arp.octaves", "Arpeggiator", "Octaves", 1, 4, 1);
@@ -139,6 +139,23 @@ std::vector<ParamInfo> build() {
     b.fl(P::ArpSwing, "arp.swing", "Arpeggiator", "Swing", 0, 0.5f, 0);
     b.bo(P::ArpLatch, "arp.latch", "Arpeggiator", "Latch", false);
     b.fl(P::MasterTune, "master.tune", "Master", "Master Tune", -100, 100, 0, "ct");
+    b.fl(P::VoiceVintage, "voice.vintage", "Voice", "Vintage", 0, 1, 0);
+    b.fl(P::VoiceVintageRate, "voice.vintage.rate", "Voice", "Drift Rate", 0.05f, 2, 0.35f, "Hz");
+    b.fl(P::VoicePanSpread, "voice.panspread", "Voice", "Pan Spread", 0, 1, 0);
+    b.fl(P::PerfMorph, "perf.morph", "Morph", "Position", 0, 1, 0);
+    b.en(P::MorphSource, "morph.source", "Morph", "Source", {"manual", "super", "modwheel", "expression", "aftertouch"}, 0);
+    b.en(P::MorphCurve, "morph.curve", "Morph", "Curve", {"linear", "easein", "easeout", "s"}, 0);
+    b.fl(P::PianoPedalNoise, "piano.pedalnoise", "Piano", "Pedal Noise", 0, 1, 0);
+    b.fl(P::PianoSoftRelease, "piano.softrelease", "Piano", "Soft Release", 0, 1, 0);
+    b.fl(P::PianoDynComp, "piano.dyncomp", "Piano", "Dynamic Compression", 0, 1, 0);
+    b.fl(P::PianoLid, "piano.lid", "Piano", "Lid", 0, 1, 1);
+    b.fl(P::PianoHalfDamp, "piano.halfdamp", "Piano", "Half Damper", 0, 1, 0);
+    b.bo(P::StrumOn, "strum.on", "Strum", "On", false);
+    b.en(P::StrumOrder, "strum.order", "Strum", "Order", {"up", "down", "asplayed", "alternate"}, 0);
+    b.fl(P::StrumWindow, "strum.window", "Strum", "Window", 0, 40, 12, "ms");
+    b.fl(P::StrumSpacing, "strum.spacing", "Strum", "Spacing", 0, 200, 15, "ms");
+    b.fl(P::StrumJitter, "strum.jitter", "Strum", "Jitter", 0, 10, 0, "ms");
+
     b.fl(P::VelCurve, "voice.velcurve", "Voice", "Velocity Curve", -1, 1, 0);
     {
         static const char* kPc[12] = {"c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"};
@@ -307,6 +324,20 @@ std::vector<ParamInfo> build() {
         b.fl(layer(l, GrPitchRand), n + ".grain.pitchrand", gg, "Pitch Jitter", 0, 12, 0, "st");
         b.fl(layer(l, GrSpread), n + ".grain.spread", gg, "Stereo Spread", 0, 1, 0.5f);
         b.fl(layer(l, GrScan), n + ".grain.scan", gg, "Scan", -2, 2, 0, "x");
+        const std::string pg = g + " / Physical";
+        b.en(layer(l, PhysModel), n + ".phys.model", pg, "Model", {"string", "modal", "tine", "reed"}, 0);
+        b.en(layer(l, PhysExciter), n + ".phys.exciter", pg, "Exciter", {"pluck", "mallet", "hammer", "bow"}, 0);
+        b.ex(layer(l, PhysDecay), n + ".phys.decay", pg, "Decay", 0.05f, 20, 2, "s");
+        b.fl(layer(l, PhysDamp), n + ".phys.damp", pg, "Damping", 0, 1, 0.45f);
+        b.fl(layer(l, PhysBright), n + ".phys.bright", pg, "Brightness", 0, 1, 0.5f);
+        b.fl(layer(l, PhysPos), n + ".phys.pos", pg, "Excitation Position", 0.05f, 0.95f, 0.22f);
+        b.fl(layer(l, PhysHardness), n + ".phys.hardness", pg, "Hardness", 0, 1, 0.5f);
+        b.fl(layer(l, PhysInharm), n + ".phys.inharm", pg, "Inharmonicity", 0, 1, 0.1f);
+        b.fl(layer(l, PhysDispersion), n + ".phys.dispersion", pg, "Dispersion", 0, 1, 0);
+        b.fl(layer(l, PhysPickup), n + ".phys.pickup", pg, "Pickup", 0.05f, 0.95f, 0.2f);
+        b.fl(layer(l, PhysDrive), n + ".phys.drive", pg, "Drive", 0, 1, 0.1f);
+        b.fl(layer(l, PhysBody), n + ".phys.body", pg, "Body", 0, 1, 0.3f);
+        b.fl(layer(l, PhysBowPress), n + ".phys.bowpress", pg, "Bow Pressure", 0, 1, 0.35f);
     }
 
     // Part insert effects: copies of the rack metadata of the insert blocks,
@@ -424,6 +455,14 @@ const std::vector<ParamInfo>& partMixTable() {
         set(Mix::KeyHigh, "key.high", "Key Hi", ParamKind::Int, 0, 127, 127);
         set(Mix::Transpose, "transpose", "Transpose", ParamKind::Int, -48, 48, 0, "st");
         set(Mix::FxSend, "fx.send", "FX Send", ParamKind::Float, 0, 1, 1);
+        set(Mix::KeyFadeLow, "key.fade.low", "Low Key Fade", ParamKind::Int, 0, 24, 0);
+        set(Mix::KeyFadeHigh, "key.fade.high", "High Key Fade", ParamKind::Int, 0, 24, 0);
+        set(Mix::ZoneMode, "zone.mode", "Zone Mode", ParamKind::Int, 0, 2, 0);
+        set(Mix::ZoneOutPort, "zone.port", "Zone Output Port", ParamKind::Int, 0, 4, 0);
+        set(Mix::ZoneOutChannel, "zone.channel", "Zone Output Channel", ParamKind::Int, 1, 16, 1);
+        set(Mix::ZoneBankMsb, "zone.bank.msb", "Zone Bank MSB", ParamKind::Int, -1, 127, -1);
+        set(Mix::ZoneBankLsb, "zone.bank.lsb", "Zone Bank LSB", ParamKind::Int, -1, 127, -1);
+        set(Mix::ZoneProgram, "zone.program", "Zone Program", ParamKind::Int, -1, 127, -1);
         return t;
     }();
     return table;
@@ -433,6 +472,7 @@ void defaultPartMix(int part, float* values) {
     const auto& t = partMixTable();
     for (int i = 0; i < Mix::Count; ++i) values[i] = t[(size_t)i].def;
     values[Mix::Channel] = (float)(1 + std::max(0, std::min(kNumParts - 1, part)) % 16);
+    values[Mix::ZoneOutChannel] = values[Mix::Channel];
 }
 
 float sanitizePartMix(int id, float value) {

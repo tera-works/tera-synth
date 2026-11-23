@@ -6,9 +6,12 @@
 #include <vector>
 
 #include "hsynth/engine.h"
+#include "hsynth/formats/sf2.h"
 #include "hsynth/preset.h"
 
 namespace hsynth {
+
+class Json;
 
 // Part 0 + global: apply parameters and load the preset's sample sets (paths are relative to
 // libraryRoot unless absolute). Returns false only if nothing could be applied;
@@ -18,6 +21,13 @@ bool applyPreset(Engine& engine, const Preset& preset, const std::string& librar
 
 // Snapshot the engine state into a preset. Sample paths are made relative to
 // libraryRoot when they are inside it.
+bool applyPresetSst(Engine& engine, const Preset& preset, const std::string& libraryRoot,
+                    std::vector<std::string>& warnings, uint32_t* serial = nullptr, bool switchToSingle = false);
+bool applyPartPresetSst(Engine& engine, int part, const Preset& preset, const std::string& libraryRoot,
+                        std::vector<std::string>& warnings, uint32_t* serial = nullptr);
+bool applyMultiSst(Engine& engine, const MultiPreset& multi, const std::string& libraryRoot,
+                   std::vector<std::string>& warnings, uint32_t* serial = nullptr);
+
 Preset capturePreset(const Engine& engine, const std::string& name, const std::string& libraryRoot);
 
 // ---- multi-timbral (see engine.h) ----
@@ -52,6 +62,9 @@ void quantizePhrase(std::vector<Engine::PhraseEvent>& events, double lengthBeats
 bool writePhraseSmf(const std::string& path, const std::vector<Engine::PhraseEvent>& events, double lengthBeats, double bpm,
                     int repeats, std::string& error);
 
+bool quantizeRecordedPhrase(Engine& engine, double grid, double strength, std::string& error);
+bool exportRecordedPhrase(Engine& engine, const std::string& path, int repeats, std::string& error);
+
 std::unique_ptr<Engine::StagedProgram> loadStagedProgram(const Preset& preset, const std::string& libraryRoot,
                                                          std::vector<std::string>& warnings);
 // Part N as a regular preset (global params / impulses are the current global ones).
@@ -61,20 +74,28 @@ Preset capturePartPreset(const Engine& engine, int part, const std::string& name
 bool applyMulti(Engine& engine, const MultiPreset& multi, const std::string& libraryRoot,
                 std::vector<std::string>& warnings);
 MultiPreset captureMulti(const Engine& engine, const std::string& name, const std::string& libraryRoot);
+// Configure the host's optional decoder before starting any asset loaders.
+void setHostOggDecoder(OggDecodeFn decoder);
+std::unique_ptr<SampleSet> loadHostSamples(const std::string& path, std::string& error,
+                                          std::vector<std::string>& warnings);
 bool loadPartSamples(Engine& engine, int part, int layer, const std::string& path, std::string& error,
                      std::vector<std::string>& warnings);
-bool loadPartWavetable(Engine& engine, int part, int layer, const std::string& path, std::string& error);
+bool loadPartSoundBankPreset(Engine& engine, int part, int layer, const std::string& path, int bank, int program,
+                             bool isDrum, std::string& error, std::vector<std::string>& warnings);
+bool loadPartWavetable(Engine& engine, int part, int layer, const std::string& path, std::string& error,
+                       Wavetable* preview = nullptr);
 
 // Scala (.scl) scale -> tune.c .. tune.b of a part (scale degree 0 on pitch
 // class `root`, 0 = C). Non-12-note scales fail with an error.
 bool applyScalaTuning(Engine& engine, int part, const std::string& sclPath, int root, std::string& error);
+Json scalaApplyJson(Engine& engine, int part, const std::string& path, int root);
+Json scalaInfoJson(const std::string& path);
 
-// Load a WAV/SFZ file into a layer. Returns false on failure (error set);
-// warnings receives non-fatal SFZ messages.
+// Load a sample file or instrument into a layer, collecting non-fatal warnings.
 bool loadLayerSamples(Engine& engine, int layer, const std::string& path, std::string& error,
                       std::vector<std::string>& warnings);
 
-// Load a WAV wavetable as the layer's "user" table (layer type WT).
+// Load a wavetable as the layer's "user" table.
 bool loadLayerWavetable(Engine& engine, int layer, const std::string& path, std::string& error);
 
 // Offline rendering ---------------------------------------------------------

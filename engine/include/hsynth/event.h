@@ -46,6 +46,11 @@ struct Event {
     uint32_t frame = 0;       // reserved for sample-accurate scheduling
     uint8_t channel = kOmniChannel;  // MIDI channel 0..15 (set by MidiTranslator) or kOmniChannel
 
+    int8_t transpose = 0;    // live input pitch offset; key remains the release identity
+    uint8_t rawCc = 0xFF;    // real external CC, including translated messages
+    float rawSustainValue = 0.0f;  // untouched CC64 before its binary MIDI translation
+    bool fromKeyboard = false;  // touch input can have a channel without being external MIDI
+
     static Event noteOn(uint32_t id, int key, float vel) {
         Event e; e.type = EventType::NoteOn; e.noteId = id; e.key = (uint8_t)key; e.value = vel; return e;
     }

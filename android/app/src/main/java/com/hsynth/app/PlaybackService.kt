@@ -33,16 +33,25 @@ class PlaybackService : Service() {
     companion object {
         @Volatile var running = false
             private set
+        @Volatile var standbyMode = false
         private const val CHANNEL = "playback"
         private const val ID = 1
         private const val ACTION = "com.hsynth.app.PLAYBACK"
 
         fun start(ctx: Context) {
+            standbyMode = false
             val i = Intent(ctx, PlaybackService::class.java)
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
 
+        fun startStandby(ctx: Context) {
+            standbyMode = true
+            val i = Intent(ctx, PlaybackService::class.java).putExtra("standby", true)
+            if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
+        }
+
         fun stop(ctx: Context) {
+            standbyMode = false
             ctx.stopService(Intent(ctx, PlaybackService::class.java))
         }
     }
@@ -88,7 +97,7 @@ class PlaybackService : Service() {
             isActive = true
         }
         registerReceiver(noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
-        val n = build("HSynth", true)
+        val n = if (standbyMode) buildStandby() else build("HSynth", true)
         if (Build.VERSION.SDK_INT >= 29) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
         else startForeground(ID, n)
         ui.post(tick)
@@ -125,9 +134,17 @@ class PlaybackService : Service() {
     }
 
     private fun refresh() {
-        val p = player ?: return
+        val p = player
+        val playing = p?.isPlaying == true
+        if (!playing && standbyMode) {
+            if (shownTitle == "__STANDBY__" && shownPlaying == false) return
+            shownTitle = "__STANDBY__"
+            shownPlaying = false
+            getSystemService(NotificationManager::class.java).notify(ID, buildStandby())
+            return
+        }
+        if (p == null) return
         val title = p.title ?: "HSynth"
-        val playing = p.isPlaying
         if (title == shownTitle && playing == shownPlaying) return
         shownTitle = title
         shownPlaying = playing
@@ -151,6 +168,20 @@ class PlaybackService : Service() {
 
     private fun act(icon: Int, label: String, cmd: String, code: Int) =
         Notification.Action.Builder(Icon.createWithResource(this, icon), label, action(cmd, code)).build()
+
+    @Suppress("DEPRECATION")
+    private fun buildStandby(): Notification {
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE)
+        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
+        return b.setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("HSynth Standby")
+            .setContentText("BLE MIDI wake ready")
+            .setContentIntent(open)
+            .setOngoing(true)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .build()
+    }
 
     @Suppress("DEPRECATION")
     private fun build(title: String, playing: Boolean): Notification {

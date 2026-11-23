@@ -210,7 +210,9 @@ void parseForeignRiff(const uint8_t* d, size_t n, WavData& out) {
 }  // namespace
 
 bool FlacFrameDecoder::open(const uint8_t* data, size_t size, std::string& error) {
-    *this = FlacFrameDecoder();
+    // Keep the subframe scratch buffers when switching input files.
+    d_ = nullptr;
+    decoded_ = 0;
     if (size < 8 || data[0] != 'f' || data[1] != 'L' || data[2] != 'a' || data[3] != 'C') {
         error = "not a FLAC file";
         return false;
@@ -309,29 +311,33 @@ int FlacFrameDecoder::next(std::vector<float>& left, std::vector<float>& right, 
         pos_ = br.bytePos();
         int64_t* a = sub_[0].data();
         int64_t* b = nch > 1 ? sub_[1].data() : nullptr;
-        for (int i = 0; i < blockSize; ++i) {
-            switch (chCode) {
-                case 8: b[i] = wadd(a[i], wneg(b[i])); break;  // left / side
-                case 9: a[i] = wadd(a[i], b[i]); break;        // side / right
-                case 10: {                                     // mid / side
+        switch (chCode) {
+            case 8:  // left / side
+                for (int i = 0; i < blockSize; ++i) b[i] = wadd(a[i], wneg(b[i]));
+                break;
+            case 9:  // side / right
+                for (int i = 0; i < blockSize; ++i) a[i] = wadd(a[i], b[i]);
+                break;
+            case 10:  // mid / side
+                for (int i = 0; i < blockSize; ++i) {
                     const int64_t mid = wmul(a[i], 2) | (b[i] & 1);
                     a[i] = wadd(mid, b[i]) >> 1;
                     b[i] = wadd(mid, wneg(b[i])) >> 1;
-                    break;
                 }
-                default: break;
-            }
+                break;
+            default: break;
         }
         int frames = blockSize;
         if (total_ > 0) frames = (int)std::min<int64_t>(frames, total_ - decoded_);
         const float scale = 1.0f / (float)((int64_t)1 << (bps - 1));
         left.resize((size_t)frames);
-        if (outChannels_ == 2) right.resize((size_t)frames);
-        else right.clear();
-        for (int i = 0; i < frames; ++i) {
-            // >2 channels: front left / right only (same as the WAV reader keeping two)
-            left[(size_t)i] = (float)a[i] * scale;
-            if (outChannels_ == 2) right[(size_t)i] = (float)b[i] * scale;
+        for (int i = 0; i < frames; ++i) left[(size_t)i] = (float)a[i] * scale;
+        if (outChannels_ == 2) {
+            // >2 channels: keep the front pair, as in the WAV reader.
+            right.resize((size_t)frames);
+            for (int i = 0; i < frames; ++i) right[(size_t)i] = (float)b[i] * scale;
+        } else {
+            right.clear();
         }
         decoded_ += frames;
         return frames;

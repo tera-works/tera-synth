@@ -137,6 +137,9 @@ void Convolver::clearStage(Stage& s) {
 }
 
 void Convolver::reset() {
+    // the delay lines hold several MB: skip clearing when nothing ran since the last reset
+    if (!used_) return;
+    used_ = false;
     clearStage(a_);
     clearStage(b_);
     std::fill(histL_.begin(), histL_.end(), 0.0f);
@@ -212,6 +215,7 @@ void Convolver::process(float* L, float* R, int n) {
     const float* hR = ir_->headR.data();
     const int headLen = std::min(kHead, ir_->length);
     const int stepB = kBlockB / 16;
+    used_ = true;
     for (int i = 0; i < n; ++i) {
         float xr, xi;
         if (stereoIr) { xr = 0.5f * (L[i] + R[i]); xi = 0.0f; }

@@ -253,6 +253,21 @@ public:
         }
     }
 
+    void processBlock(float* x, int n) {
+        if (type_ == FilterType::Off) return;
+        if (drive_ <= 0.001f) {
+            if (type_ == FilterType::LP24) {
+                for (int i = 0; i < n; ++i) x[i] = s2_.tick(s1_.tick(x[i]).lp).lp;
+                return;
+            }
+            if (type_ == FilterType::LP12) {
+                for (int i = 0; i < n; ++i) x[i] = s1_.tick(x[i]).lp;
+                return;
+            }
+        }
+        for (int i = 0; i < n; ++i) x[i] = process(x[i]);
+    }
+
 private:
     Svf s1_, s2_, s3_;
     Ladder ladder_;

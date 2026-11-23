@@ -173,19 +173,23 @@ FxRack::FxRack() {
 
 FxRack::~FxRack() = default;
 
-void FxRack::prepare(float sr) {
+void FxRack::prepare(float sr, bool ownLooper) {
     sr_ = sr;
     ctx_.sampleRate = sr;
     for (int b = 1; b < BlockCount; ++b) blocks_[b]->prepare(sr);
     tmpL_.assign(kMaxBlockSize, 0.0f);
     tmpR_.assign(kMaxBlockSize, 0.0f);
-    looper_.prepare(sr);
+    if (ownLooper && !looper_) looper_ = std::make_unique<Looper>();
+    if (looper_) looper_->prepare(sr);
     first_ = true;
     reset();
 }
 
 void FxRack::reset() {
-    for (int b = 1; b < BlockCount; ++b) blocks_[b]->reset();
+    for (int b = 1; b < BlockCount; ++b) {
+        blocks_[b]->reset();
+        clean_[b] = true;
+    }
     beat_ = 0;
     env_ = 0;
 }
@@ -226,7 +230,7 @@ void FxRack::paramsChanged(const float* p, int oversample, bool highQuality) {
     }
     for (int b = 1; b < BlockCount; ++b) {
         if (now[b] && !inChain_[b]) {
-            blocks_[b]->reset();  // no stale state from an earlier insertion
+            resetBlock(b);  // no stale state from an earlier insertion
             xfade_[b] = 0.0f;
         }
         inChain_[b] = now[b];
@@ -236,6 +240,11 @@ void FxRack::paramsChanged(const float* p, int oversample, bool highQuality) {
 
     // modulation slots
     const auto& targets = fxModTargets();
+    for (int i = 0; i < numMods_; ++i) {
+        const ModSlot& m = mods_[i];
+        cur_[(size_t)m.local] = base_[(size_t)m.local];
+        dirty_[m.block] = true;
+    }
     numMods_ = 0;
     for (int s = 0; s < kFxModSlots; ++s) {
         const int src = (int)p[P::fxMod(s, P::FxModSrc)];
@@ -323,6 +332,8 @@ float FxRack::sourceValue(int src, const FxGlobals& g) const {
 void FxRack::applyModulation(const FxGlobals& g) {
     const auto& table = paramTable();
     // restore base values of modulated params, then accumulate every slot
+    float previous[kFxModSlots];
+    for (int i = 0; i < numMods_; ++i) previous[i] = cur_[(size_t)mods_[i].local];
     for (int i = 0; i < numMods_; ++i) cur_[(size_t)mods_[i].local] = base_[(size_t)mods_[i].local];
     for (int i = 0; i < numMods_; ++i) {
         const ModSlot& m = mods_[i];
@@ -330,10 +341,13 @@ void FxRack::applyModulation(const FxGlobals& g) {
         const float v = sourceValue(m.src, g) * m.amt;
         float& c = cur_[(size_t)m.local];
         if (info.kind == ParamKind::Bool) c = (c + v) > 0.5f ? 1.0f : 0.0f;
-        else if (info.curve == ParamCurve::Exp && info.min > 0.0f) c = clampf(c * std::pow(info.max / info.min, v), info.min, info.max);
+        else if (info.curve == ParamCurve::Exp && info.min > 0.0f) {
+            if (v != 0.0f) c = clampf(c * std::pow(info.max / info.min, v), info.min, info.max);
+        }
         else c = clampf(c + v * (info.max - info.min), info.min, info.max);
-        dirty_[m.block] = true;
     }
+    for (int i = 0; i < numMods_; ++i)
+        if (cur_[(size_t)mods_[i].local] != previous[i]) dirty_[mods_[i].block] = true;
 }
 
 void FxRack::runChain(float* L, float* R, int n) {
@@ -343,24 +357,30 @@ void FxRack::runChain(float* L, float* R, int n) {
         FxBlock* blk = blocks_[b].get();
         const bool on = cur_[(size_t)blockOffset(b)] > 0.5f;
         if (blk->spillover()) {
-            if (on || blk->tailActive()) blk->process(L, R, n, ctx_);
+            if (on || blk->tailActive()) {
+                clean_[b] = false;
+                blk->process(L, R, n, ctx_);
+            }
             continue;
         }
         float& xf = xfade_[b];
         const float target = on ? 1.0f : 0.0f;
         if (xf == 0.0f && target == 0.0f) continue;
         if (xf == 1.0f && target == 1.0f) {
+            clean_[b] = false;
             blk->process(L, R, n, ctx_);
             continue;
         }
         // crossfade dry <-> processed over 10 ms
         std::memcpy(tmpL_.data(), L, sizeof(float) * (size_t)n);
         std::memcpy(tmpR_.data(), R, sizeof(float) * (size_t)n);
-        if (xf == 0.0f) blk->reset();
+        if (xf == 0.0f) resetBlock(b);
+        clean_[b] = false;
         blk->process(tmpL_.data(), tmpR_.data(), n, ctx_);
         const float x1 = target > xf ? std::min(1.0f, xf + xfStep) : std::max(0.0f, xf - xfStep);
+        const float invN = 1.0f / (float)n;
         for (int k = 0; k < n; ++k) {
-            const float g = xf + (x1 - xf) * ((float)(k + 1) / (float)n);
+            const float g = xf + (x1 - xf) * ((float)(k + 1) * invN);
             L[k] += (tmpL_[(size_t)k] - L[k]) * g;
             R[k] += (tmpR_[(size_t)k] - R[k]) * g;
         }
@@ -368,7 +388,8 @@ void FxRack::runChain(float* L, float* R, int n) {
     }
 }
 
-void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float* inL, const float* inR) {
+void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float* inL, const float* inR, Looper* externalLooper, int fadeLeft, int fadeLength) {
+    Looper* looper = externalLooper ? externalLooper : looper_.get();
     constexpr int kSub = 32;
     // Idle: skip the effect chain while the input is silent and the output has
     // been silent for 4 s (reverb / delay tails ended; blocks that make sound
@@ -379,21 +400,35 @@ void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float*
     if (inL && inR)
         for (int i = 0; i < n; ++i) inPk = std::max(inPk, std::max(std::fabs(inL[i]), std::fabs(inR[i])));
     const bool silentIn = inPk < 1e-7f;
-    if (silentIn && idle_ && looper_.status().state != LooperState::Playing && looper_.status().state != LooperState::Overdubbing) {
+    const auto loopState = looper ? looper->status().state : LooperState::Empty;
+    if (silentIn && idle_ && loopState != LooperState::Playing && loopState != LooperState::Overdubbing) {
         beat_ += (double)tempo_ / 60.0 * (double)n / (double)sr_;
         env_ = 0.0f;
         held_ = clampf(held_ - (float)n / (0.02f * sr_), 0.0f, 1.0f);
+        // reset the blocks that ran while the rack is silent anyway (one per
+        // call: a reset of a long delay / convolution clears megabytes)
+        for (int i = 0; i < chainLen_; ++i) {
+            if (clean_[chain_[i]]) continue;
+            resetBlock(chain_[i]);
+            break;
+        }
         return;
     }
     if (idle_) {
         // waking up: every tail is silent, so start the chain from a clean
         // state (time glides / LFOs would otherwise resume from where they
-        // stopped, e.g. a tempo-synced delay after the tempo changed)
+        // stopped, e.g. a tempo-synced delay after the tempo changed); the
+        // blocks were normally reset while idle already
         for (int i = 0; i < chainLen_; ++i) {
-            blocks_[chain_[i]]->reset();
+            resetBlock(chain_[i]);
             dirty_[chain_[i]] = true;
         }
         idle_ = false;
+    }
+    const int fadeFrames = std::min(n, fadeLeft);
+    if (fadeFrames) {
+        std::copy_n(L, fadeFrames, fadeDry_[0]);
+        std::copy_n(R, fadeFrames, fadeDry_[1]);
     }
     const float envRel = std::exp(-(float)kSub / (0.15f * sr_));
     const float heldStep = (float)kSub / (0.02f * sr_);
@@ -421,7 +456,12 @@ void FxRack::process(float* L, float* R, int n, const FxGlobals& g, const float*
         runChain(l, r, m);
         beat_ += (double)tempo_ / 60.0 * (double)m / (double)sr_;
     }
-    looper_.process(L, R, n, looperLevel_);
+    for (int i = 0; i < fadeFrames; ++i) {
+        const float wet = 1.0f - (float)(fadeLeft - i - 1) / fadeLength;
+        L[i] = fadeDry_[0][i] + wet * (L[i] - fadeDry_[0][i]);
+        R[i] = fadeDry_[1][i] + wet * (R[i] - fadeDry_[1][i]);
+    }
+    if (looper) looper->process(L, R, n, looperLevel_);
     float outPk = 0.0f;
     for (int i = 0; i < n; ++i) outPk = std::max(outPk, std::max(std::fabs(L[i]), std::fabs(R[i])));
     if (silentIn && outPk < 1e-7f) {

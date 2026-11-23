@@ -25,8 +25,11 @@ class RemoteLink(private val a: MainActivity) {
             while (running) {
                 val m = NativeEngine.nativeRemoteNext(200) ?: continue
                 val dev = NativeEngine.nativeRemoteSource()
-                if (dev >= BleMidi.PERIPHERAL_SOURCE) a.ble.sendPeripheral(m)  // a PC connected to the phone over BLE
-                else if (dev >= 0) a.midi.sendTo(dev, m)
+                when {
+                    dev >= BleMidi.PERIPHERAL_SOURCE -> a.ble.sendPeripheral(m)
+                    dev >= BleMidi.CENTRAL_SOURCE -> a.ble.sendCentral(dev, m)
+                    dev >= 0 -> a.midi.sendTo(dev, m)
+                }
             }
         }, "HSynth SysEx").apply { isDaemon = true; start() }
     }

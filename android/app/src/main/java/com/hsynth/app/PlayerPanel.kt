@@ -25,6 +25,9 @@ class PlayerPanel(private val a: MainActivity) {
     companion object {
         const val REQ_FOLDER = 201
         const val REQ_FILES = 202
+        const val TAB_MIDI = 0
+        const val TAB_AUDIO = 1
+        const val TAB_PADS = 2
     }
 
     enum class Repeat { OFF, ALL, ONE }
@@ -51,6 +54,13 @@ class PlayerPanel(private val a: MainActivity) {
     private lateinit var topRow: LinearLayout
     private lateinit var topLcd: View
     private lateinit var topTransport: View
+
+    // B1: SONG = SubTabBar [MIDI | AUDIO | PADS]; the MIDI player below is unchanged and lives in midiPage
+    val audioPage = AudioPage(a)
+    val padsPage = PadsPage(a)
+    private lateinit var subTabs: SubTabBar
+    private lateinit var midiPage: LinearLayout
+    private var subTab = 0
 
     /** Re-arranges the top for the orientation (the player keeps playing). */
     fun setPortrait(portrait: Boolean) {
@@ -97,28 +107,28 @@ class PlayerPanel(private val a: MainActivity) {
             textSize = size
             setOnClickListener { onClick() }
         }
-        playBtn = tbtn("▶  Play", 15f, led = true) { togglePlay() }.apply { minWidth = d(if (Ui.portrait(a)) 96 else 130) }
+        playBtn = tbtn("▶  Play", 15f, led = true) { togglePlayMidi() }.apply { minWidth = d(if (Ui.portrait(a)) 96 else 130) }
         repeatBtn = tbtn("🔁", led = true) { cycleRepeat() }
         val transport = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             fun add(v: View) = addView(v, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(8) })
-            add(tbtn("⏮") { prev() })
+            add(tbtn("⏮") { prevMidi() })
             add(playBtn)
-            add(tbtn("⏭") { next(manual = true) })
+            add(tbtn("⏭") { nextMidi(manual = true) })
             add(repeatBtn)
-            add(tbtn("■") { stop() })
+            add(tbtn("■") { stopMidi() })
             addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
         }
         seek = Ui.seek(a, 1000, 0) { _, _ -> }.apply {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
-                    if (fromUser) posText.text = fmt(p / 1000.0 * lengthSec())
+                    if (fromUser) posText.text = fmt(p / 1000.0 * midiLengthSec())
                 }
                 override fun onStartTrackingTouch(sb: SeekBar) { seeking = true }
                 override fun onStopTrackingTouch(sb: SeekBar) {
                     seeking = false
-                    if (loaded) NativeEngine.nativeSongSeek(sb.progress / 1000.0 * lengthSec())
+                    if (loaded) NativeEngine.nativeSongSeek(sb.progress / 1000.0 * midiLengthSec())
                 }
             })
         }
@@ -161,12 +171,27 @@ class PlayerPanel(private val a: MainActivity) {
         })
         content.addView(tableScroll, FrameLayout.LayoutParams(-1, -1))
         content.addView(playlistScroll, FrameLayout.LayoutParams(-1, -1))
-        view = Ui.column(a).apply {
-            setPadding(d(10), d(8), d(10), d(2))
+        midiPage = Ui.column(a).apply {
             addView(topRow, Ui.lp().apply { width = -1 })
             addView(android.widget.HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(tabs) })
             addView(content, Ui.lp(weight = 1f, height = 0).apply { width = -1 })
         }
+        subTabs = SubTabBar(a, arrayOf("MIDI", "AUDIO", "PADS"), accent = Hw.MOD_FX).apply {
+            onSelect = { showSubTab(it) }
+        }
+        val pageFrame = FrameLayout(a).apply {
+            addView(midiPage, FrameLayout.LayoutParams(-1, -1))
+            addView(audioPage.view, FrameLayout.LayoutParams(-1, -1))
+            addView(padsPage.view, FrameLayout.LayoutParams(-1, -1))
+        }
+        view = Ui.column(a).apply {
+            setPadding(d(10), d(8), d(10), d(2))
+            addView(subTabs, LinearLayout.LayoutParams(-1, d(26)))
+            addView(pageFrame, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(4) })
+        }
+        audioPage.registerResults()
+        padsPage.registerResults()
+        showSubTab(a.prefs.getInt("songTab", TAB_MIDI))
         showTab(0)
         updateRepeat()
         refreshPlaylist()
@@ -175,7 +200,7 @@ class PlayerPanel(private val a: MainActivity) {
 
     // ------------------------------------------------------------ state
 
-    fun lengthSec() = NativeEngine.nativeSongState()[1]
+    private fun midiLengthSec() = NativeEngine.nativeSongState()[1]
 
     private fun fmt(s: Double): String {
         val t = s.toInt().coerceAtLeast(0)
@@ -342,12 +367,50 @@ class PlayerPanel(private val a: MainActivity) {
         }
     }
 
-    /** A song is loaded and playing (background playback, notification). */
-    val isPlaying: Boolean get() = loaded && NativeEngine.nativeSongState()[2] > 0.5
-    val title: String? get() = playlist.getOrNull(current)?.nameWithoutExtension
-    fun positionSec(): Double = NativeEngine.nativeSongState()[0]
+    private val midiPlaying: Boolean get() = loaded && NativeEngine.nativeSongState()[2] > 0.5
 
-    fun togglePlay() {
+    /**
+     * Any transport is playing — a MIDI song *or* the backing audio track (background playback, notification,
+     * power manager). Widened for B1 so PlaybackService and the power state treat backing audio like a song.
+     */
+    val isPlaying: Boolean get() = midiPlaying || audioPage.isPlaying
+
+    /**
+     * The transport the notification / headset keys should drive: the audio track while it plays (or while the AUDIO
+     * tab is showing a loaded, idle track and no MIDI song is playing), otherwise the MIDI song.
+     */
+    private fun audioFocus(): Boolean = audioPage.isPlaying || (subTab == TAB_AUDIO && audioPage.hasTrack && !midiPlaying)
+
+    val title: String? get() = if (audioFocus()) audioPage.title else playlist.getOrNull(current)?.nameWithoutExtension
+    fun positionSec(): Double = if (audioFocus()) audioPage.positionSec() else NativeEngine.nativeSongState()[0]
+    fun lengthSec(): Double = if (audioFocus()) audioPage.lengthSec() else midiLengthSec()
+
+    fun togglePlay() { if (audioFocus()) audioPage.toggle() else togglePlayMidi() }
+    fun stop() { if (audioFocus()) audioPage.stop() else stopMidi() }
+    fun prev() { if (audioFocus()) audioPage.prev() else prevMidi() }
+    fun next(manual: Boolean) { if (audioFocus()) audioPage.next() else nextMidi(manual) }
+
+    /** `MainActivity.buildUi` clears the request router every rebuild: the AUDIO / PADS pages re-register theirs. */
+    fun onUiRebuilt() {
+        audioPage.registerResults()
+        padsPage.registerResults()
+    }
+
+    /** Persist pending pad edits (activity pause). */
+    fun flush() { padsPage.flush() }
+
+    private fun showSubTab(i: Int) {
+        subTab = i.coerceIn(0, 2)
+        midiPage.visibility = if (subTab == TAB_MIDI) View.VISIBLE else View.GONE
+        audioPage.view.visibility = if (subTab == TAB_AUDIO) View.VISIBLE else View.GONE
+        padsPage.view.visibility = if (subTab == TAB_PADS) View.VISIBLE else View.GONE
+        if (subTab != TAB_PADS) padsPage.releaseAll()
+        if (::subTabs.isInitialized) subTabs.selected = subTab
+        a.prefs.edit().putInt("songTab", subTab).apply()
+        FrameTicker.poke()
+    }
+
+    private fun togglePlayMidi() {
         if (!loaded) {
             playIndex(if (current >= 0) current else 0)
             return
@@ -356,12 +419,12 @@ class PlayerPanel(private val a: MainActivity) {
         NativeEngine.nativeSongPlay(!playing)
     }
 
-    fun stop() {
+    private fun stopMidi() {
         NativeEngine.nativeSongPlay(false)
         NativeEngine.nativeSongSeek(0.0)
     }
 
-    fun prev() {
+    private fun prevMidi() {
         val pos = NativeEngine.nativeSongState()[0]
         if (loaded && pos > 3.0 || playlist.isEmpty()) {
             NativeEngine.nativeSongSeek(0.0)
@@ -370,11 +433,11 @@ class PlayerPanel(private val a: MainActivity) {
         playIndex(if (current <= 0) playlist.size - 1 else current - 1)
     }
 
-    fun next(manual: Boolean) {
+    private fun nextMidi(manual: Boolean) {
         if (playlist.isEmpty()) return
         val n = current + 1
         if (n >= playlist.size) {
-            if (manual || repeat == Repeat.ALL) playIndex(0) else stop()
+            if (manual || repeat == Repeat.ALL) playIndex(0) else stopMidi()
         } else {
             playIndex(n)
         }
@@ -383,7 +446,7 @@ class PlayerPanel(private val a: MainActivity) {
     private fun onSongEnded() {
         when (repeat) {
             Repeat.ONE -> { NativeEngine.nativeSongSeek(0.0); NativeEngine.nativeSongPlay(true) }
-            else -> next(manual = false)
+            else -> nextMidi(manual = false)
         }
     }
 

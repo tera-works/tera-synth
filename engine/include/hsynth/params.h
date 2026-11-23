@@ -13,13 +13,13 @@
 
 namespace hsynth {
 
-enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Organ, Granular, Count };
+enum class LayerType : int { Off = 0, VA, FM, PCM, WT, Organ, Granular, Physical, Count };
 enum class VaWave : int { Saw = 0, Square, Pulse, Triangle, Sine, SuperSaw, Count };
 enum class FilterType : int { Off = 0, LP12, LP24, BP, HP, Notch, Ladder, CombPlus, CombMinus, Formant, Count };
 // Voice FX: per-voice insert after the filter, before the amp envelope.
 enum class VfxType : int { Off = 0, Saturate, Fold, Crush, Ring, Count };
 enum class VoiceMode : int { Poly = 0, Mono, Legato, Count };
-enum class ArpMode : int { Up = 0, Down, UpDown, Random, Order, Chord, Count };
+enum class ArpMode : int { Up = 0, Down, UpDown, Random, Order, Chord, Pattern, Count };
 enum class LfoWave : int { Sine = 0, Triangle, Saw, Square, SampleHold, Count };
 
 enum class ModSource : int {
@@ -241,6 +241,10 @@ enum Global : int {
     ChordMode,      // one key plays a chord (ChordType, 0 = off)
     ChordInversion, // 0..3
     SuperKnob,      // global (not per part): mod source "super" in every part
+    VoiceVintage, VoiceVintageRate, VoicePanSpread,
+    PerfMorph, MorphSource, MorphCurve,
+    PianoPedalNoise, PianoSoftRelease, PianoDynComp, PianoLid, PianoHalfDamp,
+    StrumOn, StrumOrder, StrumWindow, StrumSpacing, StrumJitter,
     GlobalCount
 };
 
@@ -321,6 +325,8 @@ enum LayerParam : int {
     GrPitchRand,    // pitch jitter, semitones
     GrSpread,       // stereo spread of the grains 0..1
     GrScan,         // position movement while the note sounds, x real time (-2..2, 0 = frozen)
+    PhysModel, PhysExciter, PhysDecay, PhysDamp, PhysBright, PhysPos, PhysHardness,
+    PhysInharm, PhysDispersion, PhysPickup, PhysDrive, PhysBody, PhysBowPress,
     LayerParamCount
 };
 
@@ -383,7 +389,15 @@ enum : int {
     KeyHigh,
     Transpose,   // semitones -48..48
     FxSend,      // 0 = dry (bypasses the rack), 1 = all into the shared effect rack
-    Count
+    KeyFadeLow = 8,
+    KeyFadeHigh = 9,
+    ZoneMode = 10,       // 0 = internal, 1 = external, 2 = both
+    ZoneOutPort = 11,    // 0 = host default, 1..4 = explicit slot
+    ZoneOutChannel = 12,
+    ZoneBankMsb = 13,
+    ZoneBankLsb = 14,
+    ZoneProgram = 15,
+    Count = 16
 };
 }
 

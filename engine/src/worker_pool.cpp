@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "scoped_flush_to_zero.h"
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -99,24 +101,36 @@ WorkerPool::~WorkerPool() {
 
 void WorkerPool::work(int worker) {
     for (;;) {
-        const int i = next_.fetch_add(1, std::memory_order_relaxed);
-        if (i >= count_) return;
-        fn_(ctx_, worker, i);
+        const int first = next_.fetch_add(chunk_, std::memory_order_relaxed);
+        if (first >= count_) return;
+        const int end = std::min(first + chunk_, count_);
+        for (int i = first; i < end; ++i) fn_(ctx_, worker, i);
     }
 }
 
 void WorkerPool::run(Fn fn, void* ctx, int count, int helpers) {
-    if (count <= 0) return;
+    runWithCaller(fn, ctx, count, helpers, nullptr);
+}
+
+void WorkerPool::runWithCaller(Fn fn, void* ctx, int count, int helpers, void (*caller)(void*)) {
+    if (count <= 0) {
+        if (caller) caller(ctx);
+        return;
+    }
     helpers = std::max(0, std::min(helpers, numHelpers_));
     fn_ = fn;
     ctx_ = ctx;
     count_ = count;
+    // Larger jobs share fewer atomics. Pairs still let the faster cores take
+    // more work and keep the last outstanding claim small.
+    chunk_ = count >= 64 ? 2 : 1;
     next_.store(0, std::memory_order_relaxed);
     for (int i = 0; i < helpers; ++i) {
         Helper& h = h_[i];
         h.slot.store(kOffered, std::memory_order_seq_cst);  // publishes the job (release)
-        if (h.sleeping.load(std::memory_order_seq_cst)) h.sem->post();
+        if (h.sleeping.exchange(false)) h.sem->post();
     }
+    if (caller) caller(ctx);
     work(0);
     for (int i = 0; i < helpers; ++i) {
         Helper& h = h_[i];
@@ -135,28 +149,37 @@ int WorkerPool::threadIds(int* out, int max) const {
 }
 
 void WorkerPool::helperMain(int index) {
-    raiseThreadPriority();
     Helper& h = h_[index];
+#if defined(__linux__) || defined(__ANDROID__)
+    char name[] = "hsynth-w0";
+    name[8] = (char)('0' + index);
+    pthread_setname_np(pthread_self(), name);
+#endif
+    raiseThreadPriority();
 #if !defined(_WIN32) && !defined(__APPLE__)
     h.tid.store((int)syscall(SYS_gettid));
 #endif
     for (;;) {
-        // spin a little (the next audio callback may come soon), then sleep
-        bool offered = false;
-        for (int spin = 0; spin < 4000 && !offered; ++spin) {
-            offered = h.slot.load(std::memory_order_relaxed) == kOffered;
-            if (!offered) HSYNTH_PAUSE();
-        }
-        if (!offered) {
-            h.sleeping.store(true, std::memory_order_seq_cst);
-            if (h.slot.load(std::memory_order_seq_cst) != kOffered && !quit_.load()) h.sem->wait();
-            h.sleeping.store(false, std::memory_order_relaxed);
-        }
         if (quit_.load()) return;
         int expected = kOffered;
-        if (!h.slot.compare_exchange_strong(expected, kRunning, std::memory_order_acq_rel)) continue;  // withdrawn
-        work(index + 1);
-        h.slot.store(kDone, std::memory_order_release);
+        if (h.slot.compare_exchange_strong(expected, kRunning, std::memory_order_acq_rel)) {
+            {
+                const ScopedFlushToZero flushToZero;
+                work(index + 1);
+            }
+            h.slot.store(kDone, std::memory_order_release);
+            continue;
+        }
+
+        h.sleeping.store(true, std::memory_order_seq_cst);
+        // If a publisher disarmed sleeping, consume the promised semaphore
+        // token even if the offer is already visible. This coalesces wakeups
+        // when the OS has not scheduled a helper for several callbacks.
+        if ((h.slot.load(std::memory_order_seq_cst) != kOffered && !quit_.load()) ||
+            !h.sleeping.exchange(false)) {
+            h.sem->wait();
+            h.sleeping.store(false, std::memory_order_relaxed);
+        }
     }
 }
 

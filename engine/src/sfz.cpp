@@ -584,6 +584,7 @@ std::unique_ptr<SampleSet> loadSfzSampleSet(const std::string& path, std::string
     if (skippedSamples) parser.warnings.push_back(std::to_string(skippedSamples) + " regions skipped because their sample failed to load");
     set->warnings = std::move(parser.warnings);
     set->finalizeStreaming();
+    set->trimLeadingSilence();
     set->prepareMips();
     if (set->regions.empty()) {
         error = "no playable regions in " + path;

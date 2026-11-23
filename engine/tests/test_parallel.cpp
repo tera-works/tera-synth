@@ -78,6 +78,25 @@ TEST(parallel_render_matches_serial_multi_part) {
     CHECK(d < 1e-4);
 }
 
+TEST(parallel_render_512_voice_limit) {
+    Engine e;
+    e.prepare(48000);
+    e.setRenderThreads(4);
+    e.setMaxVoices(512);
+    CHECK(e.maxVoices() == 512);
+    float l[48], r[48];
+    uint32_t id = 1;
+    for (int b = 0; b < 17; ++b) {
+        for (int i = 0; i < 32; ++i, ++id)
+            e.sendEvent(Event::noteOn(id, 36 + (int)(id % 60), 0.4f));
+        e.process(l, r, 48);
+    }
+    const auto stats = e.stats();
+    CHECK(stats.activeVoices >= 512);
+    CHECK(stats.peakVoices <= 512 + kVoicePoolExtra);
+    for (int i = 0; i < 48; ++i) CHECK(std::isfinite(l[i]) && std::isfinite(r[i]));
+}
+
 TEST(parallel_render_odd_block_sizes_and_thread_changes) {
     // block sizes that are not a multiple of the control block, and a thread
     // count changed while rendering (the pool is created on first use)

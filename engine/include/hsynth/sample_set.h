@@ -136,6 +136,9 @@ struct SampleSet {
     // or started far into the file) are loaded fully. Loader thread, after
     // the regions are known and before prepareMips().
     void finalizeStreaming();
+    // Loader thread, after region bounds and streaming policy are resolved.
+    // Adjusts region offsets in file coordinates; PCM and loop points stay put.
+    void trimLeadingSilence();
 
     // Returns number of matching regions written to out (at most max).
     int findRegions(const RegionQuery& q, const Region** out, int max) const;

@@ -1,19 +1,54 @@
 #include "hsynth/host_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 #include "hsynth/fileio.h"
+#include "hsynth/formats/dls_gig.h"
+#include "hsynth/formats/dspreset.h"
+#include "hsynth/formats/wavetable_ext.h"
 #include "hsynth/fx/ir_load.h"
 #include "hsynth/tuning.h"
+#include "hsynth/json.h"
 #include "hsynth/wav.h"
 
 namespace hsynth {
 
 namespace {
+OggDecodeFn hostOggDecoder;
+
+std::string lowerExtension(const std::string& path) {
+    const auto ext = utf8Path(path).extension().u8string();
+    std::string result(ext.begin(), ext.end());
+    for (char& c : result) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return result;
+}
+
+bool readSoundBankPreset(const std::string& ext, const std::string& path, int bank, int program, bool isDrum,
+                         SampleSet& out, std::string& error, std::vector<std::string>& warnings) {
+    if (ext == ".sf2" || ext == ".sf3") return loadSf2Preset(path, bank, program, out, error, warnings, hostOggDecoder);
+    if (ext == ".dls" || ext == ".gig") return loadDlsGigPreset(path, bank, program, isDrum, out, error, warnings);
+    error = "unsupported sound bank type: " + path;
+    return false;
+}
+
+std::unique_ptr<SampleSet> readWavetableSet(const std::string& path, std::string& error) {
+    auto wt = std::make_unique<Wavetable>();
+    if (!loadAnyWavetableFile(path, *wt, error)) return nullptr;
+    auto set = std::make_unique<SampleSet>();
+    set->name = wt->name;
+    set->sourcePath = path;
+    set->wavetable = std::move(wt);
+    return set;
+}
+
 bool isAbsolute(const std::string& p) {
     return !p.empty() && (p[0] == '/' || p[0] == '\\' || (p.size() > 1 && p[1] == ':'));
 }
@@ -24,23 +59,57 @@ std::string joinPath(const std::string& root, const std::string& rel) {
 }
 }  // namespace
 
+void setHostOggDecoder(OggDecodeFn decoder) { hostOggDecoder = std::move(decoder); }
+
+std::unique_ptr<SampleSet> loadHostSamples(const std::string& path, std::string& error,
+                                          std::vector<std::string>& warnings) {
+    const auto ext = lowerExtension(path);
+    std::unique_ptr<SampleSet> set;
+    if (ext == ".dspreset" || ext == ".sf2" || ext == ".sf3" || ext == ".dls" || ext == ".gig") {
+        set = std::make_unique<SampleSet>();
+        std::vector<std::string> formatWarnings;
+        const bool ok = ext == ".dspreset"
+            ? loadDecentSamplerPreset(path, *set, error, formatWarnings, hostOggDecoder)
+            : readSoundBankPreset(ext, path, -1, -1, false, *set, error, formatWarnings);
+        warnings.insert(warnings.end(), formatWarnings.begin(), formatWarnings.end());
+        if (!ok) return nullptr;
+    } else {
+        set = loadSampleSet(path, error);
+        if (set) warnings.insert(warnings.end(), set->warnings.begin(), set->warnings.end());
+    }
+    return set;
+}
+
 bool loadPartSamples(Engine& engine, int part, int layer, const std::string& path, std::string& error,
                      std::vector<std::string>& warnings) {
-    auto set = loadSampleSet(path, error);
+    auto set = loadHostSamples(path, error, warnings);
     if (!set) return false;
-    for (auto& w : set->warnings) warnings.push_back(w);
     engine.setPartSampleSet(part, layer, std::move(set));
     engine.collectGarbage();
     return true;
 }
 
-bool loadPartWavetable(Engine& engine, int part, int layer, const std::string& path, std::string& error) {
-    auto wt = loadWavetableFile(path, error);
-    if (!wt) return false;
+bool loadPartSoundBankPreset(Engine& engine, int part, int layer, const std::string& path, int bank, int program,
+                             bool isDrum, std::string& error, std::vector<std::string>& warnings) {
     auto set = std::make_unique<SampleSet>();
-    set->name = wt->name;
-    set->sourcePath = path;
-    set->wavetable = std::move(wt);
+    std::vector<std::string> formatWarnings;
+    const bool ok = readSoundBankPreset(lowerExtension(path), path, bank, program, isDrum, *set, error, formatWarnings);
+    warnings.insert(warnings.end(), formatWarnings.begin(), formatWarnings.end());
+    if (!ok) return false;
+    engine.setPartSampleSet(part, layer, std::move(set));
+    engine.collectGarbage();
+    return true;
+}
+
+bool loadPartWavetable(Engine& engine, int part, int layer, const std::string& path, std::string& error,
+                       Wavetable* preview) {
+    auto set = readWavetableSet(path, error);
+    if (!set) return false;
+    if (preview) {
+        preview->frames = set->wavetable->frames;
+        preview->size[0] = set->wavetable->size[0];
+        preview->data[0] = set->wavetable->data[0];
+    }
     engine.setPartSampleSet(part, layer, std::move(set));
     engine.collectGarbage();
     return true;
@@ -116,6 +185,7 @@ bool applyPreset(Engine& engine, const Preset& preset, const std::string& librar
     applySamples(engine, 0, preset, libraryRoot, warnings);
     applyImpulses(engine, preset.impulses, libraryRoot, warnings);
     engine.setAllParams(preset.params.data());
+    engine.setPartSoundOptions(0, {preset.morph, preset.arpPattern});
     engine.collectGarbage();
     return true;
 }
@@ -126,6 +196,7 @@ bool applyPartPreset(Engine& engine, int part, const Preset& preset, const std::
     for (auto& w : preset.warnings) warnings.push_back(w);
     applySamples(engine, part, preset, libraryRoot, warnings);
     engine.setPartParams(part, preset.params.data());
+    engine.setPartSoundOptions(part, {preset.morph, preset.arpPattern});
     engine.collectGarbage();
     return true;
 }
@@ -283,6 +354,10 @@ bool writePhraseSmf(const std::string& path, const std::vector<Engine::PhraseEve
     constexpr int kPpq = 480;
     if (lengthBeats <= 0.0) { error = "the phrase is empty"; return false; }
     repeats = std::max(1, repeats);
+    if (repeats > 1024 || events.size() * (size_t)repeats > 1000000) {
+        error = "phrase export is too long";
+        return false;
+    }
     struct Msg { int64_t tick; int order; uint8_t b[3]; int len; };
     std::vector<Msg> msgs;
     int order = 0;
@@ -291,13 +366,14 @@ bool writePhraseSmf(const std::string& path, const std::vector<Engine::PhraseEve
             const Event& e = pe.event;
             const uint8_t ch = e.channel == kOmniChannel ? 0 : (uint8_t)(e.channel & 15);
             Msg m{(int64_t)std::llround((pe.beat + r * lengthBeats) * kPpq), order++, {0, 0, 0}, 3};
+            const auto key = static_cast<uint8_t>(std::clamp<int>(e.key + e.transpose, 0, 127));
             switch (e.type) {
                 case EventType::NoteOn:
                     if (e.value > 0.0f) { m.b[0] = (uint8_t)(0x90 | ch); m.b[2] = std::max<uint8_t>(1, to7(e.value)); }
                     else { m.b[0] = (uint8_t)(0x80 | ch); m.b[2] = 64; }
-                    m.b[1] = e.key;
+                    m.b[1] = key;
                     break;
-                case EventType::NoteOff: m.b[0] = (uint8_t)(0x80 | ch); m.b[1] = e.key; m.b[2] = to7(e.value); break;
+                case EventType::NoteOff: m.b[0] = (uint8_t)(0x80 | ch); m.b[1] = key; m.b[2] = to7(e.value); break;
                 case EventType::Controller: m.b[0] = (uint8_t)(0xB0 | ch); m.b[1] = (uint8_t)(e.controller & 127); m.b[2] = to7(e.value); break;
                 case EventType::ModWheel: m.b[0] = (uint8_t)(0xB0 | ch); m.b[1] = 1; m.b[2] = to7(e.value); break;
                 case EventType::Sustain: m.b[0] = (uint8_t)(0xB0 | ch); m.b[1] = 64; m.b[2] = to7(e.value); break;
@@ -337,11 +413,59 @@ bool writePhraseSmf(const std::string& path, const std::vector<Engine::PhraseEve
     return true;
 }
 
+namespace {
+// Shared by JNI and Remote, including the wait and replacement for quantize.
+std::mutex phraseSnapshotMutex;
+
+bool snapshotPhrase(Engine& engine, std::vector<Engine::PhraseEvent>& events, double& len, std::string& error) {
+    const auto request = engine.requestPhraseSnapshot();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        uint32_t token;
+        if (engine.takePhraseSnapshot(events, len, &token) && token == request) {
+            if (len > 0.0 && !events.empty()) return true;
+            error = "the phrase is empty";
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    } while (std::chrono::steady_clock::now() < deadline);
+    error = "the audio did not supply a phrase snapshot";
+    return false;
+}
+}  // namespace
+
+bool quantizeRecordedPhrase(Engine& engine, double grid, double strength, std::string& error) {
+    if (!std::isfinite(grid) || grid <= 0.0 || !std::isfinite(strength)) {
+        error = "invalid quantize grid or strength";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(phraseSnapshotMutex);
+    std::vector<Engine::PhraseEvent> events;
+    double len = 0.0;
+    if (!snapshotPhrase(engine, events, len, error)) return false;
+    quantizePhrase(events, len, grid, strength);
+    engine.replacePhrase(events, len);
+    return true;
+}
+
+bool exportRecordedPhrase(Engine& engine, const std::string& path, int repeats, std::string& error) {
+    std::vector<Engine::PhraseEvent> events;
+    double len = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(phraseSnapshotMutex);
+        if (!snapshotPhrase(engine, events, len, error)) return false;
+    }
+    const double external = engine.midiClockTempo();
+    const double bpm = external > 0.0 ? external : engine.getParam(P::fxChain(P::FxTempo));
+    return writePhraseSmf(path, events, len, bpm, repeats, error);
+}
+
 std::unique_ptr<Engine::StagedProgram> loadStagedProgram(const Preset& preset, const std::string& libraryRoot,
                                                          std::vector<std::string>& warnings) {
     if ((int)preset.params.size() != P::kNumParams) return nullptr;
     auto st = std::make_unique<Engine::StagedProgram>();
     std::copy(preset.params.begin(), preset.params.end(), st->params);
+    st->sound = {preset.morph, preset.arpPattern};
     for (auto& w : preset.warnings) warnings.push_back(w);
     for (int l = 0; l < kNumLayers; ++l) {
         const auto type = (LayerType)(int)preset.params[(size_t)P::layer(l, P::LType)];
@@ -350,17 +474,7 @@ std::unique_ptr<Engine::StagedProgram> loadStagedProgram(const Preset& preset, c
         if (!rel.empty()) {
             const std::string full = joinPath(libraryRoot, rel);
             std::string err;
-            if (type == LayerType::WT) {
-                if (auto wt = loadWavetableFile(full, err)) {
-                    set = std::make_unique<SampleSet>();
-                    set->name = wt->name;
-                    set->sourcePath = full;
-                    set->wavetable = std::move(wt);
-                }
-            } else {
-                set = loadSampleSet(full, err);
-                if (set) for (auto& w : set->warnings) warnings.push_back(w);
-            }
+            set = type == LayerType::WT ? readWavetableSet(full, err) : loadHostSamples(full, err, warnings);
             if (!set) warnings.push_back(std::string("layer ") + (char)('A' + l) + ": " + err);
         }
         if (!set) set = std::make_unique<SampleSet>();  // empty: unloads the layer
@@ -371,6 +485,76 @@ std::unique_ptr<Engine::StagedProgram> loadStagedProgram(const Preset& preset, c
     return st;
 }
 
+namespace {
+std::unique_ptr<Engine::StagedProgram> loadLivePart(const Preset& p, const std::string& root,
+                                                  std::vector<std::string>& warnings) {
+    auto part = loadStagedProgram(p, root, warnings);
+    if (!part) return nullptr;
+    for (int l = 0; l < kNumLayers; ++l) {
+        if (!part->setPaths[l].empty()) continue;
+        delete part->sets[l];
+        part->sets[l] = nullptr;  // live envelopes explicitly clear an empty layer
+        if (p.samples[l].empty() && (LayerType)(int)p.params[P::layer(l, P::LType)] == LayerType::PCM)
+            warnings.push_back(std::string("layer ") + (char)('A' + l) + " is PCM but has no samples");
+    }
+    return part;
+}
+
+bool loadLiveGlobals(Engine& engine, Engine::LiveChange& change, const Preset& p, const std::string& root,
+                     std::vector<std::string>& warnings) {
+    if ((int)p.params.size() != P::kNumParams) return false;
+    change.hasGlobals = true;
+    change.irSampleRate = engine.sampleRate();
+    std::copy(p.params.begin(), p.params.end(), change.globals);
+    for (int t = 0; t < 2; ++t) {
+        if (p.impulses[t].empty()) continue;
+        std::string error;
+        change.ir[t] = fx::loadImpulseResponse(joinPath(root, p.impulses[t]), change.irSampleRate, t, error);
+        if (!change.ir[t]) warnings.push_back(std::string(t == 0 ? "cabinet IR: " : "reverb IR: ") + error);
+    }
+    return true;
+}
+}  // namespace
+
+bool applyPresetSst(Engine& engine, const Preset& p, const std::string& root,
+                    std::vector<std::string>& warnings, uint32_t* serial, bool switchToSingle) {
+    auto c = std::make_unique<Engine::LiveChange>();
+    c->single = switchToSingle;
+    if (switchToSingle && engine.multiTimbral()) {
+        for (int k = 1; k < kNumParts; ++k) {
+            const auto keep = capturePartPreset(engine, k, "", root);
+            c->parts[k] = loadLivePart(keep, root, warnings);
+            if (!c->parts[k]) return false;
+        }
+    }
+    c->parts[0] = loadLivePart(p, root, warnings);
+    return c->parts[0] && loadLiveGlobals(engine, *c, p, root, warnings) &&
+           engine.stageLiveChange(std::move(c), serial);
+}
+
+bool applyPartPresetSst(Engine& engine, int part, const Preset& p, const std::string& root,
+                        std::vector<std::string>& warnings, uint32_t* serial) {
+    if (part < 0 || part >= kNumParts) return false;
+    auto c = std::make_unique<Engine::LiveChange>();
+    c->parts[part] = loadLivePart(p, root, warnings);
+    return c->parts[part] && engine.stageLiveChange(std::move(c), serial);
+}
+
+bool applyMultiSst(Engine& engine, const MultiPreset& m, const std::string& root,
+                   std::vector<std::string>& warnings, uint32_t* serial) {
+    auto c = std::make_unique<Engine::LiveChange>();
+    warnings.insert(warnings.end(), m.warnings.begin(), m.warnings.end());
+    if (!loadLiveGlobals(engine, *c, m.global, root, warnings)) return false;
+    c->multi = true;
+    c->selectedPart = m.selectedPart;
+    for (int k = 0; k < kNumParts; ++k) {
+        c->parts[k] = loadLivePart(m.parts[k], root, warnings);
+        if (!c->parts[k]) return false;
+        std::copy_n(m.mix[k], Mix::Count, c->mix[k]);
+    }
+    return engine.stageLiveChange(std::move(c), serial);
+}
+
 Preset capturePreset(const Engine& engine, const std::string& name, const std::string& libraryRoot) {
     return capturePartPreset(engine, 0, name, libraryRoot);
 }
@@ -379,6 +563,9 @@ Preset capturePartPreset(const Engine& engine, int part, const std::string& name
     Preset p;
     p.name = name;
     engine.getPartParams(part, p.params.data());
+    const auto sound = engine.partSoundOptions(part);
+    p.morph = sound.morph;
+    p.arpPattern = sound.arpPattern;
     const Relativizer relative(libraryRoot);
     for (int l = 0; l < kNumLayers; ++l) p.samples[l] = relative(engine.partSampleSetPath(part, l));
     for (int t = 0; t < 2; ++t) p.impulses[t] = relative(engine.fxImpulsePath(t));
@@ -396,6 +583,7 @@ bool applyMulti(Engine& engine, const MultiPreset& multi, const std::string& lib
         for (int i = 0; i < Mix::Count; ++i) engine.setPartMix(k, i, multi.mix[k][i]);
     }
     engine.selectPart(multi.selectedPart);
+    engine.requestZonePrograms();
     engine.collectGarbage();
     return true;
 }
@@ -417,14 +605,40 @@ MultiPreset captureMulti(const Engine& engine, const std::string& name, const st
 }
 
 bool applyScalaTuning(Engine& engine, int part, const std::string& sclPath, int root, std::string& error) {
+    if (part < 0 || part >= kNumParts) { error = "part is out of range"; return false; }
     ScalaScale s;
     if (!loadScalaFile(sclPath, s, error)) return false;
     float off[12];
     std::string warn;
     if (!scalaToOffsets(s, root, off, warn)) { error = warn; return false; }
-    for (int i = 0; i < 12; ++i) engine.setPartParam(part, P::TuneC + i, off[i]);
+    engine.setPartTuning(part, off);
     error = warn;  // non-fatal note (clamped degrees), empty if none
     return true;
+}
+
+Json scalaApplyJson(Engine& engine, int part, const std::string& path, int root) {
+    Json result = Json::object();
+    std::string message;
+    const bool ok = applyScalaTuning(engine, part, path, root, message);
+    result.set("ok", ok);
+    result.set(ok ? "warning" : "error", message);
+    return result;
+}
+
+Json scalaInfoJson(const std::string& path) {
+    Json result = Json::object();
+    ScalaScale scale;
+    std::string error;
+    const bool ok = loadScalaFile(path, scale, error);
+    result.set("ok", ok);
+    if (ok) {
+        result.set("desc", scale.description);
+        result.set("notes", (int)scale.cents.size());
+        result.set("period", scale.cents.back());
+    } else {
+        result.set("error", error);
+    }
+    return result;
 }
 
 void addNote(RenderJob& job, double time, double duration, int key, float velocity, uint32_t id) {

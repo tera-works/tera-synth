@@ -23,11 +23,12 @@ int dataBytes(uint8_t status) {
 void Decoder::reset() {
     sysex_.clear();
     inSysex_ = false;
-    running_ = 0;
 }
 
 void Decoder::packet(const uint8_t* p, size_t n, const Sink& out) {
     if (n < 2 || !(p[0] & 0x80)) return;  // not a BLE MIDI packet
+    uint8_t running = 0;  // running status is scoped to this packet
+    bool needsTimestamp = false;
     size_t i = 1;
     while (i < n) {
         const uint8_t b = p[i];
@@ -46,6 +47,7 @@ void Decoder::packet(const uint8_t* p, size_t n, const Sink& out) {
                 out(sysex_.data(), sysex_.size());
                 sysex_.clear();
                 inSysex_ = false;
+                needsTimestamp = true;
                 ++i;
             } else if (c >= 0xF8) {
                 out(&c, 1);
@@ -70,20 +72,22 @@ void Decoder::packet(const uint8_t* p, size_t n, const Sink& out) {
                 }
                 if (c >= 0xF8) {
                     out(&c, 1);
+                    needsTimestamp = true;
                     ++i;
                     continue;
                 }
                 status = c;
-                if (c < 0xF0) running_ = c;
-                else running_ = 0;  // system common cancels running status
+                if (c < 0xF0) running = c;
+                needsTimestamp = c >= 0xF0;
                 ++i;
             } else {
-                if (!running_) { ++i; continue; }
-                status = running_;
+                if (!running) { ++i; continue; }
+                status = running;
+                needsTimestamp = false;
             }
         } else {  // running-status data without a timestamp byte
-            if (!running_) { ++i; continue; }
-            status = running_;
+            if (!running || needsTimestamp) { ++i; continue; }
+            status = running;
         }
         const int nd = dataBytes(status);
         uint8_t m[3] = {status, 0, 0};

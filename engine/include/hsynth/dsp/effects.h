@@ -23,6 +23,7 @@ public:
         for (int i = 0; i < n; ++i) {
             if (enabled) {
                 const float peak = std::max(std::fabs(L[i]), std::fabs(R[i]));
+                if (peak <= threshold && gain_ == 1.0f) continue;
                 const float target = peak > threshold ? threshold / peak : 1.0f;
                 gain_ = target + (gain_ - target) * (target < gain_ ? attack_ : release_);
                 L[i] *= gain_;

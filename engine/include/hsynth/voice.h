@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "hsynth/dsp/physical.h"
 #include "hsynth/common.h"
 #include "hsynth/dsp/envelope.h"
 #include "hsynth/dsp/fm.h"
@@ -25,6 +26,7 @@ namespace hsynth {
 
 // Shared, per-control-block state supplied by the engine.
 struct VoiceContext {
+    uint64_t renderFrame = 0;
     const float* params = nullptr;
     float sampleRate = 48000.0f;
     float pitchBendSemis = 0.0f;   // already scaled by bend range
@@ -83,6 +85,8 @@ private:
     }
     // streamed samples (streaming.h): level 0, never looping
     const float* frames0(int c, int64_t first, int count) const;  // contiguous frames or nullptr
+    bool stereoFrames(int64_t first, int count, const float*& l, const float*& r) const;
+    void sampleAt2(int64_t idx, float f, float& l, float& r) const;
     float streamAt(int c, int64_t idx) const;
     StreamSlot* stream_ = nullptr;
     DiskStreamer* streamer_ = nullptr;
@@ -104,8 +108,7 @@ private:
         if (cut_ < 0) {
             const int64_t idx = (int64_t)pos;
             const float f = (float)(pos - (double)idx);
-            l = sampleAt(0, idx, f);
-            r = sampleAt(1, idx, f);
+            sampleAt2(idx, f, l, r);
             return;
         }
         sincAt2(pos, l, r);
@@ -136,11 +139,12 @@ public:
     static constexpr int kMaxRegionsPerLayer = 4;
 
     void prepare(float sampleRate);
+    void prepareSlot(PhysicalPool& pool, int slot);
 
     // glideFrom: pitch (key, may be fractional) to glide from, < 0 = no glide
-    void start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom = -1.0f);
+    void start(const Event& e, const VoiceContext& ctx, uint64_t age, float random, float glideFrom = -1.0f, float splitGain = 1.0f);
     // Legato: move to a new note without retriggering (gliding if glide > 0).
-    void legatoTo(const Event& e, bool glide);
+    void legatoTo(const Event& e, bool glide, float splitGain = 1.0f);
     float currentPitch() const { return (float)key_ + glide_; }
     void release();
     void steal();            // fast fade-out
@@ -155,6 +159,7 @@ public:
     // another program (song program changes): the old part parameters (the
     // engine owns the copy) and the voice's own sample sets. Cleared by start().
     const float* paramsOverride = nullptr;
+    int liveGhost = -1;  // audio-owned SST cohort, -1 for ordinary voices
     const float* params(const VoiceContext& ctx) const { return paramsOverride ? paramsOverride : ctx.params; }
     static constexpr float kSwapFadeSeconds = 0.006f;
     // SFZ exclusive groups: groups started by this voice (returns count), and
@@ -176,6 +181,7 @@ public:
     uint64_t age() const { return age_; }
     float level() const { return ampEnv_.level(); }
     bool sustained = false;  // note-off arrived while sustain pedal / hold active
+    bool strummed = false;
     bool hold = false;       // per-note hard-press hold (NoteHold event)
     int part = 0;            // owning part (multi-timbral), set by the engine
     // sample-accurate scheduling inside one process() block (engine): the
@@ -189,11 +195,16 @@ public:
 private:
     void deactivate();       // voice ends: every PCM player stops (disk streams are released)
     void stopPlayers();
+    void stopPhysical();
+    PhysicalPool* physicalPool_ = nullptr;
+    PhysicalLayerState* physical_[kNumLayers] = {};
+    int voiceSlot_ = 0;
+    float vintagePitch_ = 0, vintageCutoff_ = 0, vintageEnv_ = 0, vintagePan_ = 0;
     static constexpr int kMaxReleaseRegions = 4;
     struct Layer {
         LayerType type = LayerType::Off;
         VaOsc osc1, osc2, sub;
-        VaOsc ss1[6], ss2[6];        // supersaw side oscillators
+        float ss1[6] = {}, ss2[6] = {};  // supersaw side phases
         OrganVoice organ;
         FmVoice fm;
         WtOsc wt;
@@ -235,6 +246,8 @@ private:
     int pcmKey_ = 60;        // key the PCM regions were started for (legato keeps the samples)
     float glide_ = 0.0f;     // portamento offset in semitones, decays to 0
     float velocity_ = 1.0f;
+    float splitGain_ = 1.0f, splitTarget_ = 1.0f, splitStep_ = 0.0f;
+    int splitFrames_ = 0;
     float random_ = 0.0f;
     uint64_t age_ = 0;
     float timeSinceOn_ = 0.0f;

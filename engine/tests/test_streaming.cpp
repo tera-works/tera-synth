@@ -164,9 +164,9 @@ TEST(streaming_flac_direct) {
     CHECK(rms(l1, 0, 9000) > 0.001);
     CHECK(d < 1e-6);
     CHECK(st.streamUnderruns == 0);
-    // the compressed file once per streamed voice, not decoded PCM
+    // The four retriggers share one compressed read and decoded frames.
     const auto fileSize = (uint64_t)fs::file_size(utf8Path(flac));
-    CHECK(st.streamBytesRead > 0 && st.streamBytesRead % fileSize == 0);
+    CHECK(st.streamBytesRead == fileSize);
 }
 
 TEST(streaming_only_where_it_is_safe) {
@@ -231,4 +231,50 @@ TEST(streaming_real_time_pace_and_set_swap) {
     CHECK(maxStreams == 8);
     CHECK(st.streamUnderruns == 0);
     CHECK(st.streamVoices == 0);  // the swap stopped the old notes
+}
+
+TEST(streaming_leading_silence_trim) {
+    OptionsGuard guard;
+    const std::string dir = tempDir("stream_trim");
+    // 2.0 s stereo WAV with 600 frames (~12.5 ms) of leading silence before onset
+    constexpr int kSr = 48000;
+    constexpr int kSilence = 600;
+    constexpr int kLen = 2 * kSr;
+    std::vector<float> l((size_t)kLen, 0.0f), r((size_t)kLen, 0.0f);
+    for (int i = kSilence; i < kLen; ++i) {
+        const float v = 0.5f * std::sin(2.0f * 3.14159265f * 440.0f * (float)(i - kSilence) / kSr);
+        l[(size_t)i] = v;
+        r[(size_t)i] = -v;
+    }
+    std::string err;
+    CHECK(writeWav(dir + "/pad.wav", l, &r, kSr, false, err));
+    writeText(dir + "/pad.sfz", "<region> sample=pad.wav lokey=0 hikey=127 pitch_keycenter=60\n");
+    writeText(dir + "/pad_loop.sfz",
+              "<region> sample=pad.wav lokey=0 hikey=127 pitch_keycenter=60 loop_mode=loop_continuous loop_start=200 loop_end=20000\n");
+
+    setMode(StreamMode::Off);
+    auto ram = load(dir + "/pad.sfz");
+    CHECK(ram && ram->regions.size() == 1);
+    // onset is at kSilence + 1 (since sin(0) == 0); lead-in is 8 frames -> trimmed near 593
+    CHECK(ram->regions[0].offset >= kSilence - 12 && ram->regions[0].offset <= kSilence);
+
+    // Looped sample whose loopStart (200) is before onset must NOT trim past loopStart
+    auto looped = load(dir + "/pad_loop.sfz");
+    CHECK(looped && looped->regions.size() == 1);
+    CHECK(looped->regions[0].offset == 0);
+
+    // Streamed WAV trims to the exact same offset and renders bit-identically to RAM
+    setMode(StreamMode::Always);
+    auto st = load(dir + "/pad.sfz");
+    CHECK(st && st->regions.size() == 1);
+    CHECK(st->regions[0].offset == ram->regions[0].offset);
+    std::vector<float> ramL, ramR, stL, stR;
+    render(std::move(ram), ramL, ramR, nullptr, 0.5);
+    EngineStats stats{};
+    render(std::move(st), stL, stR, &stats, 0.5);
+    CHECK(stats.streamUnderruns == 0);
+    float maxDiff = 0.0f;
+    for (size_t i = 0; i < ramL.size(); ++i)
+        maxDiff = std::max(maxDiff, std::max(std::fabs(ramL[i] - stL[i]), std::fabs(ramR[i] - stR[i])));
+    CHECK(maxDiff == 0.0f);
 }

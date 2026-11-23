@@ -34,6 +34,13 @@ TEST(ble_midi_short_messages_and_running_status) {
     CHECK(out2.size() == 2 && out2[0].size() == 2 && out2[1][1] == 99);
     // not a BLE packet
     CHECK(decodeAll(d, {{0x10, 0x90, 60, 1}}).empty());
+    // System messages preserve running status, but the next message needs a timestamp.
+    const Msgs system = decodeAll(d, {{0xBF, 0xFE, 0x90, 60, 1, 0xFF, 0xF1, 5,
+        61, 2, 0x80, 62, 3, 0x81, 0xF8, 63, 4, 0x82, 64, 5,
+        0x83, 0xF0, 0x7D, 0x84, 0xF7, 65, 6, 0x85, 66, 7}});
+    CHECK((system == Msgs{{0x90, 60, 1}, {0xF1, 5}, {0x90, 62, 3}, {0xF8},
+        {0x90, 64, 5}, {0xF0, 0x7D, 0xF7}, {0x90, 66, 7}}));
+    CHECK(decodeAll(d, {{0x80, 0x80, 67, 8}}).empty());  // no status in this packet
 }
 
 TEST(ble_midi_sysex_round_trip_over_packets) {

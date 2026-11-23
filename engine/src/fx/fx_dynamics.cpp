@@ -189,20 +189,23 @@ void LimiterFx::prepare(float sr) {
     const int maxLa = (int)(0.006f * sr) + 2;
     dl_.allocate(maxLa);
     dr_.allocate(maxLa);
-    win_.assign((size_t)maxLa + 1, 1.0f);
+    int size = 1;
+    while (size <= maxLa) size <<= 1;
+    minima_.resize((size_t)size);
+    minMask_ = size - 1;
     reset();
 }
 void LimiterFx::reset() {
     dl_.clear(); dr_.clear();
-    std::fill(win_.begin(), win_.end(), 1.0f);
-    winPos_ = 0;
+    minHead_ = minCount_ = 0;
+    clock_ = 0;
     gain_ = 1.0f;
 }
 void LimiterFx::update(const float* p, const FxContext&) {
     inGain_ = dbToLin(p[limiter::Input]);
     ceil_ = dbToLin(p[limiter::Ceiling]);
     const int la = std::max(1, (int)(p[limiter::Lookahead] * 0.001f * sr_));
-    if (la != la_) { la_ = la; std::fill(win_.begin(), win_.end(), 1.0f); }
+    if (la != la_) { la_ = la; minHead_ = minCount_ = 0; }
     att_ = tauCoef((float)la_ / sr_ / 3.0f, sr_);
     rel_ = tauCoef(p[limiter::Release] * 0.001f, sr_);
 }
@@ -211,11 +214,21 @@ void LimiterFx::process(float* L, float* R, int n, const FxContext&) {
     for (int i = 0; i < n; ++i) {
         const float l = L[i] * inGain_, r = R[i] * inGain_;
         const float pk = std::max(std::fabs(l), std::fabs(r));
-        win_[(size_t)winPos_] = pk > ceil_ ? ceil_ / pk : 1.0f;
-        winPos_ = (winPos_ + 1) % W;
-        // minimum required gain over the look-ahead window (W is small)
-        float target = 1.0f;
-        for (int k = 0; k < W; ++k) target = std::min(target, win_[(size_t)k]);
+        // Maintain the minimum in the lookahead window. A newer lower or
+        // equal gain outlives every gain it replaces at the back of the queue.
+        if (minCount_ && clock_ - minima_[(size_t)minHead_].frame >= (uint32_t)W) {
+            minHead_ = (minHead_ + 1) & minMask_;
+            --minCount_;
+        }
+        if (pk > ceil_) {
+            const float required = ceil_ / pk;
+            while (minCount_ && minima_[(size_t)((minHead_ + minCount_ - 1) & minMask_)].gain >= required)
+                --minCount_;
+            minima_[(size_t)((minHead_ + minCount_) & minMask_)] = {required, clock_};
+            ++minCount_;
+        }
+        ++clock_;
+        const float target = minCount_ ? minima_[(size_t)minHead_].gain : 1.0f;
         gain_ = target + (gain_ - target) * (target < gain_ ? att_ : rel_);
         dl_.push(l);
         dr_.push(r);

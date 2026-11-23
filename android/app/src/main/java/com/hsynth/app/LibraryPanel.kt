@@ -1,19 +1,35 @@
 package com.hsynth.app
 
+import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.text.InputType
+import android.text.TextUtils
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
 import android.widget.EditText
+import android.widget.GridView
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.ScrollView
+import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONObject
 import java.io.File
 
 /**
  * Library screen: presets (load / save / import / export), sample sources
- * (WAV / SFZ import via the Storage Access Framework) and the message log.
+ * (WAV / SFZ import via the Storage Access Framework). Obsidian browser:
+ * one compact filter + search + actions row, category chips in their own
+ * colors, a 3-column grid of color-coded preset cards and a collapsible
+ * samples column on the right.
  */
 class LibraryPanel(private val a: MainActivity) {
     companion object {
@@ -24,113 +40,234 @@ class LibraryPanel(private val a: MainActivity) {
         const val REQ_IR_CAB = 105
         const val REQ_IR_REVERB = 106
         const val REQ_WAVETABLE = 107
+        /** Phase 6: "+ IMPORT" - any supported file, routed by extension. */
+        const val REQ_IMPORT_ANY = 174
+        private val SOUNDBANK_EXTS = setOf("sf2", "sf3", "dls", "gig")
     }
 
     val view: LinearLayout
-    private val presetList = FlowLayout(a)
-    private val sampleList = Ui.column(a)
+    private val presetGrid: GridView
+    private val presetEmpty: TextView
+    private val sampleListView: ListView
+    private val sampleEmpty: TextView
+    private var filteredPresets: List<Library.Entry> = emptyList()
+    private var displayedSamples: List<Library.Entry> = emptyList()
+    private lateinit var presetAdapter: BaseAdapter
+    private lateinit var sampleAdapter: BaseAdapter
     /** MIDI files: app-specific external storage, so they can be copied in over USB (adb push) without permissions. Played on the Player tab. */
     val songDir: File = (a.getExternalFilesDir("midi") ?: File(a.filesDir, "midi")).apply { mkdirs() }
     private var presetFilter = 0  // 0 all, 1 factory, 2 user, 3 favourites
     private var category = ""     // "" = every category
     private var search = ""
-    private val categoryRow = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+    private val categoryRow = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private val favorites: MutableSet<String> = (a.prefs.getStringSet("favorites", emptySet()) ?: emptySet()).toMutableSet()
+    private val samplesColumn: LinearLayout
+    private var samplesShown = a.prefs.getBoolean("libSamplesShown", true)
+    private val samplesToggle: LedButton
+
+    /** Compact Obsidian button for the dense landscape rows. */
+    private fun compact(b: LedButton, size: Float = 12.5f): LedButton {
+        val d = { v: Int -> Ui.dp(a, v) }
+        b.textSize = size
+        b.minHeight = d(32)
+        b.minimumHeight = d(32)
+        b.setPadding(b.paddingLeft, d(4), d(10), d(4))
+        return b
+    }
 
     init {
         val d = { v: Int -> Ui.dp(a, v) }
-        // presets: filter + actions, then a grid of preset cards
-        val presets = Hw.Section(a, "Presets")
+        val portrait = Ui.portrait(a)
+
+        // ---- filter pills + search + actions (one row in landscape)
         val filters = mutableListOf<LedButton>()
-        // filters and actions; they wrap onto two lines on narrow screens
-        val head: android.view.ViewGroup = if (Ui.portrait(a)) FlowLayout(a, Ui.dp(a, 6), Ui.dp(a, 6))
-            else LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
-        listOf("All", "Factory", "User", "★").forEachIndexed { i, t ->
-            val b = LedButton(a, t).apply { textSize = 13.5f; setOnClickListener { presetFilter = i; filters.forEachIndexed { k, x -> x.lit = k == i }; refreshPresets() } }
-            b.lit = i == 0
-            filters += b
-            head.addView(b, if (head is LinearLayout) LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6) } else android.view.ViewGroup.LayoutParams(-2, -2))
+        val pills = listOf("All" to Hw.MOD_OSC, "Factory" to Hw.MOD_OSC, "User" to Hw.MOD_OSC, "★" to Hw.MOD_FILTER)
+        val pillViews = pills.mapIndexed { i, (t, c) ->
+            compact(LedButton(a, t, tr = t != "★", led = false, accentColor = c)).apply {
+                lit = i == presetFilter
+                // a color span survives LedButton's touch / lit text color resets
+                if (t == "★") text = android.text.SpannableString("★").apply {
+                    setSpan(android.text.style.ForegroundColorSpan(Hw.MOD_FILTER), 0, length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                setOnClickListener {
+                    presetFilter = i
+                    filters.forEachIndexed { k, x -> x.lit = k == i }
+                    refreshPresets()
+                }
+            }.also { filters += it }
         }
-        if (head is LinearLayout) head.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
-        for ((t, f) in listOf<Pair<String, () -> Unit>>("Save as…" to { promptSave() },
-                "Import…" to { open(REQ_PRESET_IMPORT, "application/json", "*/*") }, "Export…" to { export() }))
-            head.addView(LedButton(a, t, led = false).apply { textSize = 13.5f; setOnClickListener { f() } },
-                if (head is LinearLayout) LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) } else android.view.ViewGroup.LayoutParams(-2, -2))
-        presets.body.addView(head)
-        // search + categories
-        val searchBox = android.widget.EditText(a).apply {
+        val searchBox = EditText(a).apply {
             hint = L10n.t("Search name / category / tag")
-            textSize = 14f
+            textSize = 13f
             setTextColor(Hw.LCD_FG)
-            setHintTextColor(Hw.LCD_DIM)
+            setHintTextColor(Hw.INK_DIM)
             typeface = Hw.MONO
             background = Hw.lcdBg(a)
-            setPadding(d(10), d(6), d(10), d(6))
+            setPadding(d(10), d(5), d(10), d(5))
+            minHeight = d(32)
+            minimumHeight = d(32)
             isSingleLine = true
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE or android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, af: Int) {}
                 override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
                 override fun afterTextChanged(s: android.text.Editable?) { search = s?.toString()?.trim() ?: ""; refreshPresets() }
             })
         }
-        presets.body.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(8) })
-        presets.body.addView(android.widget.HorizontalScrollView(a).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(categoryRow)
-        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
-        presets.body.addView(ScrollView(a).apply { addView(presetList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
+        // "+ IMPORT" takes presets (.json) AND every sound format (.sf2 .sf3 .dls .gig .dspreset .dslibrary .syx .wt .vitaltable .wav)
+        val actions = listOf<Triple<String, Boolean, () -> Unit>>(
+            Triple("Save", true) { promptSave() },
+            Triple("Export", true) { export() },
+            Triple(L10n.t("+ IMPORT"), false) { importAny() },
+            Triple(L10n.t("⬇ PACKS"), false) { a.openSheet(a.soundPackSheet) },
+        ).map { (t, tr, f) ->
+            compact(LedButton(a, t, tr = tr, led = false, accentColor = if (tr) Hw.MOD_OSC else Hw.MOD_FX), 12f).apply {
+                setPadding(d(8), d(4), d(8), d(4))
+                setOnClickListener { f() }
+            }
+        }
 
-        // samples
-        val samples = Hw.Section(a, "Samples (WAV / SFZ)")
-        samples.body.addView(Ui.buttonRow(a,
-            Ui.button(a, "+ WAV…") { open(REQ_WAV, "audio/*", "audio/wav", "audio/x-wav") },
-            Ui.button(a, "+ SFZ…") {
-                @Suppress("DEPRECATION")
-                a.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_SFZ_TREE)
-            },
-            Ui.button(a, "SFZ info") { showSfzInfo() },
-        ))
-        samples.body.addView(ScrollView(a).apply { addView(sampleList) }, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(8) })
+        val head: View = if (!portrait) LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            for (b in pillViews) addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+            addView(searchBox, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = d(4); marginEnd = d(4) })
+            for (b in actions) addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(4) })
+        } else Ui.column(a).apply {
+            addView(FlowLayout(a, d(4), d(4)).apply {
+                for (b in pillViews) addView(b, ViewGroup.LayoutParams(-2, -2))
+                for (b in actions) addView(b, ViewGroup.LayoutParams(-2, -2))
+            }, LinearLayout.LayoutParams(-1, -2))
+            addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+        }
 
-        view = if (Ui.portrait(a)) LinearLayout(a).apply {
+        // ---- category chips + samples column toggle
+        samplesToggle = compact(LedButton(a, "Samples", accentColor = Hw.MOD_OSC), 12f).apply {
+            lit = samplesShown
+            setOnClickListener { setSamplesShown(!samplesShown) }
+        }
+        val catLine = LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(HorizontalScrollView(a).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(categoryRow)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(samplesToggle, LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(6) })
+        }
+
+        presetEmpty = Ui.text(a, "(no presets match)", 13f, Hw.INK_DIM).apply {
+            visibility = View.GONE
+            setPadding(d(4), d(12), d(4), d(4))
+        }
+        presetAdapter = object : BaseAdapter() {
+            override fun getCount() = filteredPresets.size
+            override fun getItem(pos: Int) = filteredPresets[pos]
+            override fun getItemId(pos: Int) = pos.toLong()
+            override fun getView(pos: Int, convertView: View?, parent: ViewGroup): View {
+                val h = (convertView?.tag as? PresetHolder) ?: createPresetHolder()
+                bindPresetHolder(h, filteredPresets[pos])
+                return h.card
+            }
+        }
+        presetGrid = GridView(a).apply {
+            numColumns = gridColumns()
+            horizontalSpacing = d(6)
+            verticalSpacing = d(6)
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            isVerticalScrollBarEnabled = false
+            selector = ColorDrawable(Color.TRANSPARENT)
+            adapter = presetAdapter
+        }
+
+        val presetsColumn = Ui.column(a).apply {
+            addView(head, LinearLayout.LayoutParams(-1, -2))
+            addView(catLine, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(6) })
+            addView(presetEmpty, LinearLayout.LayoutParams(-1, -2))
+            addView(presetGrid, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(6) })
+        }
+
+        // ---- samples column (recycled ListView so 100s of SFZ/WAV never stall UI)
+        val samples = Hw.Section(a, "Samples (WAV / SFZ)", accent = Hw.MOD_OSC)
+        samples.body.addView(LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val bs = listOf<Pair<String, () -> Unit>>(
+                "+ WAV" to { open(REQ_WAV, "audio/*", "audio/wav", "audio/x-wav") },
+                "● SAMPLE" to { a.openSampleWizard() },   // B2 live sampling wizard
+                "+ SFZ" to {
+                    @Suppress("DEPRECATION")
+                    a.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_SFZ_TREE)
+                },
+                "SFZ info" to { showSfzInfo() },
+            )
+            bs.forEachIndexed { i, (t, f) ->
+                addView(compact(LedButton(a, t, led = false), 12f).apply {
+                    setPadding(d(4), d(4), d(4), d(4))
+                    setOnClickListener { f() }
+                }, LinearLayout.LayoutParams(0, -2, 1f).apply { if (i < bs.size - 1) marginEnd = d(4) })
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        sampleEmpty = Ui.text(a, "(no samples yet)", 13f, Ui.DIM).apply {
+            visibility = View.GONE
+            setPadding(d(4), d(8), d(4), d(4))
+        }
+        sampleAdapter = object : BaseAdapter() {
+            override fun getCount() = displayedSamples.size
+            override fun getItem(pos: Int) = displayedSamples[pos]
+            override fun getItemId(pos: Int) = pos.toLong()
+            override fun getView(pos: Int, convertView: View?, parent: ViewGroup): View {
+                val h = (convertView?.tag as? SampleHolder) ?: createSampleHolder()
+                bindSampleHolder(h, displayedSamples[pos])
+                return h.card
+            }
+        }
+        sampleListView = ListView(a).apply {
+            divider = ColorDrawable(Color.TRANSPARENT)
+            dividerHeight = d(4)
+            isVerticalScrollBarEnabled = false
+            selector = ColorDrawable(Color.TRANSPARENT)
+            adapter = sampleAdapter
+        }
+        samples.body.addView(sampleEmpty, LinearLayout.LayoutParams(-1, -2))
+        samples.body.addView(sampleListView, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = d(6) })
+        samplesColumn = samples
+
+        view = if (portrait) LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(d(10), d(8), d(10), d(8))
-            addView(presets, LinearLayout.LayoutParams(-1, 0, 2f).apply { bottomMargin = d(10) })
+            setBackgroundColor(Hw.CHASSIS)
+            setPadding(d(8), d(6), d(8), d(6))
+            addView(presetsColumn, LinearLayout.LayoutParams(-1, 0, 2f).apply { bottomMargin = d(8) })
             addView(samples, LinearLayout.LayoutParams(-1, 0, 1f))
         } else LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(d(10), d(8), d(10), d(8))
-            addView(presets, LinearLayout.LayoutParams(0, -1, 2f).apply { marginEnd = d(10) })
-            addView(samples, LinearLayout.LayoutParams(0, -1, 1f))
+            setBackgroundColor(Hw.CHASSIS)
+            setPadding(d(8), d(6), d(8), d(6))
+            addView(presetsColumn, LinearLayout.LayoutParams(0, -1, 7f))
+            addView(samples, LinearLayout.LayoutParams(0, -1, 3f).apply { marginStart = d(8) })
         }
-        // the section bodies stretch so their lists can scroll
-        presets.body.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        // the section body stretches so its list can scroll
         samples.body.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
-        a.addPresetListener { refreshPresets() }
+        samples.visibility = if (samplesShown) View.VISIBLE else View.GONE
+        a.addPresetListener { presetAdapter.notifyDataSetChanged() }
+    }
+
+    private fun gridColumns(): Int = if (Ui.portrait(a)) 2 else if (samplesShown) 3 else 4
+
+    private fun setSamplesShown(on: Boolean) {
+        samplesShown = on
+        samplesToggle.lit = on
+        samplesColumn.visibility = if (on) View.VISIBLE else View.GONE
+        a.prefs.edit().putBoolean("libSamplesShown", on).apply()
+        presetGrid.numColumns = gridColumns()
     }
 
     /** Song list now lives on the Player tab. */
     fun refreshSongs() {}
 
+    @Suppress("unused")
     private fun playSong(f: File) {
-        a.selectTab(4)
+        a.selectTab(5)
         a.player.playFile(f)
-    }
-
-    /** A preset card (grid) or a list row. */
-    private fun item(title: String, sub: String, highlight: Boolean, onClick: () -> Unit, onLong: (() -> Unit)? = null, width: Int = -1): View {
-        val d = { v: Int -> Ui.dp(a, v) }
-        return Ui.column(a).apply {
-            setPadding(d(10), d(8), d(10), d(8))
-            background = if (highlight) Hw.lcdBg(a) else Hw.keyBg(a)
-            addView(Ui.text(a, title, 14f, if (highlight) Hw.LCD_FG else Ui.TEXT, bold = highlight, tr = false).apply { maxLines = 1 })
-            if (sub.isNotEmpty()) addView(Ui.text(a, sub, 11f, if (highlight) Hw.LCD_DIM else Ui.DIM, tr = false).apply { maxLines = 2 })
-            setOnClickListener { onClick() }
-            if (onLong != null) setOnLongClickListener { onLong(); true }
-            layoutParams = if (width > 0) android.view.ViewGroup.LayoutParams(width, -2)
-                           else LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(6) }
-        }
     }
 
     private var presetEntries: List<Library.Entry> = emptyList()
@@ -165,43 +302,136 @@ class LibraryPanel(private val a: MainActivity) {
         return search.lowercase().split(Regex("\\s+")).all { it in hay }
     }
 
-    /** Category chips with counts (from the presets the other filters leave). */
+    /** Category chips in their category colors, with counts (from the presets the other filters leave). */
     private fun refreshCategories() {
         val d = { v: Int -> Ui.dp(a, v) }
         categoryRow.removeAllViews()
         val counts = presetEntries.filter { e ->
             !(presetFilter == 1 && e.user || presetFilter == 2 && !e.user || presetFilter == 3 && e.file.path !in favorites)
         }.groupingBy { it.category.ifEmpty { "—" } }.eachCount().toSortedMap()
-        fun chip(label: String, key: String) = LedButton(a, label, tr = false).apply {
-            textSize = 12f
-            minHeight = d(32)
+        fun chip(label: String, key: String, color: Int) = compact(LedButton(a, label, tr = false, accentColor = color), 11.5f).apply {
+            minHeight = d(28)
+            minimumHeight = d(28)
             lit = category == key
             setOnClickListener { category = if (category == key) "" else key; refreshPresets() }
         }
-        categoryRow.addView(chip(L10n.t("All") + " ${counts.values.sum()}", ""), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
-        for ((c, n) in counts) categoryRow.addView(chip("$c $n", if (c == "—") "" else c), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+        categoryRow.addView(chip(L10n.t("All") + " ${counts.values.sum()}", "", Hw.MOD_OSC), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+        for ((c, n) in counts) {
+            val key = if (c == "—") "" else c
+            categoryRow.addView(chip("$c $n", key, if (key.isEmpty()) Hw.INK_DIM else Hw.categoryColor(c)),
+                LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(4) })
+        }
     }
 
     private fun refreshPresets() {
         refreshCategories()
-        presetList.removeAllViews()
-        for (e in presetEntries) {
-            if (!matches(e)) continue
-            val fav = e.file.path in favorites
-            val sub = listOfNotNull(e.category.ifEmpty { null }, if (e.user) "User" else "Factory",
-                e.tags.takeIf { it.isNotEmpty() }?.joinToString(" ") { "#$it" }).joinToString(" · ")
-            presetList.addView(item((if (fav) "★ " else "") + e.title, sub, e.file == a.currentPreset,
-                { a.loadPreset(e.file) }, { presetMenu(e) }, width = cardWidth()))
-        }
+        filteredPresets = presetEntries.filter { matches(it) }
+        presetEmpty.visibility = if (filteredPresets.isEmpty() && presetEntries.isNotEmpty()) View.VISIBLE else View.GONE
+        presetAdapter.notifyDataSetChanged()
     }
 
-    /** Cards fill the list's width: as many ~180 dp columns as fit. */
-    private fun cardWidth(): Int {
-        val w = presetList.width
-        if (w <= 0) { presetList.post { if (presetList.width > 0) refreshPresets() }; return Ui.dp(a, 172) }
-        val gap = Ui.dp(a, 10)
-        val cols = maxOf(1, (w + gap) / (Ui.dp(a, 180) + gap))
-        return (w - (cols - 1) * gap) / cols
+    private fun toggleFavorite(e: Library.Entry): Boolean {
+        val fav = e.file.path in favorites
+        if (fav) favorites.remove(e.file.path) else favorites.add(e.file.path)
+        a.prefs.edit().putStringSet("favorites", favorites.toSet()).apply()
+        return !fav
+    }
+
+    private class PresetHolder(
+        val card: LibraryCard,
+        val title: TextView,
+        val cat: TextView,
+        val badge: TextView,
+        val badgeBg: GradientDrawable,
+        val tags: TextView,
+        val star: TextView
+    )
+
+    private fun createPresetHolder(): PresetHolder {
+        val d = { v: Int -> Ui.dp(a, v) }
+        val card = LibraryCard(a, Hw.MOD_OSC, false)
+        val texts = Ui.column(a)
+        val title = TextView(a).apply {
+            textSize = 13.5f
+            typeface = Hw.BOLD
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        texts.addView(title)
+        val sub = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val cat = TextView(a).apply {
+            textSize = 10.5f
+            typeface = Hw.BOLD
+            maxLines = 1
+        }
+        sub.addView(cat, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(5) })
+        val badgeBg = GradientDrawable().apply { cornerRadius = Hw.dp(a, 3f) }
+        val badge = TextView(a).apply {
+            textSize = 8.5f
+            typeface = Hw.BOLD
+            letterSpacing = 0.08f
+            background = badgeBg
+            setPadding(d(4), 0, d(4), 0)
+            maxLines = 1
+        }
+        sub.addView(badge, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(5) })
+        val tags = TextView(a).apply {
+            textSize = 10f
+            typeface = Hw.LABEL
+            setTextColor(Hw.INK_DIM)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        sub.addView(tags, LinearLayout.LayoutParams(0, -2, 1f))
+        texts.addView(sub, LinearLayout.LayoutParams(-1, -2).apply { topMargin = d(2) })
+        card.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val star = TextView(a).apply {
+            textSize = 17f
+            gravity = Gravity.CENTER
+            isClickable = true
+        }
+        card.addView(star, LinearLayout.LayoutParams(d(30), d(40)))
+        val holder = PresetHolder(card, title, cat, badge, badgeBg, tags, star)
+        card.tag = holder
+        return holder
+    }
+
+    private fun bindPresetHolder(h: PresetHolder, e: Library.Entry) {
+        val catColor = if (e.category.isEmpty()) Hw.INK_DIM else Hw.categoryColor(e.category)
+        val active = e.file == a.currentPreset
+        h.card.setStyle(catColor, active)
+        h.title.text = e.title
+        h.title.setTextColor(if (active) Color.WHITE else Hw.SILK)
+        if (e.category.isNotEmpty()) {
+            h.cat.visibility = View.VISIBLE
+            h.cat.text = e.category
+            h.cat.setTextColor(catColor)
+        } else {
+            h.cat.visibility = View.GONE
+        }
+        h.badge.text = L10n.t(if (e.user) "User" else "Factory").let { if (it.any { c -> c.code > 0x2FF }) it else it.uppercase() }
+        h.badge.setTextColor(if (e.user) Hw.MOD_GOOD else Hw.ENGRAVE)
+        h.badgeBg.setStroke(1, if (e.user) Hw.withAlpha(Hw.MOD_GOOD, 140) else Hw.PANEL_EDGE)
+        if (e.tags.isNotEmpty()) {
+            h.tags.visibility = View.VISIBLE
+            h.tags.text = e.tags.joinToString(" ") { "#$it" }
+        } else {
+            h.tags.visibility = View.GONE
+        }
+        val fav = e.file.path in favorites
+        h.star.text = if (fav) "★" else "☆"
+        h.star.setTextColor(if (fav) Hw.MOD_FILTER else Hw.INK_DIM)
+        h.star.setOnClickListener {
+            val on = toggleFavorite(e)
+            if (presetFilter == 3) refreshPresets()
+            else {
+                h.star.text = if (on) "★" else "☆"
+                h.star.setTextColor(if (on) Hw.MOD_FILTER else Hw.INK_DIM)
+            }
+        }
+        h.card.setOnClickListener { a.loadPreset(e.file) }
+        h.card.setOnLongClickListener { presetMenu(e); true }
     }
 
     /** Long press on a preset: favourite on / off, delete (user presets). */
@@ -211,8 +441,7 @@ class LibraryPanel(private val a: MainActivity) {
         if (e.user) items += L10n.t("Delete")
         AlertDialog.Builder(a).setTitle(e.title).setItems(items.toTypedArray()) { _, w ->
             if (w == 0) {
-                if (fav) favorites.remove(e.file.path) else favorites.add(e.file.path)
-                a.prefs.edit().putStringSet("favorites", favorites.toSet()).apply()
+                toggleFavorite(e)
                 refreshPresets()
             } else confirmDelete(e.file)
         }.show()
@@ -220,15 +449,79 @@ class LibraryPanel(private val a: MainActivity) {
 
     private fun refreshSamples() = refresh()
 
-    private fun buildSamples() {
-        sampleList.removeAllViews()
-        val sources = sampleEntries ?: return
-        if (sources.isEmpty()) sampleList.addView(Ui.text(a, "(no samples yet)", 13f, Ui.DIM))
-        for (e in sources) {
-            sampleList.addView(item(e.file.name, e.title + if (e.user) L10n.t("  · long-press to delete") else "", false,
-                { chooseLayer(e.file) },
-                if (e.user) ({ confirmDelete(e.file) }) else null))
+    private class SampleHolder(val card: LibraryCard, val name: TextView, val sub: TextView, val ext: TextView)
+
+    private fun createSampleHolder(): SampleHolder {
+        val d = { v: Int -> Ui.dp(a, v) }
+        val row = LibraryCard(a, Hw.MOD_OSC, false, compact = true)
+        val name = TextView(a).apply {
+            textSize = 12.5f
+            typeface = Hw.BOLD
+            setTextColor(Hw.SILK)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.MIDDLE
         }
+        val sub = TextView(a).apply {
+            textSize = 10f
+            typeface = Hw.LABEL
+            setTextColor(Hw.INK_DIM)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        row.addView(Ui.column(a).apply { addView(name); addView(sub) }, LinearLayout.LayoutParams(0, -2, 1f))
+        val ext = TextView(a).apply {
+            textSize = 9f
+            typeface = Hw.BOLD
+            letterSpacing = 0.08f
+        }
+        row.addView(ext, LinearLayout.LayoutParams(-2, -2).apply { marginStart = d(4); marginEnd = d(4) })
+        val holder = SampleHolder(row, name, sub, ext)
+        row.tag = holder
+        return holder
+    }
+
+    /** Badge text + colour of a sample-column row by file type. */
+    private fun kindOf(f: File): Pair<String, Int> {
+        val ext = f.extension.lowercase()
+        return when {
+            ext == "sfz" -> "SFZ" to Hw.MOD_OSC
+            ext in SOUNDBANK_EXTS -> ext.uppercase() to Hw.MOD_ENV
+            ext == "dspreset" || ext == "dslibrary" -> "DS" to Hw.MOD_FILTER
+            ext == "syx" -> "DX7" to Hw.MOD_FILTER
+            ext == "wt" || ext == "vitaltable" || isWavetableWav(f) -> "WT" to Hw.MOD_GOOD
+            ext == "flac" -> "FLAC" to Hw.MOD_FX
+            else -> "WAV" to Hw.MOD_FX
+        }
+    }
+
+    private fun isWavetableWav(f: File): Boolean =
+        f.extension.equals("wav", true) && f.path.replace('\\', '/').contains("/library/user/wt/")
+
+    private fun bindSampleHolder(h: SampleHolder, e: Library.Entry) {
+        val (label, col) = kindOf(e.file)
+        h.card.setStyle(col, false)
+        h.name.text = e.file.name
+        h.sub.text = e.title + if (e.user) L10n.t("  · long-press to delete") else ""
+        h.ext.text = label
+        h.ext.setTextColor(col)
+        h.card.setOnClickListener { openSampleEntry(e.file) }
+        if (e.user) h.card.setOnLongClickListener { confirmDelete(e.file); true }
+        else h.card.setOnLongClickListener(null)
+    }
+
+    /** Tap on a sample row: plain samples pick a layer, every other format opens its importer sheet. */
+    private fun openSampleEntry(f: File) {
+        val ext = f.extension.lowercase()
+        val formatted = ext in SOUNDBANK_EXTS || ext == "dspreset" || ext == "dslibrary" || ext == "syx" ||
+            ext == "wt" || ext == "vitaltable" || isWavetableWav(f)
+        if (formatted && a.formatImporter.open(f)) return
+        chooseLayer(f)
+    }
+
+    private fun buildSamples() {
+        displayedSamples = sampleEntries ?: emptyList()
+        sampleEmpty.visibility = if (displayedSamples.isEmpty()) View.VISIBLE else View.GONE
+        sampleAdapter.notifyDataSetChanged()
     }
 
     private fun chooseLayer(file: File) {
@@ -250,7 +543,10 @@ class LibraryPanel(private val a: MainActivity) {
     fun pickImpulse(target: Int) = open(if (target == 0) REQ_IR_CAB else REQ_IR_REVERB, "audio/*", "audio/wav", "audio/x-wav")
 
     fun pickSamplesFor(layer: Int) {
-        val sources = sampleEntries ?: a.library.sampleSources()
+        val sources = (sampleEntries ?: a.library.sampleSources()).filter { e ->
+            val x = e.file.extension.lowercase()
+            (x == "sfz" || x == "wav" || x == "flac") && !isWavetableWav(e.file)
+        }
         if (sources.isEmpty()) {
             a.log("no samples in the library yet — import WAV or SFZ on the Library tab", Ui.WARN)
             return
@@ -259,6 +555,63 @@ class LibraryPanel(private val a: MainActivity) {
             .setTitle(L10n.f("Samples for layer %s", "ABC"[layer].toString()))
             .setItems(sources.map { it.title }.toTypedArray()) { _, which -> a.loadSamples(layer, sources[which].file) }
             .show()
+    }
+
+    // ------------------------------------------------------------------ Phase 6: "+ IMPORT" and installed packs
+
+    private fun importAny() {
+        ActivityResults.register(REQ_IMPORT_ANY) { data -> data?.data?.let { routeImport(it) } }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"   // .sf2 .sf3 .dls .gig .dspreset .dslibrary .syx .wt .vitaltable have no registered MIME type
+        }
+        @Suppress("DEPRECATION")
+        a.startActivityForResult(intent, REQ_IMPORT_ANY)
+    }
+
+    private fun routeImport(uri: android.net.Uri) {
+        val name = FormatFiles.displayName(a, uri)
+        when (name.substringAfterLast('.', "").lowercase()) {
+            "json" -> onActivityResult(REQ_PRESET_IMPORT, Intent().setData(uri))
+            "wav" -> onActivityResult(REQ_WAV, Intent().setData(uri))   // plain sample (wavetables: EDIT > OSC > WT)
+            "sfz" -> a.log("An .sfz needs its samples: use + SFZ to import the whole folder", Ui.WARN)
+            else -> a.formatImporter.handle(uri)   // sf2 sf3 dls gig dspreset dslibrary syx wt vitaltable
+        }
+    }
+
+    /**
+     * SoundPackSheet OPEN: open the first loadable file of an installed pack
+     * (SF2/SF3/DLS/GIG -> bank picker, .syx -> DX7 browser, .dspreset/.dslibrary/.wt/.vitaltable -> [FormatImporter],
+     * .sfz -> Layer A PCM + back to Stage, plain WAV/FLAC -> the LIB sample list).
+     */
+    fun openInstalledPack(pack: SoundPack, dir: File) {
+        val order = listOf("sf2", "sf3", "dls", "gig", "dspreset", "dslibrary", "sfz", "syx", "wt", "vitaltable", "wav", "flac")
+        val listed = a.soundPackSheet.catalog.installedInfo(pack)?.primaryFiles().orEmpty()
+        val candidates = listed.ifEmpty {
+            dir.walkTopDown().maxDepth(4).filter { it.isFile && !it.name.startsWith(".") }.toList()
+        }.filter { it.extension.lowercase() in order }
+        val first = candidates.minWithOrNull(
+            compareBy<File> { if (pack.format.equals(it.extension, true)) -1 else order.indexOf(it.extension.lowercase()) }
+                .thenBy { it.path.lowercase() })
+        if (first == null) {
+            a.log("${pack.name}: no loadable file found in ${dir.name}", Ui.WARN)
+            return
+        }
+        refresh()
+        when (first.extension.lowercase()) {
+            "sfz" -> {
+                a.selectTab(0)
+                a.loadSamples(0, first) { a.log("${pack.name}: ${first.name} -> layer A") }
+            }
+            "wav", "flac" -> {
+                if (isWavetableWav(first)) a.formatImporter.open(first)
+                else {
+                    a.selectTab(3)
+                    a.log("${pack.name}: samples are listed under Samples in LIB")
+                }
+            }
+            else -> if (!a.formatImporter.open(first)) a.log("${pack.name}: cannot open ${first.name}", Ui.WARN)
+        }
     }
 
     private fun confirmDelete(file: File) {
@@ -321,9 +674,9 @@ class LibraryPanel(private val a: MainActivity) {
             .show()
     }
 
-    fun onActivityResult(req: Int, data: Intent?) {
+    fun onActivityResult(requestCode: Int, data: Intent?) {
         data ?: return
-        when (req) {
+        when (requestCode) {
             REQ_WAVETABLE -> {
                 val uri = data.data ?: return
                 val layer = wavetableLayer
@@ -349,7 +702,7 @@ class LibraryPanel(private val a: MainActivity) {
             }
             REQ_IR_CAB, REQ_IR_REVERB -> {
                 val uri = data.data ?: return
-                val target = if (req == REQ_IR_CAB) 0 else 1
+                val target = if (requestCode == REQ_IR_CAB) 0 else 1
                 a.loader.execute {
                     try {
                         val f = a.library.importIr(uri)
@@ -442,5 +795,45 @@ class LibraryPanel(private val a: MainActivity) {
                 }
             }
         }
+    }
+}
+
+/**
+ * Obsidian library card: dark surface (raised + 1 dp cyan border when [active]),
+ * crisp 3 dp left accent bar in the category color. Zero allocations in drawing.
+ */
+@SuppressLint("ViewConstructor")
+class LibraryCard(ctx: Context, accent: Int, active: Boolean, compact: Boolean = false) : LinearLayout(ctx) {
+    private val d = resources.displayMetrics.density
+    private val bar = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent }
+    private val bg = Hw.panelBg(ctx,
+        color = if (active) Hw.PANEL_RAISED else Hw.PANEL,
+        stroke = if (active) Hw.MOD_OSC else Hw.PANEL_EDGE,
+        radiusDp = 6f)
+    private val strokePx = Hw.dp(ctx, 1f).toInt().coerceAtLeast(1)
+
+    init {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        isClickable = true
+        isLongClickable = true
+        background = bg
+        val v = ((if (compact) 5f else 7f) * d).toInt()
+        setPadding((12f * d).toInt(), v, (4f * d).toInt(), v)
+        minimumHeight = ((if (compact) 36f else 48f) * d).toInt()
+        setWillNotDraw(false)
+    }
+
+    fun setStyle(accent: Int, active: Boolean) {
+        bar.color = accent
+        bg.setColor(if (active) Hw.PANEL_RAISED else Hw.PANEL)
+        bg.setStroke(strokePx, if (active) Hw.MOD_OSC else Hw.PANEL_EDGE)
+        invalidate()
+    }
+
+    override fun dispatchDraw(c: Canvas) {
+        super.dispatchDraw(c)
+        val inset = 6f * d
+        c.drawRoundRect(2f * d, inset, 5f * d, height - inset, 1.5f * d, 1.5f * d, bar)
     }
 }

@@ -102,6 +102,10 @@ Json presetToValue(const Preset& p, ParamFilter filter) {
         params.set(info.name, (double)v);
     }
     root.set("params", params);
+    if (filter != ParamFilter::Global) {
+        if (p.morph.count) root.set("morphB", morphToJson(p.morph));
+        if (!p.arpPattern.isDefault()) root.set("arpPattern", arpPatternToJson(p.arpPattern));
+    }
     return root;
 }
 
@@ -156,6 +160,10 @@ bool presetFromValue(const Json& root, Preset& out, std::string& error) {
         if (s != v && info.kind == ParamKind::Float) p.warnings.push_back(kv.first + " clamped to range");
         p.params[(size_t)id] = s;
     }
+    if (const auto* morph = root.find("morphB"); morph && !morphFromJson(*morph, p.morph))
+        p.warnings.push_back("invalid morphB ignored");
+    if (const auto* pattern = root.find("arpPattern"); pattern && !arpPatternFromJson(*pattern, p.arpPattern))
+        p.warnings.push_back("invalid arpPattern ignored");
     out = std::move(p);
     return true;
 }
@@ -315,9 +323,9 @@ bool savePresetFile(const std::string& path, const Preset& p, std::string& error
     return true;
 }
 
-std::string paramMetadataJson() {
+namespace {
+std::string metadataJson(const std::vector<ParamInfo>& table) {
     Json arr = Json::array();
-    const auto& table = paramTable();
     for (int i = 0; i < (int)table.size(); ++i) {
         const ParamInfo& info = table[(size_t)i];
         Json o = Json::object();
@@ -342,5 +350,9 @@ std::string paramMetadataJson() {
     }
     return arr.dump(0);
 }
+}  // namespace
+
+std::string paramMetadataJson() { return metadataJson(paramTable()); }
+std::string mixMetadataJson() { return metadataJson(partMixTable()); }
 
 }  // namespace hsynth

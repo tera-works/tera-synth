@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "hsynth/common.h"
+#include "hsynth/dsp/simd.h"
 #include "hsynth/params.h"
 
 namespace hsynth {
@@ -102,6 +103,47 @@ public:
         }
         return v;
     }
+    // For oscillators that do not drive hard sync.
+    float tickSaw(float dt) { return tickSawPhase(phase_, dt); }
+
+    static float tickSawPhase(float& phase, float dt) {
+        dt = clampf(dt, 0.0f, 0.45f);
+        const float t = phase;
+        const float v = 2.0f * t - 1.0f - polyBlep(t, dt);
+        phase = t + dt;
+        if (phase >= 1.0f) phase -= 1.0f;
+        return v;
+    }
+
+    // Four independent supersaw sides. Keep the scalar accumulation order.
+    static void tickSaw4(float* phases, const float* ratios, float dt, float gain, float* out) {
+#if defined(HSYNTH_SIMD_NEON) && defined(__aarch64__)
+        const float32x4_t one = vdupq_n_f32(1.0f);
+        const float32x4_t zero = vdupq_n_f32(0.0f);
+        const float32x4_t inc = vmaxq_f32(zero, vminq_f32(vdupq_n_f32(0.45f), vmulq_n_f32(vld1q_f32(ratios), dt)));
+        const auto phase = simd::load(phases);
+        const float32x4_t t = phase.v;
+        const uint32x4_t lo = vcltq_f32(t, inc);
+        const uint32x4_t hi = vcgtq_f32(t, vsubq_f32(one, inc));
+        const uint32x4_t edge = vorrq_u32(lo, hi);
+        float32x4_t blep = zero;
+        if (vmaxvq_u32(edge)) {
+            const float32x4_t num = vbslq_f32(hi, vsubq_f32(t, one), t);
+            const float32x4_t x = vdivq_f32(num, vbslq_f32(edge, inc, one));
+            const float32x4_t sq = vmulq_f32(x, x);
+            const float32x4_t a = vsubq_f32(vsubq_f32(vaddq_f32(x, x), sq), one);
+            const float32x4_t b = vaddq_f32(vaddq_f32(vaddq_f32(sq, x), x), one);
+            blep = vbslq_f32(edge, vbslq_f32(lo, a, b), zero);
+        }
+        const float32x4_t v = vsubq_f32(vsubq_f32(vaddq_f32(t, t), one), blep);
+        vst1q_f32(out, vmulq_n_f32(v, gain));
+        const auto next = phase + simd::f4{inc};
+        simd::store(phases, simd::subIfGe(next, next, simd::f4{one}));
+#else
+        for (int i = 0; i < 4; ++i) out[i] = tickSawPhase(phases[i], dt * ratios[i]) * gain;
+#endif
+    }
+
     // hard sync: did the last tick wrap, and how far past the wrap (in samples)
     bool wrapped() const { return wrapped_; }
     float wrapFrac() const { return wrapFrac_; }
